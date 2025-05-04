@@ -1,0 +1,13 @@
+package com.shedule.x.dto.enums;
+
+public enum StrategyKey {
+    HUNGARIAN,
+    SUCCESSIVE_SHORTEST_PATH,
+    AUCTION_APPROXIMATE,
+    COST_SCALING,
+    LOAD_BALANCING,
+    BLOSSOM,
+    GREEDY_SYMMETRIC,
+    WEIGHTED_GREEDY_SYMMETRIC,
+    NO_WEIGHT_MAXIMUM
+}

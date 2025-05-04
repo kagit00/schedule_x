@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.9.xsd">
+
+    <changeSet id="create-matches-table" author="grok">
+        <createTable tableName="matches">
+            <column name="id" type="uuid">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="group_id" type="varchar(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="user_id_1" type="varchar(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="user_id_2" type="varchar(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="compatibility_score" type="double">
+                <constraints nullable="false"/>
+            </column>
+            <column name="matched_at" type="timestamp"/>
+        </createTable>
+    </changeSet>
+
+    <changeSet id="create-potential-matches-table" author="grok">
+        <createTable tableName="potential_matches">
+            <column name="id" type="uuid">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="group_id" type="varchar(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="user_id_1" type="varchar(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="user_id_2" type="varchar(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="compatibility_score" type="double">
+                <constraints nullable="false"/>
+            </column>
+            <column name="matched_at" type="timestamp"/>
+        </createTable>
+    </changeSet>
+
+    <changeSet id="rename-columns-to-align-with-pojos" author="grok">
+        <renameColumn
+                tableName="matches"
+                oldColumnName="user_id_1"
+                newColumnName="reference_id"
+                columnDataType="varchar(255)"/>
+        <renameColumn
+                tableName="matches"
+                oldColumnName="user_id_2"
+                newColumnName="matched_reference_id"
+                columnDataType="varchar(255)"/>
+        <renameColumn
+                tableName="potential_matches"
+                oldColumnName="user_id_1"
+                newColumnName="reference_id"
+                columnDataType="varchar(255)"/>
+        <renameColumn
+                tableName="potential_matches"
+                oldColumnName="user_id_2"
+                newColumnName="matched_reference_id"
+                columnDataType="varchar(255)"/>
+    </changeSet>
+
+    <changeSet id="rename-matches-to-perfect-matches" author="grok">
+        <renameTable
+                oldTableName="matches"
+                newTableName="perfect_matches"/>
+    </changeSet>
+
+    <changeSet id="add-indexes-potential-matches" author="grok">
+        <createIndex indexName="idx_potential_match_group_id" tableName="potential_matches">
+            <column name="group_id"/>
+        </createIndex>
+        <createIndex indexName="idx_potential_match_reference_id" tableName="potential_matches">
+            <column name="reference_id"/>
+        </createIndex>
+        <createIndex indexName="idx_potential_match_matched_reference_id" tableName="potential_matches">
+            <column name="matched_reference_id"/>
+        </createIndex>
+        <createIndex indexName="idx_potential_match_participants" tableName="potential_matches">
+            <column name="reference_id"/>
+            <column name="matched_reference_id"/>
+        </createIndex>
+    </changeSet>
+
+    <changeSet id="add-domain-id-matches" author="grok">
+        <addColumn tableName="perfect_matches">
+            <column name="domain_id" type="UUID">
+                <constraints nullable="false"/>
+            </column>
+        </addColumn>
+        <addColumn tableName="potential_matches">
+            <column name="domain_id" type="UUID">
+                <constraints nullable="false"/>
+            </column>
+        </addColumn>
+        <!-- Backfill domain_id for existing data -->
+        <sql>
+            UPDATE perfect_matches SET domain_id = (SELECT id FROM domains WHERE name = 'flairbit') WHERE domain_id IS NULL;
+            UPDATE potential_matches SET domain_id = (SELECT id FROM domains WHERE name = 'flairbit') WHERE domain_id IS NULL;
+        </sql>
+        <createIndex indexName="idx_perfect_match_domain_group" tableName="perfect_matches">
+            <column name="domain_id"/>
+            <column name="group_id"/>
+        </createIndex>
+        <createIndex indexName="idx_potential_match_domain_group" tableName="potential_matches">
+            <column name="domain_id"/>
+            <column name="group_id"/>
+        </createIndex>
+        <addForeignKeyConstraint
+                baseTableName="perfect_matches"
+                baseColumnNames="domain_id"
+                referencedTableName="domains"
+                referencedColumnNames="id"
+                constraintName="fk_perfect_matches_domain"/>
+        <addForeignKeyConstraint
+                baseTableName="potential_matches"
+                baseColumnNames="domain_id"
+                referencedTableName="domains"
+                referencedColumnNames="id"
+                constraintName="fk_potential_matches_domain"/>
+    </changeSet>
+</databaseChangeLog>

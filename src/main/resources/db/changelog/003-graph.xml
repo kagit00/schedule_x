@@ -1,0 +1,397 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                        https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.3.xsd">
+
+    <changeSet id="graph-00" author="gsss">
+        <createTable tableName="graph_jobs">
+            <column name="id" type="UUID">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="group_id" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="status" type="VARCHAR(50)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="total_nodes" type="INTEGER" defaultValueNumeric="0"/>
+            <column name="processed_nodes" type="INTEGER" defaultValueNumeric="0"/>
+            <column name="error_message" type="TEXT"/>
+            <column name="started_at" type="VARCHAR(50)"/>
+            <column name="ended_at" type="VARCHAR(50)"/>
+            <column name="completed_at" type="TIMESTAMP"/>
+        </createTable>
+        <createIndex tableName="graph_jobs" indexName="idx_graph_jobs_group_id">
+            <column name="group_id"/>
+        </createIndex>
+    </changeSet>
+
+    <changeSet id="graph-01" author="gsss">
+        <createTable tableName="nodes">
+            <column name="id" type="UUID">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="type" type="VARCHAR(50)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="reference_id" type="VARCHAR(255)">
+                <constraints nullable="false" unique="true"/>
+            </column>
+            <column name="created_at" type="TIMESTAMP" defaultValueComputed="CURRENT_TIMESTAMP"/>
+            <column name="group_id" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+    </changeSet>
+
+    <changeSet id="graph-02" author="gsss">
+        <createTable tableName="node_metadata">
+            <column name="node_id" type="UUID">
+                <constraints nullable="false"/>
+            </column>
+            <column name="meta_key" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="meta_value" type="TEXT"/>
+        </createTable>
+        <addPrimaryKey tableName="node_metadata" columnNames="node_id, meta_key" constraintName="pk_node_metadata"/>
+        <addForeignKeyConstraint baseColumnNames="node_id" baseTableName="node_metadata" constraintName="fk_node_metadata_node" referencedColumnNames="id" referencedTableName="nodes"/>
+    </changeSet>
+
+    <changeSet id="graph-03" author="gsss">
+        <createTable tableName="edges">
+            <column name="id" type="UUID">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="from_node" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="to_node" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="weight" type="DOUBLE PRECISION" defaultValueNumeric="1"/>
+            <column name="metadata" type="JSONB"/>
+            <column name="created_at" type="TIMESTAMP" defaultValueComputed="CURRENT_TIMESTAMP"/>
+            <column name="updated_at" type="TIMESTAMP" defaultValueComputed="CURRENT_TIMESTAMP"/>
+        </createTable>
+        <addForeignKeyConstraint baseTableName="edges" baseColumnNames="from_node" referencedTableName="nodes" referencedColumnNames="reference_id" constraintName="fk_edges_from_node"/>
+        <addForeignKeyConstraint baseTableName="edges" baseColumnNames="to_node" referencedTableName="nodes" referencedColumnNames="reference_id" constraintName="fk_edges_to_node"/>
+    </changeSet>
+
+    <changeSet id="graph-04" author="gsss">
+        <createIndex tableName="nodes" indexName="idx_nodes_type">
+            <column name="type"/>
+        </createIndex>
+        <createIndex tableName="nodes" indexName="idx_nodes_group_id">
+            <column name="group_id"/>
+        </createIndex>
+        <createIndex tableName="nodes" indexName="idx_nodes_group_type">
+            <column name="group_id"/>
+            <column name="type"/>
+        </createIndex>
+        <createIndex tableName="edges" indexName="idx_edges_weight">
+            <column name="weight"/>
+        </createIndex>
+        <createIndex tableName="edges" indexName="idx_edges_from_node">
+            <column name="from_node"/>
+        </createIndex>
+        <createIndex tableName="edges" indexName="idx_edges_to_node">
+            <column name="to_node"/>
+        </createIndex>
+    </changeSet>
+
+    <changeSet id="graph-01-rename-table" author="gsss">
+        <renameTable oldTableName="graph_jobs" newTableName="nodes_export_jobs"/>
+    </changeSet>
+
+    <!-- New changesets -->
+    <changeSet id="graph-05-create-domains" author="grok">
+        <createTable tableName="domains">
+            <column name="id" type="UUID">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="name" type="VARCHAR(255)">
+                <constraints nullable="false" unique="true"/>
+            </column>
+            <column name="industry" type="VARCHAR(50)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="created_at" type="TIMESTAMP" defaultValueComputed="CURRENT_TIMESTAMP"/>
+        </createTable>
+        <insert tableName="domains">
+            <column name="id" valueComputed="gen_random_uuid()"/>
+            <column name="name" value="flairbit"/>
+            <column name="industry" value="dating"/>
+            <column name="created_at" valueComputed="CURRENT_TIMESTAMP"/>
+        </insert>
+
+    </changeSet>
+
+    <changeSet id="graph-06-add-domain-id" author="grok">
+        <addColumn tableName="nodes">
+            <column name="domain_id" type="UUID">
+                <constraints nullable="false"/>
+            </column>
+        </addColumn>
+        <addColumn tableName="nodes_export_jobs">
+            <column name="domain_id" type="UUID">
+                <constraints nullable="false"/>
+            </column>
+        </addColumn>
+        <!-- Backfill domain_id for existing data -->
+        <sql>
+            UPDATE nodes SET domain_id = (SELECT id FROM domains WHERE name = 'flairbit') WHERE domain_id IS NULL;
+            UPDATE nodes_export_jobs SET domain_id = (SELECT id FROM domains WHERE name = 'flairbit') WHERE domain_id IS NULL;
+        </sql>
+        <createIndex tableName="nodes" indexName="idx_nodes_domain_group">
+            <column name="domain_id"/>
+            <column name="group_id"/>
+        </createIndex>
+        <createIndex tableName="nodes_export_jobs" indexName="idx_nodes_export_jobs_domain_group">
+            <column name="domain_id"/>
+            <column name="group_id"/>
+        </createIndex>
+        <addForeignKeyConstraint baseTableName="nodes" baseColumnNames="domain_id" referencedTableName="domains" referencedColumnNames="id" constraintName="fk_nodes_domain"/>
+        <addForeignKeyConstraint baseTableName="nodes_export_jobs" baseColumnNames="domain_id" referencedTableName="domains" referencedColumnNames="id" constraintName="fk_nodes_export_jobs_domain"/>
+    </changeSet>
+
+    <changeSet id="graph-07-create-matching-groups" author="grok">
+        <createTable tableName="matching_groups">
+            <column name="id" type="UUID">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="domain_id" type="UUID">
+                <constraints nullable="false"/>
+            </column>
+            <column name="group_id" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="industry" type="VARCHAR(50)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="is_cost_based" type="BOOLEAN">
+                <constraints nullable="false"/>
+            </column>
+            <column name="is_symmetric" type="BOOLEAN">
+                <constraints nullable="false"/>
+            </column>
+            <column name="created_at" type="TIMESTAMP" defaultValueComputed="CURRENT_TIMESTAMP"/>
+        </createTable>
+        <addUniqueConstraint tableName="matching_groups" columnNames="domain_id,group_id" constraintName="uk_matching_groups_domain_group"/>
+        <addForeignKeyConstraint baseTableName="matching_groups" baseColumnNames="domain_id" referencedTableName="domains" referencedColumnNames="id" constraintName="fk_matching_groups_domain"/>
+        <insert tableName="matching_groups">
+            <column name="id" valueComputed="gen_random_uuid()"/>
+            <column name="domain_id" valueComputed="(SELECT id FROM domains WHERE name = 'flairbit')"/>
+            <column name="group_id" value="marriage-default"/>
+            <column name="industry" value="dating"/>
+            <column name="is_cost_based" valueBoolean="true"/>
+            <column name="is_symmetric" valueBoolean="true"/>
+            <column name="created_at" valueComputed="CURRENT_TIMESTAMP"/>
+        </insert>
+        <insert tableName="matching_groups">
+            <column name="id" valueComputed="gen_random_uuid()"/>
+            <column name="domain_id" valueComputed="(SELECT id FROM domains WHERE name = 'flairbit')"/>
+            <column name="group_id" value="bff-default"/>
+            <column name="industry" value="dating"/>
+            <column name="is_cost_based" valueBoolean="false"/>
+            <column name="is_symmetric" valueBoolean="true"/>
+            <column name="created_at" valueComputed="CURRENT_TIMESTAMP"/>
+        </insert>
+        <insert tableName="matching_groups">
+            <column name="id" valueComputed="gen_random_uuid()"/>
+            <column name="domain_id" valueComputed="(SELECT id FROM domains WHERE name = 'flairbit')"/>
+            <column name="group_id" value="dating-default"/>
+            <column name="industry" value="dating"/>
+            <column name="is_cost_based" valueBoolean="true"/>
+            <column name="is_symmetric" valueBoolean="true"/>
+            <column name="created_at" valueComputed="CURRENT_TIMESTAMP"/>
+        </insert>
+        <insert tableName="matching_groups">
+            <column name="id" valueComputed="gen_random_uuid()"/>
+            <column name="domain_id" valueComputed="(SELECT id FROM domains WHERE name = 'flairbit')"/>
+            <column name="group_id" value="random-interact-default"/>
+            <column name="industry" value="dating"/>
+            <column name="is_cost_based" valueBoolean="false"/>
+            <column name="is_symmetric" valueBoolean="true"/>
+            <column name="created_at" valueComputed="CURRENT_TIMESTAMP"/>
+        </insert>
+    </changeSet>
+
+    <changeSet id="graph-08-create-matching-configurations" author="grok">
+        <createTable tableName="matching_configurations">
+            <column name="id" type="UUID">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="group_id" type="UUID">
+                <constraints nullable="false"/>
+            </column>
+            <column name="node_count_min" type="INTEGER">
+                <constraints nullable="false"/>
+            </column>
+            <column name="node_count_max" type="INTEGER"/>
+            <column name="algorithm_type" type="VARCHAR(50)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="priority" type="INTEGER">
+                <constraints nullable="false"/>
+            </column>
+            <column name="timeout_ms" type="INTEGER"/>
+            <column name="created_at" type="TIMESTAMP" defaultValueComputed="CURRENT_TIMESTAMP"/>
+        </createTable>
+        <addUniqueConstraint tableName="matching_configurations" columnNames="group_id,node_count_min,node_count_max,priority" constraintName="uk_matching_configurations"/>
+        <addForeignKeyConstraint baseTableName="matching_configurations" baseColumnNames="group_id" referencedTableName="matching_groups" referencedColumnNames="id" constraintName="fk_matching_configurations_group"/>
+    </changeSet>
+
+    <changeSet id="graph-09-update-nodes-export-jobs" author="grok">
+        <addColumn tableName="nodes_export_jobs">
+            <column name="export_id" type="VARCHAR(255)">
+                <constraints nullable="false" unique="true"/>
+            </column>
+        </addColumn>
+        <createIndex tableName="nodes_export_jobs" indexName="idx_nodes_export_jobs_export_id">
+            <column name="export_id"/>
+        </createIndex>
+    </changeSet>
+
+    <changeSet id="drop-export-id-column-2025042" author="yourname">
+        <dropColumn tableName="nodes_export_jobs" columnName="export_id"/>
+    </changeSet>
+
+    <changeSet id="20250424-1-add-matching-columns" author="chatgpt">
+        <addColumn tableName="matching_configurations">
+            <column name="cost_based" type="BOOLEAN" defaultValueBoolean="false">
+                <constraints nullable="false"/>
+            </column>
+            <column name="real_time" type="BOOLEAN" defaultValueBoolean="false">
+                <constraints nullable="false"/>
+            </column>
+            <column name="match_type" type="VARCHAR(50)">
+                <constraints nullable="false"/>
+            </column>
+        </addColumn>
+    </changeSet>
+
+    <changeSet id="20250425-add-is-active-to-domains" author="your_name">
+        <addColumn tableName="domains">
+            <column name="is_active" type="BOOLEAN" defaultValueBoolean="true">
+                <constraints nullable="false"/>
+            </column>
+        </addColumn>
+    </changeSet>
+
+        <changeSet id="1" author="your-username">
+            <createTable tableName="matching_algorithms">
+                <column name="id" type="varchar(255)">
+                    <constraints primaryKey="true" nullable="false"/>
+                </column>
+                <column name="name" type="varchar(255)">
+                    <constraints nullable="false"/>
+                </column>
+                <column name="description" type="varchar(255)">
+                    <constraints nullable="true"/>
+                </column>
+            </createTable>
+        </changeSet>
+
+        <!-- Insert the matching algorithm records -->
+        <changeSet id="2" author="your-username">
+            <insert tableName="matching_algorithms">
+                <column name="id" value="blossomMatchingStrategy"/>
+                <column name="name" value="Blossom Matching Strategy"/>
+                <column name="description" value="An advanced matching strategy for large-scale graphs using Blossom algorithm"/>
+            </insert>
+        </changeSet>
+
+        <changeSet id="3" author="your-username">
+            <insert tableName="matching_algorithms">
+                <column name="id" value="costScalingMatchingStrategy"/>
+                <column name="name" value="Cost Scaling Matching Strategy"/>
+                <column name="description" value="A strategy that uses cost scaling for bipartite matching"/>
+            </insert>
+        </changeSet>
+
+        <changeSet id="4" author="your-username">
+            <insert tableName="matching_algorithms">
+                <column name="id" value="greedySymmetricMatchingStrategy"/>
+                <column name="name" value="Greedy Symmetric Matching Strategy"/>
+                <column name="description" value="A greedy algorithm for symmetric matching in bipartite graphs"/>
+            </insert>
+        </changeSet>
+
+        <changeSet id="5" author="your-username">
+            <insert tableName="matching_algorithms">
+                <column name="id" value="hopcroftKarpMatchingStrategy"/>
+                <column name="name" value="Hopcroft-Karp Matching Strategy"/>
+                <column name="description" value="A fast matching algorithm for bipartite graphs, based on the Hopcroft-Karp algorithm"/>
+            </insert>
+        </changeSet>
+
+        <changeSet id="6" author="your-username">
+            <insert tableName="matching_algorithms">
+                <column name="id" value="hungarianMatchingStrategy"/>
+                <column name="name" value="Hungarian Matching Strategy"/>
+                <column name="description" value="An efficient algorithm for solving the assignment problem"/>
+            </insert>
+        </changeSet>
+
+        <changeSet id="7" author="your-username">
+            <insert tableName="matching_algorithms">
+                <column name="id" value="loadBalancingStrategy"/>
+                <column name="name" value="Load Balancing Strategy"/>
+                <column name="description" value="A strategy focused on distributing work evenly across nodes"/>
+            </insert>
+        </changeSet>
+
+        <changeSet id="8" author="your-username">
+            <insert tableName="matching_algorithms">
+                <column name="id" value="successiveShortestPathStrategy"/>
+                <column name="name" value="Successive Shortest Path Strategy"/>
+                <column name="description" value="An algorithm that iteratively finds shortest paths for matching"/>
+            </insert>
+        </changeSet>
+
+        <changeSet id="9" author="your-username">
+            <insert tableName="matching_algorithms">
+                <column name="id" value="weightedGreedySymmetricMatchingStrategy"/>
+                <column name="name" value="Weighted Greedy Symmetric Matching Strategy"/>
+                <column name="description" value="A variant of the Greedy Symmetric Matching with weighted nodes"/>
+            </insert>
+        </changeSet>
+
+        <changeSet id="10" author="your-username">
+            <insert tableName="matching_algorithms">
+                <column name="id" value="noWeightMaximumBipartiteMatchingStrategy"/>
+                <column name="name" value="No Weight Maximum Bipartite Matching Strategy"/>
+                <column name="description" value="A maximum bipartite matching algorithm with no weights"/>
+            </insert>
+        </changeSet>
+
+    <changeSet id="13-drop-type-add-id" author="your-username">
+
+        <dropColumn tableName="matching_configurations" columnName="algorithm_type"/>
+
+        <addColumn tableName="matching_configurations">
+            <column name="algorithm_id" type="varchar(100)">
+                <constraints nullable="false"/>
+            </column>
+        </addColumn>
+
+        <addForeignKeyConstraint
+                baseTableName="matching_configurations"
+                baseColumnNames="algorithm_id"
+                referencedTableName="matching_algorithms"
+                referencedColumnNames="id"
+                constraintName="fk_matching_config_algorithm"/>
+    </changeSet>
+
+    <changeSet id="20250426-drop-match-type-column" author="yourname">
+        <dropColumn tableName="matching_configurations" columnName="match_type"/>
+    </changeSet>
+
+    <changeSet id="graph-56-rename-table" author="gsss">
+        <renameTable oldTableName="nodes_export_jobs" newTableName="nodes_import_jobs"/>
+    </changeSet>
+
+</databaseChangeLog>
