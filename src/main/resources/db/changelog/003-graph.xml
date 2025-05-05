@@ -394,4 +394,18 @@
         <renameTable oldTableName="nodes_export_jobs" newTableName="nodes_import_jobs"/>
     </changeSet>
 
+    <changeSet id="graph-03-revert-node-metadata" author="gsss">
+        <dropPrimaryKey tableName="node_metadata" constraintName="pk_node_metadata_composite"/>
+
+        <dropIndex tableName="node_metadata" indexName="idx_node_metadata_node_id"/>
+        <dropIndex tableName="node_metadata" indexName="idx_node_metadata_group_id"/>
+        <dropIndex tableName="node_metadata" indexName="idx_node_metadata_meta_key"/>
+
+        <dropColumn tableName="node_metadata" columnName="group_id"/>
+
+        <addPrimaryKey tableName="node_metadata"
+                       columnNames="node_id, meta_key"
+                       constraintName="pk_node_metadata"/>
+    </changeSet>
+
 </databaseChangeLog>
