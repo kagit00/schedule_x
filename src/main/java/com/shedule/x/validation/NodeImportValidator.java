@@ -30,8 +30,8 @@ public final class NodeImportValidator {
 
     public static boolean isValidPayloadForCostBasedNodes(NodeExchange message) {
         return message != null
-                && message.getFileContent() != null
-                && !message.getFileContent().isBlank()
+                && message.getFilePath() != null
+                && !message.getFilePath().isBlank()
                 && message.getFileName() != null
                 && !message.getFileName().isBlank();
     }

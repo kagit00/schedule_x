@@ -1,12 +1,10 @@
 package com.shedule.x.matcher.strategies;
 
 import com.shedule.x.dto.MatchResult;
-import com.shedule.x.models.Graph;
 import com.shedule.x.models.PotentialMatchEntity;
 import com.shedule.x.repo.PotentialMatchRepository;
 import com.shedule.x.service.GraphBuilder;
 import com.shedule.x.utils.basic.DefaultValuesPopulator;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;

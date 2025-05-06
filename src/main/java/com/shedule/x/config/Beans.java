@@ -32,9 +32,9 @@ public class Beans {
     @Bean(name = "matchesTransferExecutor")
     public TaskExecutor matchesTransferExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        executor.setCorePoolSize(10);
-        executor.setMaxPoolSize(20);
-        executor.setQueueCapacity(50);
+        executor.setCorePoolSize(4);
+        executor.setMaxPoolSize(8);
+        executor.setQueueCapacity(100);
         executor.setThreadNamePrefix("MatchesTransfer-");
         executor.initialize();
         return executor;

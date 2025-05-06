@@ -11,7 +11,5 @@ import java.util.UUID;
 
 @Repository
 public interface PotentialMatchRepository extends JpaRepository<PotentialMatchEntity, UUID> {
-    List<PotentialMatchEntity> findByGroupId(String groupId);
-
     Page<PotentialMatchEntity> findByGroupId(String groupId, Pageable pageable);
 }

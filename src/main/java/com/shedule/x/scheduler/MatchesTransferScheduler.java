@@ -3,8 +3,7 @@ package com.shedule.x.scheduler;
 
 import com.shedule.x.exceptions.BadRequestException;
 import com.shedule.x.models.Domain;
-import com.shedule.x.processors.MatchTransferProcessor;
-import com.shedule.x.repo.DomainRepository;
+import com.shedule.x.processors.MatchTransferService;
 import com.shedule.x.repo.MatchingGroupRepository;
 import com.shedule.x.service.DomainService;
 import lombok.RequiredArgsConstructor;
@@ -12,6 +11,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Profile;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+
 import java.util.List;
 
 
@@ -21,7 +21,7 @@ import java.util.List;
 @RequiredArgsConstructor
 public class MatchesTransferScheduler {
 
-    private final MatchTransferProcessor matchTransferProcessor;
+    private final MatchTransferService matchTransferService;
     private final MatchingGroupRepository matchingGroupRepository;
     private final DomainService domainService;
 
@@ -35,7 +35,7 @@ public class MatchesTransferScheduler {
             List<String> groupIds = matchingGroupRepository.findGroupIdsByDomainId(domain.getId());
             log.info("Starting matching for domain={} with groups: {}", domain.getName(), groupIds);
             for (String groupId : groupIds) {
-                matchTransferProcessor.processGroup(groupId, domain);
+                matchTransferService.processGroup(groupId, domain);
             }
         }
     }

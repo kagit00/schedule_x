@@ -61,7 +61,7 @@ public final class CsvExporter {
         }
     }
 
-    private static <T> String[] mapEntityToCsvRow(T entity, String groupIdentifier, List<FieldExtractor<T>> fieldExtractors) {
+    public static <T> String[] mapEntityToCsvRow(T entity, String groupIdentifier, List<FieldExtractor<T>> fieldExtractors) {
         String[] row = new String[fieldExtractors.size() + 1];
         row[0] = sanitizeValue(groupIdentifier);
         for (int i = 0; i < fieldExtractors.size(); i++) {

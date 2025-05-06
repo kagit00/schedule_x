@@ -24,7 +24,7 @@ import static com.shedule.x.utils.basic.BasicUtility.parseFileContent;
 public class ImportJobServiceImpl implements ImportJobService {
 
     private final NodesImportJobRepository nodesImportJobRepository;
-    private final NodesImportProcessor nodesImportProcessor;
+    private final NodesImportService nodesImportService;
     private static final int BATCH_SIZE = 1000;
 
 
@@ -33,12 +33,11 @@ public class ImportJobServiceImpl implements ImportJobService {
     public void startNodesImport(NodeExchange payload) {
         if (NodeImportValidator.isValidPayloadForCostBasedNodes(payload)) {
             UUID jobId = initiateNodesImport(payload);
-            byte[] fileContent = parseFileContent(payload.getFileContent());
-            MultipartFile file = new BytesMultipartFile(payload.getFileName(), payload.getContentType(), fileContent);
+            MultipartFile file = GraphRequestFactory.fromPayload(payload);
 
             FileValidationUtility.validateInput(file, payload.getGroupId());
             log.info("Starting node import for groupId={}, file size={}", payload.getGroupId(), file.getSize());
-            nodesImportProcessor.processNodesImport(jobId, file, payload);
+            nodesImportService.processNodesImport(jobId, file, payload);
 
         } else if (NodeImportValidator.isValidPayloadForNonCostBasedNodes(payload)) {
             UUID jobId = initiateNodesImport(payload);
@@ -47,7 +46,7 @@ public class ImportJobServiceImpl implements ImportJobService {
             var domainId = payload.getDomainId();
 
             log.info("Starting node import for groupId={}, number of nodes={}", groupId, referenceIds.size());
-            nodesImportProcessor.processNodesImport(jobId, referenceIds, groupId, BATCH_SIZE, domainId);
+            nodesImportService.processNodesImport(jobId, referenceIds, groupId, BATCH_SIZE, domainId);
         }
     }
 

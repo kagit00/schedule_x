@@ -1,8 +1,6 @@
 package com.shedule.x.config.factory;
 
-import com.shedule.x.dto.NodesTransferJobExchange;
-import com.shedule.x.dto.NodeExchange;
-import com.shedule.x.dto.NodeResponse;
+import com.shedule.x.dto.*;
 import com.shedule.x.dto.enums.JobStatus;
 import com.shedule.x.dto.enums.NodeType;
 import com.shedule.x.exceptions.BadRequestException;
@@ -21,8 +19,8 @@ import java.util.zip.GZIPOutputStream;
 
 @Slf4j
 public final class GraphRequestFactory {
-    private static final long MAX_INPUT_SIZE = 500_000_000; // 500 MB
-    private static final long MAX_JSON_SIZE = 50_000_000; // 50 MB
+    private static final long MAX_INPUT_SIZE = 500_000_000;
+    private static final long MAX_JSON_SIZE = 50_000_000;
 
     private GraphRequestFactory() {
         throw new UnsupportedOperationException("unsupported");
@@ -36,6 +34,17 @@ public final class GraphRequestFactory {
                 .startedAt(DefaultValuesPopulator.getCurrentTimestamp())
                 .build();
     }
+
+    public static MatchSuggestionsExchange buildFileReference(String groupId, String filePath, String fileName, String contentType, UUID domainId) {
+        return MatchSuggestionsExchange.builder()
+                .groupId(groupId)
+                .domainId(domainId)
+                .filePath(filePath)
+                .fileName(fileName)
+                .contentType(contentType)
+                .build();
+    }
+
 
     public static List<Node> convertResponsesToNodes(List<NodeResponse> responses, NodeExchange message) {
         List<Node> result = new ArrayList<>();
@@ -102,41 +111,6 @@ public final class GraphRequestFactory {
         return nodes;
     }
 
-    public static NodeExchange build(String groupId, byte[] fileContent, String fileName, String contentType, UUID domainId) {
-        if (fileContent.length > MAX_INPUT_SIZE) {
-            throw new BadRequestException("Input fileContent too large: " + fileContent.length + " bytes");
-        }
-
-        byte[] compressedContent = compress(fileContent);
-        String base64Content = Base64.getEncoder().encodeToString(compressedContent);
-
-        NodeExchange message = NodeExchange.builder()
-                .groupId(groupId)
-                .fileContent(base64Content)
-                .fileName(fileName)
-                .contentType(contentType)
-                .domainId(domainId)
-                .build();
-
-        String json = BasicUtility.stringifyObject(message);
-        if (json.length() > MAX_JSON_SIZE) {
-            throw new InternalServerErrorException("Serialized NodeExportMessage too large: " + json.length() + " bytes");
-        }
-
-        return message;
-    }
-
-    private static byte[] compress(byte[] data) {
-        try (ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
-             GZIPOutputStream gzip = new GZIPOutputStream(byteArrayOutputStream)) {
-            gzip.write(data);
-            gzip.finish();
-            return byteArrayOutputStream.toByteArray();
-        } catch (IOException e) {
-            throw new InternalServerErrorException("Failed to compress data: " + e.getMessage());
-        }
-    }
-
     public static NodesTransferJobExchange build(UUID jobId, String groupId, String status, int processedNodes, int totalNodes,
                                                  List<String> successList, List<String> failedList) {
         return NodesTransferJobExchange.builder()
@@ -145,5 +119,9 @@ public final class GraphRequestFactory {
                 .failedList(failedList).successList(successList)
                 .groupId(groupId)
                 .build();
+    }
+
+    public static FileSystemMultipartFile fromPayload(NodeExchange payload) {
+        return new FileSystemMultipartFile(payload.getFilePath(), payload.getFileName(), payload.getContentType());
     }
 }

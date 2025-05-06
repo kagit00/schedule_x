@@ -22,15 +22,18 @@ import com.shedule.x.utils.media.csv.CsvParser;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
+
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.zip.GZIPInputStream;
+
 import static com.shedule.x.validation.NodeImportValidator.validateDomainAndGroup;
 
 
@@ -48,9 +51,8 @@ public class NodesImportProcessor {
     private final MatchingGroupRepository matchingGroupRepository;
     private final DomainService domainService;
 
-    @Async
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public void processNodesImport(UUID jobId, MultipartFile file, NodeExchange message) {
+    @Transactional
+    public void process(UUID jobId, MultipartFile file, NodeExchange message) {
         String groupId = message.getGroupId();
         UUID domainId = message.getDomainId();
 
@@ -66,31 +68,33 @@ public class NodesImportProcessor {
             List<String> success = new ArrayList<>();
             List<String> failed = new ArrayList<>();
 
-            CsvParser.parseInBatches(file.getInputStream(), nodeResponseFactory, batch -> {
-                log.info("Job {}: Processing batch of size {}", jobId, batch.size());
-                try {
-                    if (batch.isEmpty()) {
-                        log.warn("Job {}: Skipping empty batch", jobId);
-                        return;
-                    }
+            try (InputStream gzipStream = new GZIPInputStream(file.getInputStream())) {
+                CsvParser.parseInBatches(gzipStream, nodeResponseFactory, batch -> {
+                    log.info("Job {}: Processing batch of size {}", jobId, batch.size());
+                    try {
+                        if (batch.isEmpty()) {
+                            log.warn("Job {}: Skipping empty batch", jobId);
+                            return;
+                        }
 
-                    totalParsed.addAndGet(batch.size());
-                    List<Node> nodes = GraphRequestFactory.convertResponsesToNodes(batch, message);
+                        totalParsed.addAndGet(batch.size());
+                        List<Node> nodes = GraphRequestFactory.convertResponsesToNodes(batch, message);
 
-                    if (!nodes.isEmpty()) {
-                        nodeRepository.saveAll(nodes);
-                        nodes.forEach(n -> success.add(n.getReferenceId()));
-                        nodesImportJobRepository.incrementProcessed(jobId, nodes.size());
-                        log.info("Job {}: Successfully saved {} nodes", jobId, nodes.size());
-                    } else {
-                        log.warn("Job {}: Converted node list is empty for current batch", jobId);
+                        if (!nodes.isEmpty()) {
+                            nodeRepository.saveAll(nodes);
+                            nodes.forEach(n -> success.add(n.getReferenceId()));
+                            nodesImportJobRepository.incrementProcessed(jobId, nodes.size());
+                            log.info("Job {}: Successfully saved {} nodes", jobId, nodes.size());
+                        } else {
+                            log.warn("Job {}: Converted node list is empty for current batch", jobId);
+                            batch.forEach(r -> failed.add(r.getReferenceId()));
+                        }
+                    } catch (Exception e) {
+                        log.error("Job {}: Error processing batch: {}", jobId, e.getMessage(), e);
                         batch.forEach(r -> failed.add(r.getReferenceId()));
                     }
-                } catch (Exception e) {
-                    log.error("Job {}: Error processing batch: {}", jobId, e.getMessage(), e);
-                    batch.forEach(r -> failed.add(r.getReferenceId()));
-                }
-            });
+                });
+            }
 
             int total = totalParsed.get();
             nodesImportJobRepository.updateTotalNodes(jobId, total);
@@ -114,8 +118,7 @@ public class NodesImportProcessor {
         }
     }
 
-    @Async
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    @Transactional
     public void processNodesImport(UUID jobId, List<String> referenceIds, String groupId, int batchSize, UUID domainId) {
         try {
             log.info("Job {} started for groupId={}, domain_id={}, referenceIds count={}",

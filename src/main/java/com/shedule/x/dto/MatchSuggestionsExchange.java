@@ -12,7 +12,7 @@ import java.util.UUID;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class NodeExchange {
+public class MatchSuggestionsExchange {
     private UUID domainId;
     private String groupId;
     private String filePath;
