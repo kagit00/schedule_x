@@ -8,9 +8,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.stereotype.Service;
 
-import java.util.HashMap;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 
 @Component("noWeightMaximumBipartiteMatchingStrategy")
 @Slf4j
@@ -23,12 +21,13 @@ public class NoWeightMaximumBipartiteMatchingStrategy implements MatchingStrateg
     }
 
     @Override
-    public Map<String, MatchResult> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
+    public Map<String, List<MatchResult>> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
         Graph graph = graphResult.graph();
         Map<String, String> rawMatch = matcher.maximumBipartiteMatch(graph);
-        Map<String, MatchResult> result = new HashMap<>();
+        Map<String, List<MatchResult>> result = new HashMap<>();
         for (Map.Entry<String, String> entry : rawMatch.entrySet()) {
-            result.put(entry.getKey(), new MatchResult(entry.getValue(), 1.0));
+            result.computeIfAbsent(entry.getKey(), k -> new ArrayList<>())
+                    .add(new MatchResult(entry.getValue(), 1.0));
         }
         return result;
     }

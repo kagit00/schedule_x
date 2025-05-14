@@ -22,7 +22,8 @@ public class ConfigurableMetadataWeightFunction implements BiFunction<Map<String
     @Override
     public Double apply(Map<String, String> left, Map<String, String> right) {
         try {
-            Map<String, String> l = normalizeMetadata(left), r = normalizeMetadata(right);
+            Map<String, String> l = normalizeMetadata(left);
+            Map<String, String> r = normalizeMetadata(right);
             Map<String, Integer> weights = extractKeyWeights(l, r);
 
             double score = 0.0;

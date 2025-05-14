@@ -10,7 +10,9 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
@@ -26,7 +28,7 @@ public class AsyncBlossomWithGreedyFallbackStrategy implements MatchingStrategy 
 
     public AsyncBlossomWithGreedyFallbackStrategy(
             AsyncMatchingStrategy asyncBlossom,
-            @Qualifier("weightedGreedySymmetricMatchingStrategy") MatchingStrategy fallback,
+            @Qualifier("topKWeightedGreedyMatchingStrategy") MatchingStrategy fallback,
             PotentialMatchRepository potentialMatchRepository,
             @Value("${matching.timeout.blossom:2000}") long timeoutMillis) {
         this.asyncBlossom = asyncBlossom;
@@ -35,18 +37,17 @@ public class AsyncBlossomWithGreedyFallbackStrategy implements MatchingStrategy 
         this.timeoutMillis = timeoutMillis;
     }
 
-    public Map<String, MatchResult> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
-        graphResult.potentialMatches().forEach(match ->
-                potentialMatchRepository.save(PotentialMatchEntity.builder()
-                        .groupId(groupId).domainId(domainId)
-                        .referenceId(match.userId1())
-                        .matchedReferenceId(match.userId2())
-                        .compatibilityScore(match.compatibilityScore())
-                        .matchedAt(DefaultValuesPopulator.getCurrentTimestamp())
-                        .build())
-        );
+    public Map<String, List<MatchResult>> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
+        graphResult.potentialMatches().forEach(match -> potentialMatchRepository.upsertPotentialMatch(
+                groupId,
+                match.userId1(),
+                match.userId2(),
+                match.compatibilityScore(),
+                DefaultValuesPopulator.getCurrentTimestamp(),
+                domainId
+        ));
 
-        Map<String, MatchResult> finalMatches;
+        Map<String, List<MatchResult>> finalMatches;
         try {
             finalMatches = asyncBlossom.matchAsync(graphResult, groupId, domainId)
                     .orTimeout(timeoutMillis, TimeUnit.MILLISECONDS)

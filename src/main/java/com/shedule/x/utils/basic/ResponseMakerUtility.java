@@ -3,6 +3,7 @@ package com.shedule.x.utils.basic;
 
 import com.shedule.x.dto.MatchTransfer;
 import com.shedule.x.dto.NodeResponse;
+import com.shedule.x.dto.enums.MatchSuggestionType;
 import com.shedule.x.dto.enums.NodeType;
 import com.shedule.x.models.PerfectMatchEntity;
 import com.shedule.x.models.PotentialMatchEntity;
@@ -31,6 +32,7 @@ public final class ResponseMakerUtility {
                 .referenceId(p.getReferenceId())
                 .matchedReferenceId(p.getMatchedReferenceId())
                 .compatibilityScore(p.getCompatibilityScore())
+                .matchSuggestionType(MatchSuggestionType.PERFECT.name())
                 .build();
     }
 
@@ -40,6 +42,7 @@ public final class ResponseMakerUtility {
                 .referenceId(p.getReferenceId())
                 .matchedReferenceId(p.getMatchedReferenceId())
                 .compatibilityScore(p.getCompatibilityScore())
+                .matchSuggestionType(MatchSuggestionType.POTENTIAL.name())
                 .build();
     }
 }

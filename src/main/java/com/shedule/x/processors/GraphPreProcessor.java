@@ -53,7 +53,7 @@ public class GraphPreProcessor {
         MatchType matchType = Optional.ofNullable(request.getMatchType()).orElse(MatchType.AUTO);
 
         return switch (matchType) {
-            case SYMMETRIC -> graphBuilder.buildSymmetric(nodes, request.getWeightFunctionKey(), request.getGroupId());
+            case SYMMETRIC -> graphBuilder.buildSymmetric(nodes, request.getWeightFunctionKey(), request.getGroupId(), request.getDomainId());
 
             case BIPARTITE -> {
                 if (strategy == null) throw new InternalServerErrorException("Partition strategy required for BIPARTITE matching.");
@@ -65,7 +65,7 @@ public class GraphPreProcessor {
             case AUTO -> {
                 if (!isPartitioningApplicable) {
                     log.info("No partitioning keys detected; defaulting to SYMMETRIC match.");
-                    yield graphBuilder.buildSymmetric(nodes, request.getWeightFunctionKey(), request.getGroupId());
+                    yield graphBuilder.buildSymmetric(nodes, request.getWeightFunctionKey(), request.getGroupId(), request.getDomainId());
                 }
 
                 Pair<List<Node>, List<Node>> parts = strategy.partition(nodes);
@@ -73,7 +73,7 @@ public class GraphPreProcessor {
 
                 log.info("Auto-inferred match type: {}", inferred);
                 yield inferred == MatchType.SYMMETRIC
-                        ? graphBuilder.buildSymmetric(nodes, request.getWeightFunctionKey(), request.getGroupId())
+                        ? graphBuilder.buildSymmetric(nodes, request.getWeightFunctionKey(), request.getGroupId(), request.getDomainId())
                         : graphBuilder.build(parts.getLeft(), parts.getRight(), request.getWeightFunctionKey());
             }
         };

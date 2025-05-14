@@ -3,6 +3,7 @@ package com.shedule.x.matcher.strategies;
 import com.shedule.x.dto.MatchResult;
 import com.shedule.x.exceptions.InternalServerErrorException;
 
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -26,7 +27,7 @@ public class AsyncBlossomMatchingStrategy implements AsyncMatchingStrategy {
 
     public AsyncBlossomMatchingStrategy(
             BlossomSymmetricMatchingStrategy blossomStrategy,
-            WeightedGreedySymmetricMatchingStrategy fallbackStrategy,
+            TopKWeightedGreedyMatchingStrategy fallbackStrategy,
             @Qualifier("blossomExecutor") Executor executor,
             @Value("${matching.timeout.blossom}") long timeoutMillis
     ) {
@@ -37,7 +38,7 @@ public class AsyncBlossomMatchingStrategy implements AsyncMatchingStrategy {
     }
 
     @Override
-    public CompletableFuture<Map<String, MatchResult>> matchAsync(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
+    public CompletableFuture<Map<String, List<MatchResult>>> matchAsync(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
         return CompletableFuture.supplyAsync(() -> {
             try {
                 log.info("Starting Blossom matching...");

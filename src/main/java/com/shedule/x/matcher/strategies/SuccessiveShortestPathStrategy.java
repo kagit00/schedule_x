@@ -20,13 +20,14 @@ public class SuccessiveShortestPathStrategy implements MatchingStrategy {
     }
 
     @Override
-    public Map<String, MatchResult> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
+    public Map<String, List<MatchResult>> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
         Graph graph = graphResult.graph();
         Map<String, String> rawAssignment = computeMinCostMatching(graph);
 
-        Map<String, MatchResult> result = new HashMap<>();
+        Map<String, List<MatchResult>> result = new HashMap<>();
         for (Map.Entry<String, String> entry : rawAssignment.entrySet()) {
-            result.put(entry.getKey(), new MatchResult(entry.getValue(), 1.0));
+            result.computeIfAbsent(entry.getKey(), k -> new ArrayList<>())
+                    .add(new MatchResult(entry.getValue(), 1.0));
         }
 
         return result;
@@ -148,4 +149,3 @@ public class SuccessiveShortestPathStrategy implements MatchingStrategy {
         return DEFAULT_EDGE_COST;
     }
 }
-

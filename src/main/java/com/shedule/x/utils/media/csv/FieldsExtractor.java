@@ -68,6 +68,17 @@ public final class FieldsExtractor {
                     public String extract(MatchTransfer matchTransfer) {
                         return BasicUtility.safeExtract(matchTransfer.getType());
                     }
+                },
+                new CsvExporter.FieldExtractor<>() {
+                    @Override
+                    public String header() {
+                        return "match_suggestion_type";
+                    }
+
+                    @Override
+                    public String extract(MatchTransfer matchTransfer) {
+                        return BasicUtility.safeExtract(matchTransfer.getMatchSuggestionType());
+                    }
                 }
         );
     }

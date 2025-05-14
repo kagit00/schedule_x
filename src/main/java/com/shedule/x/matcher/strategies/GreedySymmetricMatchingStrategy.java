@@ -11,10 +11,11 @@ import java.util.*;
 @Component("greedySymmetricMatchingStrategy")
 @Slf4j
 public class GreedySymmetricMatchingStrategy implements MatchingStrategy {
+
     @Override
-    public Map<String, MatchResult> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
+    public Map<String, List<MatchResult>> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
         Graph graph = graphResult.graph();
-        Map<String, MatchResult> matches = new HashMap<>();
+        Map<String, List<MatchResult>> matches = new HashMap<>();
         Set<String> visited = new HashSet<>();
         Map<String, List<Node>> adjacencyList = graph.getAdjacencyList();
 
@@ -22,15 +23,20 @@ public class GreedySymmetricMatchingStrategy implements MatchingStrategy {
             String uid = u.getReferenceId();
             if (visited.contains(uid)) continue;
 
+            List<MatchResult> nodeMatches = new ArrayList<>();
             for (Node neighbor : adjacencyList.getOrDefault(uid, List.of())) {
                 String nid = neighbor.getReferenceId();
                 if (!visited.contains(nid)) {
-                    matches.put(uid, MatchResult.builder().score(1.0).partnerId(nid).build());
-                    matches.put(nid, MatchResult.builder().score(1.0).partnerId(uid).build());
+                    nodeMatches.add(MatchResult.builder().score(1.0).partnerId(nid).build());
+                    matches.computeIfAbsent(nid, k -> new ArrayList<>())
+                            .add(MatchResult.builder().score(1.0).partnerId(uid).build());
                     visited.add(uid);
                     visited.add(nid);
                     break;
                 }
+            }
+            if (!nodeMatches.isEmpty()) {
+                matches.put(uid, nodeMatches);
             }
         }
         return matches;

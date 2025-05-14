@@ -22,17 +22,18 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.List;
 import java.util.stream.Stream;
 
+
 @Component
 @RequiredArgsConstructor
 @Slf4j
 public class MatchTransferProcessor {
-    private static final String MATCH_EXPORT_TOPIC = "match-suggestions_";
+    private static final String MATCH_EXPORT_TOPIC = "matches-suggestions";
 
     private final PotentialMatchesService potentialMatchesService;
     private final PerfectMatchesService perfectMatchesService;
     private final ExportService exportService;
     private final ScheduleXProducer scheduleXProducer;
-    private static final int BATCH_SIZE = 10000;
+    private static final int BATCH_SIZE = 5000;
 
     @Transactional
     public void processMatchTransfer(String groupId, Domain domain) {
@@ -53,12 +54,14 @@ public class MatchTransferProcessor {
                         perfectBatch.stream().map(ResponseMakerUtility::buildMatchTransfer)
                 ).toList();
 
+
                 ExportedFile file = exportService.exportMatchesAsCsv(combinedBatch, groupId, domain.getId());
                 MatchSuggestionsExchange payload = GraphRequestFactory.buildFileReference(groupId, file.filePath(), file.fileName(), file.contentType(), domain.getId());
                 scheduleXProducer.sendMessage(
                         StringConcatUtil.concatWithSeparator("-", domain.getName().toLowerCase(), MATCH_EXPORT_TOPIC),
                         StringConcatUtil.concatWithSeparator("-", domain.getId().toString(), groupId),
-                        BasicUtility.stringifyObject(payload)
+                        BasicUtility.stringifyObject(payload),
+                        false
                 );
 
                 log.info("Exported {} matches for group '{}', batch {} for domain: {}", combinedBatch.size(), groupId, batchIndex, domain.getName());

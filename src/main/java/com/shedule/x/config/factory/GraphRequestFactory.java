@@ -19,8 +19,6 @@ import java.util.zip.GZIPOutputStream;
 
 @Slf4j
 public final class GraphRequestFactory {
-    private static final long MAX_INPUT_SIZE = 500_000_000;
-    private static final long MAX_JSON_SIZE = 50_000_000;
 
     private GraphRequestFactory() {
         throw new UnsupportedOperationException("unsupported");
@@ -47,49 +45,55 @@ public final class GraphRequestFactory {
 
 
     public static List<Node> convertResponsesToNodes(List<NodeResponse> responses, NodeExchange message) {
-        List<Node> result = new ArrayList<>();
-        for (int i = 0; i < responses.size(); i++) {
-            NodeResponse res = responses.get(i);
-            try {
-                if (res.getReferenceId() == null || res.getReferenceId().isEmpty()) {
-                    log.warn("Skipping node at index {} due to missing referenceId", i);
-                    continue;
-                }
-                if (!message.getGroupId().equals(res.getGroupId())) {
-                    log.warn("Skipping node at index {} due to groupId mismatch: expected {}, got {}", 
-                            i, message.getGroupId(), res.getGroupId());
-                    continue;
-                }
+        long startTime = System.nanoTime();
+        List<Node> result = new ArrayList<>(responses.size());
+        String messageGroupId = message.getGroupId();
+        UUID domainId = message.getDomainId();
 
+        for (NodeResponse res : responses) {
+            String referenceId = res.getReferenceId();
+
+            boolean isValidReference = referenceId != null && !referenceId.isEmpty();
+            boolean isSameGroup = messageGroupId.equals(res.getGroupId());
+
+            if (isValidReference && isSameGroup) {
                 Node node = Node.builder()
-                        .groupId(message.getGroupId()).domainId(message.getDomainId())
-                        .referenceId(res.getReferenceId())
+                        .groupId(messageGroupId)
+                        .domainId(domainId)
+                        .referenceId(referenceId)
                         .type(res.getType() != null ? res.getType() : NodeType.USER)
                         .build();
 
-                Map<String, String> sanitizedMetaData = sanitizeMetadata(res);
-                node.setMetaData(sanitizedMetaData != null ? sanitizedMetaData : new HashMap<>());
+                long metaStart = System.nanoTime();
+                node.setMetaData(sanitizeMetadata(res));
+                log.debug("Sanitized metadata for node {} in {} ms", referenceId, (System.nanoTime() - metaStart) / 1_000_000);
+
                 node.setCreatedAt(DefaultValuesPopulator.getCurrentTimestamp());
                 result.add(node);
-            } catch (Exception e) {
-                log.error("Error transforming node at index {}: {}", i, e.getMessage(), e);
             }
         }
-        log.info("transformToEntities: {} valid nodes out of {}", result.size(), responses.size());
+
+        log.info("transformToEntities: {} valid nodes out of {} in {} ms",
+                result.size(), responses.size(), (System.nanoTime() - startTime) / 1_000_000);
         return result;
     }
 
+
     private static Map<String, String> sanitizeMetadata(NodeResponse res) {
+        long startTime = System.nanoTime();
         Map<String, String> metadata = res.getMetaData();
-        if (metadata == null) {
+        if (metadata == null || metadata.isEmpty()) {
             return new HashMap<>();
         }
-        Map<String, String> sanitized = new HashMap<>();
-        metadata.forEach((key, value) -> {
+        Map<String, String> sanitized = new HashMap<>(metadata.size());
+        for (Map.Entry<String, String> entry : metadata.entrySet()) {
+            String key = entry.getKey();
+            String value = entry.getValue();
             if (key != null && value != null) {
                 sanitized.put(ValueSanitizer.sanitize(key), ValueSanitizer.sanitize(value));
             }
-        });
+        }
+        log.debug("Sanitized {} metadata entries in {} ms", sanitized.size(), (System.nanoTime() - startTime) / 1_000_000);
         return sanitized;
     }
 

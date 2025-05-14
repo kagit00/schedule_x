@@ -15,9 +15,9 @@ import java.util.*;
 public class LoadBalancingStrategy implements MatchingStrategy {
 
     @Override
-    public Map<String, MatchResult> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
+    public Map<String, List<MatchResult>> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
         Graph graph = graphResult.graph();
-        Map<String, MatchResult> assignment = new HashMap<>();
+        Map<String, List<MatchResult>> assignment = new HashMap<>();
         Map<String, Integer> rightNodeLoad = new HashMap<>();
 
         List<Node> leftNodes = graph.getLeftPartition();
@@ -50,7 +50,8 @@ public class LoadBalancingStrategy implements MatchingStrategy {
 
             if (bestRightNode != null) {
                 log.debug("Assigning node {} to node {} with current load {}", leftNode.getReferenceId(), bestRightNode.getReferenceId(), minLoad);
-                assignment.put(leftNode.getReferenceId(), new MatchResult(bestRightNode.getReferenceId(), minLoad));
+                assignment.computeIfAbsent(leftNode.getReferenceId(), k -> new ArrayList<>())
+                        .add(new MatchResult(bestRightNode.getReferenceId(), minLoad));
                 rightNodeLoad.put(bestRightNode.getReferenceId(), minLoad + 1);
             }
         }

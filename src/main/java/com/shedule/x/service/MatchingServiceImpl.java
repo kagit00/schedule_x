@@ -34,7 +34,7 @@ public class MatchingServiceImpl implements MatchingService {
     private int lastNodeCount;
 
     @Transactional
-    public Map<String, MatchResult> matchByGroup(MatchingRequest request, int page) {
+    public Map<String, List<MatchResult>> matchByGroup(MatchingRequest request, int page) {
         String groupId = request.getGroupId();
         LocalDateTime createdAfter = request.getCreatedAfter();
 
@@ -73,13 +73,13 @@ public class MatchingServiceImpl implements MatchingService {
                         .build()
         , groupId);
 
-        Map<String, MatchResult> results = strategy.match(graphResult, groupId, request.getDomainId());
+        Map<String, List<MatchResult>> results = strategy.match(graphResult, groupId, request.getDomainId());
         log.debug("Matches for groupId={}: {}", groupId, results);
         return results;
     }
 
     @Override
-    public Map<String, MatchResult> matchByGroup(MatchingRequest request) {
+    public Map<String, List<MatchResult>> matchByGroup(MatchingRequest request) {
         return matchByGroup(request, 0);
     }
 }

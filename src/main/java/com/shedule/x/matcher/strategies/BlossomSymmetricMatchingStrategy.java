@@ -25,14 +25,14 @@ public class BlossomSymmetricMatchingStrategy implements MatchingStrategy {
     private static final int BATCH_SIZE = 1000;
 
     @Override
-    public Map<String, MatchResult> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
+    public Map<String, List<MatchResult>> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
         Graph graph = graphResult.graph();
         if (graph == null || graph.getNodes().isEmpty()) {
             log.warn("Graph is null or empty, returning empty matches");
             return Collections.emptyMap();
         }
 
-        Map<String, MatchResult> result = new HashMap<>();
+        Map<String, List<MatchResult>> result = new HashMap<>();
         List<List<Node>> nodeBatches = partitionNodes(graph.getNodes());
 
         for (List<Node> batch : nodeBatches) {
@@ -44,8 +44,8 @@ public class BlossomSymmetricMatchingStrategy implements MatchingStrategy {
                 String u = match.getLeft();
                 String v = match.getMiddle();
                 double score = match.getRight();
-                result.put(u, MatchResult.builder().partnerId(v).score(score).build());
-                result.put(v, MatchResult.builder().partnerId(u).score(score).build());
+                result.put(u, List.of(MatchResult.builder().partnerId(v).score(score).build()));
+                result.put(v, List.of(MatchResult.builder().partnerId(u).score(score).build()));
             }
         }
 

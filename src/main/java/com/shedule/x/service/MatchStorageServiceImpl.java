@@ -22,15 +22,17 @@ public class MatchStorageServiceImpl implements MatchStorageService {
     private static final int BATCH_SIZE = 1000;
 
 
-    public void saveMatchResults(Map<String, MatchResult> matches, String groupId, UUID domainId) {
+    public void saveMatchResults(Map<String, List<MatchResult>> matches, String groupId, UUID domainId) {
         List<PerfectMatchEntity> allResults = matches.entrySet().stream()
-                .map(entry -> PerfectMatchEntity.builder()
-                        .compatibilityScore(entry.getValue().getScore())
-                        .matchedAt(DefaultValuesPopulator.getCurrentTimestamp())
-                        .referenceId(entry.getKey()).domainId(domainId)
-                        .matchedReferenceId(entry.getValue().getPartnerId())
-                        .groupId(groupId)
-                        .build())
+                .flatMap(entry -> entry.getValue().stream()
+                        .map(match -> PerfectMatchEntity.builder()
+                                .compatibilityScore(match.getScore())
+                                .matchedAt(DefaultValuesPopulator.getCurrentTimestamp())
+                                .referenceId(entry.getKey())
+                                .matchedReferenceId(match.getPartnerId())
+                                .domainId(domainId)
+                                .groupId(groupId)
+                                .build()))
                 .toList();
 
         List<List<PerfectMatchEntity>> batches = BatchUtils.partition(allResults, BATCH_SIZE);

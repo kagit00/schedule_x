@@ -408,4 +408,63 @@
                        constraintName="pk_node_metadata"/>
     </changeSet>
 
+    <changeSet id="top-k-weighted-greedy" author="your-username">
+        <insert tableName="matching_algorithms">
+            <column name="id" value="topKWeightedGreedyMatchingStrategy"/>
+            <column name="name" value="Top K Weighted Greedy Matching Strategy"/>
+            <column name="description" value="--"/>
+        </insert>
+    </changeSet>
+
+    <changeSet id="graph-09-delete-unused-matching-groups-with-configs" author="grok">
+        <delete tableName="matching_configurations">
+            <where>
+                group_id IN (
+                SELECT id FROM matching_groups
+                WHERE domain_id = (SELECT id FROM domains WHERE name = 'flairbit')
+                AND group_id IN ('random-interact-default', 'bff-default')
+                )
+            </where>
+        </delete>
+
+        <delete tableName="matching_groups">
+            <where>
+                domain_id = (SELECT id FROM domains WHERE name = 'flairbit')
+                AND group_id IN ('random-interact-default', 'bff-default')
+            </where>
+        </delete>
+    </changeSet>
+
+    <changeSet id="graph-05-drop-unique-reference-id" author="gsss">
+        <dropForeignKeyConstraint baseTableName="edges" constraintName="fk_edges_from_node"/>
+        <dropForeignKeyConstraint baseTableName="edges" constraintName="fk_edges_to_node"/>
+
+        <dropUniqueConstraint tableName="nodes" constraintName="nodes_reference_id_key"/>
+    </changeSet>
+
+    <changeSet id="graph-06-add-unique-reference-andgroup_" author="gsss">
+        <addUniqueConstraint
+                tableName="nodes"
+                columnNames="reference_id, group_id"
+                constraintName="uk_nodes_reference_group"/>
+    </changeSet>
+
+    <changeSet id="create-index-nodes-ref-group" author="grok">
+        <sql dbms="postgresql">
+            CREATE INDEX IF NOT EXISTS idx_nodes_ref_group ON nodes(reference_id, group_id);
+        </sql>
+        <rollback>
+            DROP INDEX IF EXISTS idx_nodes_ref_group;
+        </rollback>
+    </changeSet>
+
+    <changeSet id="create-index-node-metadata-node-key" author="grok">
+        <sql dbms="postgresql">
+            CREATE INDEX IF NOT EXISTS idx_node_metadata_node_key ON node_metadata(node_id, meta_key);
+        </sql>
+        <rollback>
+            DROP INDEX IF EXISTS idx_node_metadata_node_key;
+        </rollback>
+    </changeSet>
+
 </databaseChangeLog>

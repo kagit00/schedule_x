@@ -14,4 +14,5 @@ public class MatchTransfer {
     private Double compatibilityScore;
     private String groupId;
     private NodeType type;
+    private String matchSuggestionType;
 }

@@ -18,11 +18,11 @@ public class CostScalingMatchingStrategy implements MatchingStrategy {
     }
 
     @Override
-    public Map<String, MatchResult> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
+    public Map<String, List<MatchResult>> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
         Graph graph = graphResult.graph();
         Map<String, List<CostEdge>> residualGraph = buildResidualGraph(graph);
         Map<String, Integer> potential = new HashMap<>();
-        Map<String, MatchResult> result = new HashMap<>();
+        Map<String, List<MatchResult>> result = new HashMap<>();
 
         int epsilon = INITIAL_EPSILON;
         while (epsilon >= 1) {
@@ -32,13 +32,16 @@ public class CostScalingMatchingStrategy implements MatchingStrategy {
 
         for (Map.Entry<String, List<CostEdge>> entry : residualGraph.entrySet()) {
             String from = entry.getKey();
+            List<MatchResult> matches = new ArrayList<>();
             for (CostEdge edge : entry.getValue()) {
                 if (edge.getFlow() == 1 && isLeftToRightEdge(graph, edge.getFrom(), edge.getTo())) {
                     int cost = edge.getCost();
                     String to = edge.getTo();
-
-                    result.put(from, new MatchResult(to, -cost));
+                    matches.add(new MatchResult(to, -cost));
                 }
+            }
+            if (!matches.isEmpty()) {
+                result.put(from, matches);
             }
         }
 

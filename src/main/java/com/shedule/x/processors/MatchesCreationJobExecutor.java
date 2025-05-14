@@ -10,6 +10,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -32,7 +33,7 @@ public class MatchesCreationJobExecutor {
                         .groupId(groupId).domainId(domainId).limit(limit)
                         .build();
 
-                Map<String, MatchResult> results = matchingService.matchByGroup(request, page);
+                Map<String, List<MatchResult>> results = matchingService.matchByGroup(request, page);
                 int nodeCount = ((MatchingServiceImpl) matchingService).getLastNodeCount();
                 if (!results.isEmpty()) {
                     matchStorageService.saveMatchResults(results, groupId, domainId);

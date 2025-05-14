@@ -15,7 +15,7 @@ public class HungarianMatchingStrategy implements MatchingStrategy {
     private static final int MAX_COST = Integer.MAX_VALUE / 4;
 
     @Override
-    public Map<String, MatchResult> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
+    public Map<String, List<MatchResult>> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
         Graph graph = graphResult.graph();
         List<Node> leftNodes = graph.getLeftPartition();
         List<Node> rightNodes = graph.getRightPartition();
@@ -50,13 +50,14 @@ public class HungarianMatchingStrategy implements MatchingStrategy {
 
         int[] assignment = runHungarian(cost);
 
-        Map<String, MatchResult> result = new HashMap<>();
+        Map<String, List<MatchResult>> result = new HashMap<>();
         for (int i = 0; i < assignment.length; i++) {
             if (i < n && assignment[i] < m && assignment[i] != -1) {
                 String fromId = leftNodes.get(i).getReferenceId();
                 String toId = rightNodes.get(assignment[i]).getReferenceId();
                 double score = -cost[i][assignment[i]]; // Reverse cost to score
-                result.put(fromId, new MatchResult(toId, score));
+                result.computeIfAbsent(fromId, k -> new ArrayList<>())
+                        .add(new MatchResult(toId, score));
             }
         }
 

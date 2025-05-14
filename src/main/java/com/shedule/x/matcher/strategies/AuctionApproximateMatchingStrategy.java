@@ -16,7 +16,7 @@ public class AuctionApproximateMatchingStrategy implements MatchingStrategy {
     private static final double DEFAULT_EDGE_COST = 1.0;
 
     @Override
-    public Map<String, MatchResult> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
+    public Map<String, List<MatchResult>> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
         Graph graph = graphResult.graph();
         List<Node> leftNodes = graph.getLeftPartition();
         List<Node> rightNodes = graph.getRightPartition();
@@ -48,13 +48,13 @@ public class AuctionApproximateMatchingStrategy implements MatchingStrategy {
             }
         }
 
-        Map<String, MatchResult> result = new HashMap<>();
+        Map<String, List<MatchResult>> result = new HashMap<>();
         for (Map.Entry<String, String> entry : assignment.entrySet()) {
             String leftId = entry.getKey();
             String rightId = entry.getValue();
             double score = -price.getOrDefault(rightId, 0.0);
 
-            result.put(leftId, new MatchResult(rightId, score));
+            result.put(leftId, List.of(new MatchResult(rightId, score)));
         }
 
         return result;

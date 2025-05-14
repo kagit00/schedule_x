@@ -2,7 +2,9 @@ package com.shedule.x.service;
 
 import com.shedule.x.dto.NodeExchange;
 
+import java.util.concurrent.CompletableFuture;
+
 
 public interface ImportJobService {
-    void startNodesImport(NodeExchange payload);
+    CompletableFuture<Void> startNodesImport(NodeExchange payload);
 }

@@ -11,10 +11,8 @@ public final class WeightFunctionRegistry {
     private static final Map<String, BiFunction<Map<String, String>, Map<String, String>, Double>> registry = new ConcurrentHashMap<>();
 
     static {
-        // Flat: Uniform weight for all pairs
         registry.put("flat", (left, right) -> 1.0);
 
-        // Generic Similarity: Proportion of matching key-value pairs
         registry.put("generic_similarity", (left, right) -> {
             try {
                 Map<String, String> normLeft = normalizeMetadata(left);
@@ -30,7 +28,6 @@ public final class WeightFunctionRegistry {
             }
         });
 
-        // Weighted Similarity: Dynamic key weights from metadata or config
         registry.put("weighted_similarity", (left, right) -> {
             try {
                 Map<String, String> normLeft = normalizeMetadata(left);
@@ -53,14 +50,12 @@ public final class WeightFunctionRegistry {
             }
         });
 
-        // Preference Similarity: Similarity + preference matching
         registry.put("preference_similarity", (left, right) -> {
             try {
                 Map<String, String> normLeft = normalizeMetadata(left);
                 Map<String, String> normRight = normalizeMetadata(right);
                 double score = 0.0;
 
-                // Similarity component (0.5 weight)
                 long matchingCount = normLeft.entrySet().stream()
                         .filter(entry -> normRight.containsKey(entry.getKey()) &&
                                 entry.getValue().equals(normRight.get(entry.getKey())))
@@ -68,7 +63,6 @@ public final class WeightFunctionRegistry {
                 int totalKeys = Math.max(normLeft.size(), normRight.size());
                 score += totalKeys > 0 ? 0.5 * ((double) matchingCount / totalKeys) : 0.0;
 
-                // Preference component (0.5 weight)
                 String leftPrefs = normLeft.getOrDefault("preferences", "");
                 if (!leftPrefs.isEmpty()) {
                     String[] prefArray = leftPrefs.split(",");

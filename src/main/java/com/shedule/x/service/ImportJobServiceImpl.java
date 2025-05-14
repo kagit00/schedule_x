@@ -1,64 +1,46 @@
 package com.shedule.x.service;
 
-import com.shedule.x.dto.BytesMultipartFile;
 import com.shedule.x.dto.NodeExchange;
-import com.shedule.x.dto.enums.JobStatus;
 import com.shedule.x.config.factory.GraphRequestFactory;
-import com.shedule.x.models.NodesImportJob;
-import com.shedule.x.processors.NodesImportProcessor;
-import com.shedule.x.repo.NodesImportJobRepository;
+import com.shedule.x.processors.NodesImportStatusUpdater;
 import com.shedule.x.utils.validation.FileValidationUtility;
 import com.shedule.x.validation.NodeImportValidator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
-import org.springframework.transaction.annotation.Transactional;
 import java.util.UUID;
-import static com.shedule.x.utils.basic.BasicUtility.parseFileContent;
+import java.util.concurrent.CompletableFuture;
 
 
-@Service
 @Slf4j
+@Service
 @RequiredArgsConstructor
 public class ImportJobServiceImpl implements ImportJobService {
-
-    private final NodesImportJobRepository nodesImportJobRepository;
     private final NodesImportService nodesImportService;
-    private static final int BATCH_SIZE = 1000;
+    private final NodesImportStatusUpdater statusUpdater;
 
+    @Value("${import.batch-size:1000}")
+    private int batchSize;
 
     @Override
-    @Transactional
-    public void startNodesImport(NodeExchange payload) {
-        if (NodeImportValidator.isValidPayloadForCostBasedNodes(payload)) {
-            UUID jobId = initiateNodesImport(payload);
-            MultipartFile file = GraphRequestFactory.fromPayload(payload);
+    public CompletableFuture<Void> startNodesImport(NodeExchange payload) {
+        UUID jobId = statusUpdater.initiateNodesImport(payload);
 
+        if (NodeImportValidator.isValidPayloadForCostBasedNodes(payload)) {
+            MultipartFile file = GraphRequestFactory.fromPayload(payload);
             FileValidationUtility.validateInput(file, payload.getGroupId());
             log.info("Starting node import for groupId={}, file size={}", payload.getGroupId(), file.getSize());
-            nodesImportService.processNodesImport(jobId, file, payload);
+            return nodesImportService.processNodesImport(jobId, file, payload);
 
         } else if (NodeImportValidator.isValidPayloadForNonCostBasedNodes(payload)) {
-            UUID jobId = initiateNodesImport(payload);
-            var groupId = payload.getGroupId();
-            var referenceIds = payload.getReferenceIds();
-            var domainId = payload.getDomainId();
+            log.info("Starting node import for groupId={}, number of nodes={}", payload.getGroupId(), payload.getReferenceIds().size());
+            return nodesImportService.processNodesImport(jobId, payload.getReferenceIds(), payload.getGroupId(), batchSize, payload.getDomainId());
 
-            log.info("Starting node import for groupId={}, number of nodes={}", groupId, referenceIds.size());
-            nodesImportService.processNodesImport(jobId, referenceIds, groupId, BATCH_SIZE, domainId);
+        } else {
+            log.warn("Invalid payload for groupId={}: {}", payload.getGroupId(), payload);
+            return CompletableFuture.completedFuture(null);
         }
-    }
-
-    private UUID initiateNodesImport(NodeExchange message) {
-        NodesImportJob job = GraphRequestFactory.createNodesImportJob(
-                message.getGroupId(),
-                message.getDomainId(),
-                JobStatus.PENDING,
-                0,
-                0
-        );
-        nodesImportJobRepository.save(job);
-        return job.getId();
     }
 }

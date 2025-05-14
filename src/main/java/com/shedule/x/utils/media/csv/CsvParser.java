@@ -22,7 +22,7 @@ import java.util.function.Consumer;
 @Slf4j
 public final class CsvParser {
 
-    private static final int BATCH_SIZE = 1000;
+    private static final int BATCH_SIZE = 50000;
 
     private CsvParser() {
         throw new UnsupportedOperationException("Unsupported");
@@ -74,17 +74,24 @@ public final class CsvParser {
         try {
             String[] csvRow;
             int rowIndex = 0;
+            int parsedCount = 0;
+            int skippedCount = 0;
+
             List<T> batch = new ArrayList<>(BATCH_SIZE);
 
             while ((csvRow = csvReader.readNext()) != null) {
                 rowIndex++;
                 T parsed = safelyParseRow(headerMap, csvRow, rowIndex, responseFactory);
+
                 if (parsed != null) {
                     batch.add(parsed);
+                    parsedCount++;
                     if (batch.size() == BATCH_SIZE) {
-                        batchConsumer.accept(new ArrayList<>(batch)); // Defensive copy
+                        batchConsumer.accept(new ArrayList<>(batch));
                         batch.clear();
                     }
+                } else {
+                    skippedCount++;
                 }
             }
 
@@ -92,12 +99,15 @@ public final class CsvParser {
                 batchConsumer.accept(new ArrayList<>(batch));
             }
 
+            log.info("CSV parsing completed. Total rows: {}, Parsed: {}, Skipped: {}", rowIndex, parsedCount, skippedCount);
+
         } catch (CsvValidationException e) {
             throw new BadRequestException(e.getMessage());
         } catch (IOException e) {
             throw new InternalServerErrorException(e.getMessage());
         }
     }
+
 
     private static <T> T safelyParseRow(Map<String, Integer> headerMap, String[] row, int rowIndex, ResponseFactory<T> responseFactory) {
         try {
