@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.9.xsd">
+
+
+    <!-- Step 1: Rename existing table to preserve data -->
+    <changeSet id="rename-old-potential-matches" author="grok">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="potential_matches"/>
+        </preConditions>
+        <renameTable
+                oldTableName="potential_matches"
+                newTableName="potential_matches_old"/>
+    </changeSet>
+
+    <!-- Step 2: Create partitioned potential_matches table -->
+    <changeSet id="create-partitioned-potential-matches" author="grok">
+        <sql>
+            <![CDATA[
+                CREATE TABLE potential_matches (
+                    id UUID NOT NULL,
+                    group_id VARCHAR(50) NOT NULL,
+                    domain_id UUID,
+                    reference_id VARCHAR(50) NOT NULL,
+                    matched_reference_id VARCHAR(50) NOT NULL,
+                    compatibility_score DOUBLE PRECISION NOT NULL,
+                    matched_at TIMESTAMP,
+                    PRIMARY KEY (id, group_id)
+                ) PARTITION BY LIST (group_id);
+            ]]>
+        </sql>
+    </changeSet>
+
+    <!-- Step 3: Create default partition -->
+    <changeSet id="create-default-partition" author="grok">
+        <sql>
+            <![CDATA[
+                CREATE TABLE potential_matches_default
+                PARTITION OF potential_matches DEFAULT;
+            ]]>
+        </sql>
+    </changeSet>
+
+    <!-- Step 4: Dynamically create partitions from matching_groups -->
+    <changeSet id="create-matching-groups-partitions" author="grok">
+        <sql splitStatements="false">
+            <![CDATA[
+                DO $$
+                DECLARE
+                    group_id_record RECORD;
+                BEGIN
+                    FOR group_id_record IN (SELECT DISTINCT group_id FROM matching_groups)
+                    LOOP
+                        EXECUTE format(
+                            'CREATE TABLE potential_matches_%I PARTITION OF potential_matches FOR VALUES IN (%L)',
+                            replace(group_id_record.group_id, '-', '_'),
+                            group_id_record.group_id
+                        );
+                    END LOOP;
+                END $$;
+            ]]>
+        </sql>
+    </changeSet>
+
+    <!-- Step 5: Migrate data in batches -->
+    <changeSet id="migrate-data-potential-matches" author="grok">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="potential_matches_old"/>
+        </preConditions>
+        <sql splitStatements="false">
+            <![CDATA[
+                DO $$
+                DECLARE
+                    batch_size INTEGER := 10000;
+                    total_rows INTEGER;
+                    current_offset INTEGER := 0;
+                BEGIN
+                    SELECT count(*) INTO total_rows FROM potential_matches_old;
+                    WHILE current_offset < total_rows LOOP
+                        INSERT INTO potential_matches
+                        SELECT * FROM potential_matches_old
+                        ORDER BY id
+                        LIMIT batch_size OFFSET current_offset;
+                        current_offset := current_offset + batch_size;
+                        COMMIT;
+                    END LOOP;
+                END $$;
+            ]]>
+        </sql>
+    </changeSet>
+
+    <!-- Step 6: Drop old table -->
+    <changeSet id="drop-old-potential-matches" author="grok">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="potential_matches_old"/>
+        </preConditions>
+        <dropTable tableName="potential_matches_old"/>
+    </changeSet>
+
+    <!-- Step 7: Add unique constraint to new table -->
+    <changeSet id="add-unique-constraint-potential-matches" author="grok">
+        <addUniqueConstraint
+                tableName="potential_matches"
+                columnNames="group_id, reference_id, matched_reference_id"
+                constraintName="uq_potential_matches_unique_combination"/>
+    </changeSet>
+
+    <!-- Step 8: Create indexes for query performance -->
+    <changeSet id="create-indexes-potential-matches" author="grok">
+        <createIndex indexName="idx_potential_matches_group_id"
+                     tableName="potential_matches">
+            <column name="group_id"/>
+        </createIndex>
+        <createIndex indexName="idx_potential_matches_domain_id"
+                     tableName="potential_matches">
+            <column name="domain_id"/>
+        </createIndex>
+        <createIndex indexName="idx_potential_matches_reference_id"
+                     tableName="potential_matches">
+            <column name="reference_id"/>
+        </createIndex>
+        <createIndex indexName="idx_potential_matches_matched_reference_id"
+                     tableName="potential_matches">
+            <column name="matched_reference_id"/>
+        </createIndex>
+    </changeSet>
+
+    <changeSet id="drop-indexes-potential-matches" author="grok">
+
+        <dropIndex indexName="idx_potential_matches_group_id"
+                   tableName="potential_matches"/>
+
+        <dropIndex indexName="idx_potential_matches_domain_id"
+                   tableName="potential_matches"/>
+
+
+        <dropIndex indexName="idx_potential_matches_reference_id"
+                   tableName="potential_matches"/>
+
+
+        <dropIndex indexName="idx_potential_matches_matched_reference_id"
+                   tableName="potential_matches"/>
+    </changeSet>
+
+    <changeSet id="20250525-03-add-is_processed-index" author="grok">
+        <createIndex indexName="idx_nodes_groupid_domainid_processed" tableName="nodes">
+            <column name="group_id"/>
+            <column name="domain_id"/>
+            <column name="is_processed"/>
+        </createIndex>
+    </changeSet>
+
+</databaseChangeLog>
