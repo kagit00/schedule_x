@@ -5,12 +5,15 @@ import com.shedule.x.service.CompatibilityCalculator;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+
 
 @Slf4j
 public class MetadataCompatibilityCalculator implements CompatibilityCalculator {
-    private static final double DEFAULT_SCORE = 0.1;
-    private static final double MATCH_SCORE = 0.25;
-    private static final double NUMERIC_TOLERANCE = 0.5;
+    private static final double DEFAULT_SCORE = 0.4;
+    private static final double MATCH_SCORE = 0.7;
+    private static final double NUMERIC_TOLERANCE = 0.6;
+    private final ConcurrentHashMap<String, Set<String>> keyCache = new ConcurrentHashMap<>();
 
     @Override
     public double calculate(Node node1, Node node2) {
@@ -22,7 +25,9 @@ public class MetadataCompatibilityCalculator implements CompatibilityCalculator 
             return DEFAULT_SCORE;
         }
 
-        Set<String> commonKeys = getCommonKeys(meta1, meta2);
+        String cacheKey = node1.getId() + ":" + node2.getId();
+        Set<String> commonKeys = keyCache.computeIfAbsent(cacheKey, k -> getCommonKeys(meta1, meta2));
+
         if (commonKeys.isEmpty()) {
             log.debug("No common metadata keys for nodes {} and {}", node1.getId(), node2.getId());
             return DEFAULT_SCORE;
@@ -48,9 +53,9 @@ public class MetadataCompatibilityCalculator implements CompatibilityCalculator 
         String value2 = rawValue2.trim().toLowerCase();
 
         if (value1.equals(value2)) return MATCH_SCORE;
-
         if (isNumericMatch(value1, value2)) return MATCH_SCORE;
         if (isMultiValueMatch(value1, value2)) return MATCH_SCORE;
+        if (value1.contains(value2) || value2.contains(value1)) return MATCH_SCORE * 0.5;
 
         return 0.0;
     }
@@ -73,6 +78,6 @@ public class MetadataCompatibilityCalculator implements CompatibilityCalculator 
         set1.remove("");
         set2.remove("");
 
-        return !Collections.disjoint(set1, set2) || set1.isEmpty() || set2.isEmpty();
+        return !set1.isEmpty() && !set2.isEmpty() && !Collections.disjoint(set1, set2);
     }
 }

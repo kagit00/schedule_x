@@ -3,7 +3,7 @@ package com.shedule.x.matcher.strategies;
 import com.shedule.x.dto.MatchResult;
 import com.shedule.x.models.Edge;
 import com.shedule.x.models.Graph;
-import com.shedule.x.service.GraphBuilder;
+import com.shedule.x.service.GraphRecords;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import java.util.*;
@@ -18,8 +18,8 @@ public class HopcroftKarpMatchingStrategy implements MatchingStrategy {
     }
 
     @Override
-    public Map<String, List<MatchResult>> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
-        Graph graph = graphResult.graph();
+    public Map<String, List<MatchResult>> match(GraphRecords.GraphResult graphResult, String groupId, UUID domainId) {
+        Graph graph = graphResult.getGraph();
         Map<String, String> rawMatch = maximumBipartiteMatch(graph);
         Map<String, List<MatchResult>> result = new HashMap<>();
         for (Map.Entry<String, String> entry : rawMatch.entrySet()) {

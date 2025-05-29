@@ -13,7 +13,6 @@ import org.springframework.stereotype.Component;
 public class MatchTransferService {
     private final MatchTransferProcessor matchTransferProcessor;
 
-
     @Async("matchesTransferExecutor")
     public void processGroup(String groupId, Domain domain) {
         log.info("Processing matches export for group for domain: {} {}", groupId, domain.getName());

@@ -34,16 +34,23 @@ import java.util.stream.Collectors;
 @Slf4j
 @Component
 public class NodesStorageProcessor {
-    private static final String COPY_TEMP_SQL = """
-        CREATE TEMP TABLE temp_nodes (id UUID, reference_id TEXT, group_id TEXT, type TEXT, domain_id UUID, created_at TIMESTAMP) ON COMMIT DROP
-        """;
-    private static final String UPSERT_NODES_SQL = """
-        INSERT INTO public.nodes (id, reference_id, group_id, type, domain_id, created_at)
-        SELECT id, reference_id, group_id, type, domain_id, created_at FROM temp_nodes
-        ON CONFLICT (reference_id, group_id) DO UPDATE
-        SET type = EXCLUDED.type, domain_id = EXCLUDED.domain_id, created_at = EXCLUDED.created_at
-        RETURNING id, reference_id, group_id
-        """;
+    private static final String COPY_TEMP_SQL =
+            "CREATE TEMP TABLE temp_nodes (\n" +
+                    "id UUID, \n" +
+                    "reference_id TEXT, \n" +
+                    "group_id TEXT, \n" +
+                    "type TEXT, \n" +
+                    "domain_id UUID, \n" +
+                    "created_at TIMESTAMP) \n" +
+                    "ON COMMIT DROP";
+
+    private static final String UPSERT_NODES_SQL =
+            "INSERT INTO public.nodes (id, reference_id, group_id, type, domain_id, created_at) \n" +
+                    "SELECT id, reference_id, group_id, type, domain_id, created_at FROM temp_nodes \n" +
+                    "ON CONFLICT (reference_id, group_id) DO UPDATE SET \n" +
+                    "type = EXCLUDED.type, domain_id = EXCLUDED.domain_id, created_at = EXCLUDED.created_at \n" +
+                    "RETURNING id, reference_id, group_id";
+
 
     private final JdbcTemplate jdbcTemplate;
     private final NodeMetadataBatchWriter metadataBatchWriter;
@@ -90,7 +97,7 @@ public class NodesStorageProcessor {
                         .createdAt(node.getCreatedAt())
                         .metaData(node.getMetaData())
                         .build())
-                .toList();
+                .collect(Collectors.toList());
 
         long startTime = System.nanoTime();
         return CompletableFuture.runAsync(() -> {
@@ -146,7 +153,7 @@ public class NodesStorageProcessor {
             csv.append(nodeId).append('\t')
                     .append(node.getReferenceId()).append('\t')
                     .append(node.getGroupId()).append('\t')
-                    .append(node.getType().name()).append('\t')
+                    .append(node.getType()).append('\t')
                     .append(node.getDomainId() != null ? node.getDomainId() : "").append('\t')
                     .append(node.getCreatedAt().toString().replace(" ", "T")).append('\n');
         }

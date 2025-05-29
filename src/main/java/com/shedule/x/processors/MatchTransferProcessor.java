@@ -20,6 +20,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 
@@ -52,11 +53,16 @@ public class MatchTransferProcessor {
                 List<MatchTransfer> combinedBatch = Stream.concat(
                         potentialBatch.stream().map(ResponseMakerUtility::buildMatchTransfer),
                         perfectBatch.stream().map(ResponseMakerUtility::buildMatchTransfer)
-                ).toList();
+                ).collect(Collectors.toList());
 
 
                 ExportedFile file = exportService.exportMatchesAsCsv(combinedBatch, groupId, domain.getId());
-                MatchSuggestionsExchange payload = GraphRequestFactory.buildFileReference(groupId, file.filePath(), file.fileName(), file.contentType(), domain.getId());
+                MatchSuggestionsExchange payload = GraphRequestFactory.buildFileReference(
+                        groupId,
+                        file.getFilePath(),
+                        file.getFileName(),
+                        file.getContentType(),
+                        domain.getId());
                 scheduleXProducer.sendMessage(
                         StringConcatUtil.concatWithSeparator("-", domain.getName().toLowerCase(), MATCH_EXPORT_TOPIC),
                         StringConcatUtil.concatWithSeparator("-", domain.getId().toString(), groupId),

@@ -467,4 +467,64 @@
         </rollback>
     </changeSet>
 
+
+    <changeSet id="20250521-create-delta-tracking-tables" author="grok">
+        <createTable tableName="last_match_participation">
+            <column name="group_id" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="domain_id" type="UUID">
+                <constraints nullable="false"/>
+            </column>
+            <column name="last_run_timestamp" type="TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+            <column name="updated_at" type="TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <addPrimaryKey tableName="last_match_participation" columnNames="group_id,domain_id"/>
+
+        <createTable tableName="match_participation_history">
+            <column name="id" type="BIGSERIAL">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="node_id" type="UUID">
+                <constraints nullable="false"/>
+            </column>
+            <column name="group_id" type="VARCHAR(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="domain_id" type="UUID">
+                <constraints nullable="false"/>
+            </column>
+            <column name="participated_at" type="TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+
+        <createIndex tableName="match_participation_history" indexName="idx_group_domain_timestamp">
+            <column name="group_id"/>
+            <column name="domain_id"/>
+            <column name="participated_at"/>
+        </createIndex>
+    </changeSet>
+
+    <changeSet id="20250525-01-add-processing-cycle-id" author="grok">
+        <addColumn tableName="potential_matches">
+            <column name="processing_cycle_id" type="VARCHAR(50)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+    </changeSet>
+
+    <changeSet id="20250525-02-drop-and-recreate-is_processed" author="grok">
+        <dropColumn tableName="nodes" columnName="is_processed"/>
+        <addColumn tableName="nodes">
+            <column name="is_processed" type="BOOLEAN" defaultValueBoolean="false">
+                <constraints nullable="false"/>
+            </column>
+        </addColumn>
+    </changeSet>
+
 </databaseChangeLog>

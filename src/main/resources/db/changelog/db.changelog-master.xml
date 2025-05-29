@@ -7,4 +7,5 @@
 
     <include file="003-graph.xml" relativeToChangelogFile="true"/>
     <include file="004-matches.xml" relativeToChangelogFile="true"/>
+    <include file="optimizations.xml" relativeToChangelogFile="true"/>
 </databaseChangeLog>

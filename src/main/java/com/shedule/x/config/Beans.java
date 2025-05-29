@@ -1,11 +1,17 @@
 package com.shedule.x.config;
 
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import com.shedule.x.config.factory.QueueManagerFactory;
 import com.shedule.x.dto.NodeResponse;
 import com.shedule.x.config.factory.NodeResponseFactory;
 import com.shedule.x.config.factory.ResponseFactory;
+import com.shedule.x.processors.MetadataCompatibilityCalculator;
+import com.shedule.x.processors.QueueManagerImpl;
+import com.shedule.x.service.CompatibilityCalculator;
 import io.micrometer.core.instrument.MeterRegistry;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.task.TaskExecutor;
@@ -17,28 +23,157 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.sql.SQLException;
 import java.util.Map;
-import java.util.concurrent.ThreadPoolExecutor;
+import java.util.UUID;
+import java.util.concurrent.*;
 
 
 @Configuration
 @Slf4j
-@RequiredArgsConstructor
 public class Beans {
-    private final MeterRegistry meterRegistry;
-
 
     @Bean
     public ResponseFactory<NodeResponse> nodeResponseFactory() {
         return new NodeResponseFactory();
     }
 
-    @Bean(name = "matchesCreationExecutor")
-    public TaskExecutor matchingExecutor() {
+    @Bean(name = "nodesFetchExecutor")
+    public ThreadPoolTaskExecutor nodesFetchExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        executor.setCorePoolSize(10);
-        executor.setMaxPoolSize(20);
-        executor.setQueueCapacity(50);
-        executor.setThreadNamePrefix("MatchesCreation-");
+        executor.setCorePoolSize(3);
+        executor.setMaxPoolSize(6);
+        executor.setQueueCapacity(100);
+        executor.setThreadNamePrefix("nodes-fetch-");
+        executor.initialize();
+        return executor;
+    }
+
+    @Bean("persistenceExecutor")
+    public ExecutorService persistenceExecutor(MeterRegistry meterRegistry) {
+        ThreadFactory threadFactory = new ThreadFactoryBuilder().setNameFormat("persistence-executor-%d").build();
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(
+                8, 16, 0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(500),
+                threadFactory,
+                new ThreadPoolExecutor.CallerRunsPolicy() {
+                    @Override
+                    public void rejectedExecution(Runnable r, ThreadPoolExecutor e) {
+                        meterRegistry.counter("persistence_executor_rejections").increment();
+                        log.warn("persistence task rejected: queue size={}", e.getQueue().size());
+                        super.rejectedExecution(r, e);
+                    }
+                }
+        );
+        executor.allowCoreThreadTimeOut(false);
+        return executor;
+    }
+
+    @Bean("ioExecutorService")
+    public ExecutorService ioExecutorService() {
+        ThreadFactory threadFactory = new ThreadFactoryBuilder().setNameFormat("io-executor-%d").build();
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(
+                4, 8, 0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(100),
+                threadFactory,
+                new ThreadPoolExecutor.CallerRunsPolicy() {
+                    @Override
+                    public void rejectedExecution(Runnable r, ThreadPoolExecutor e) {
+                        super.rejectedExecution(r, e);
+                    }
+                }
+        );
+        executor.allowCoreThreadTimeOut(false);
+        return executor;
+    }
+
+    @Bean(name = "cacheExecutor")
+    public ExecutorService cacheExecutor() {
+        return Executors.newFixedThreadPool(4, r -> {
+            Thread t = new Thread(r, "cache-executor");
+            t.setDaemon(true);
+            return t;
+        });
+    }
+
+    @Bean(name = "queueFlushExecutor")
+    public ExecutorService queueFlushExecutor() {
+        return Executors.newFixedThreadPool(4, r -> {
+            Thread t = new Thread(r, "queue-flush-executor");
+            t.setDaemon(true);
+            return t;
+        });
+    }
+
+    @Bean("matchCreationExecutorService")
+    public ExecutorService matchCreationExecutorService(MeterRegistry meterRegistry) {
+        ThreadFactory threadFactory = new ThreadFactoryBuilder().setNameFormat("match-create-%d").build();
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(
+                4, 8, 0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(100),
+                threadFactory,
+                new ThreadPoolExecutor.CallerRunsPolicy() {
+                    @Override
+                    public void rejectedExecution(Runnable r, ThreadPoolExecutor e) {
+                        meterRegistry.counter("match_creation_executor_rejections").increment();
+                        super.rejectedExecution(r, e);
+                    }
+                }
+        );
+        executor.allowCoreThreadTimeOut(false);
+        return executor;
+    }
+
+    @Bean("graphBuildExecutor")
+    public ExecutorService graphBuildExecutor(MeterRegistry meterRegistry) {
+        ThreadFactory threadFactory = new ThreadFactoryBuilder().setNameFormat("graph-build-%d").build();
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(
+                8, 16, 0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(1000),
+                threadFactory,
+                new ThreadPoolExecutor.CallerRunsPolicy() {
+                    @Override
+                    public void rejectedExecution(Runnable r, ThreadPoolExecutor e) {
+                        meterRegistry.counter("match_creation_executor_rejections").increment();
+                        log.warn("Match creation task rejected: queue size={}", e.getQueue().size());
+                        super.rejectedExecution(r, e);
+                    }
+                }
+        );
+        executor.allowCoreThreadTimeOut(false);
+        return executor;
+    }
+
+    @Bean(name = "watchdogExecutor")
+    public ScheduledExecutorService watchdogExecutor() {
+        int corePoolSize = 2;
+        return Executors.newScheduledThreadPool(corePoolSize);
+    }
+
+
+    @Bean("graphExecutorService")
+    public ExecutorService graphExecutorService() {
+        ThreadFactory threadFactory = new ThreadFactoryBuilder().setNameFormat("graph-ex-%d").build();
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(
+                8, 16, 0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(1000),
+                threadFactory,
+                new ThreadPoolExecutor.CallerRunsPolicy() {
+                    @Override
+                    public void rejectedExecution(Runnable r, ThreadPoolExecutor e) {
+                        super.rejectedExecution(r, e);
+                    }
+                }
+        );
+        executor.allowCoreThreadTimeOut(false);
+        return executor;
+    }
+
+    @Bean(name = "generalTaskExecutor")
+    public ThreadPoolTaskExecutor generalTaskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(2);
+        executor.setMaxPoolSize(4);
+        executor.setQueueCapacity(100);
+        executor.setThreadNamePrefix("general-");
         executor.initialize();
         return executor;
     }
@@ -94,5 +229,63 @@ public class Beans {
         executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
         executor.initialize();
         return executor;
+    }
+
+    @Bean(name = "matchesStorageExecutor")
+    public ExecutorService matchesStorageExecutor() {
+        ThreadFactory threadFactory = new ThreadFactoryBuilder().setNameFormat("match-storage-executor-%d").build();
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(
+                8, 16, 0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(200),
+                threadFactory,
+                new ThreadPoolExecutor.CallerRunsPolicy() {
+                    @Override
+                    public void rejectedExecution(Runnable r, ThreadPoolExecutor e) {
+                        super.rejectedExecution(r, e);
+                    }
+                }
+        );
+        executor.allowCoreThreadTimeOut(false);
+        return executor;
+    }
+
+    @Bean
+    public QueueManagerFactory queueManagerFactory(
+            MeterRegistry meterRegistry,
+            @Qualifier("persistenceExecutor") ExecutorService mappingExecutor,
+            @Qualifier("queueFlushExecutor") ExecutorService flushExecutor,
+            @Qualifier("queueFlushScheduler") ScheduledExecutorService flushScheduler) {
+
+        QueueManagerImpl.QuadFunction<String, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback =
+                (groupId, domainId, batchSize, processingCycleId) -> {
+                    return CompletableFuture.completedFuture(null);
+                };
+        return new QueueManagerFactory(meterRegistry, mappingExecutor, flushExecutor, flushScheduler, flushSignalCallback);
+    }
+
+    @Bean
+    @Qualifier("queueFlushScheduler")
+    public ScheduledExecutorService queueFlushScheduler() {
+        return Executors.newScheduledThreadPool(8, r -> {
+            Thread t = new Thread(r, "queue-manager-global-flush-scheduler");
+            t.setDaemon(true);
+            return t;
+        });
+    }
+
+    @Bean(name = "matchesProcessExecutor")
+    public ExecutorService matchesProcessExecutor(@Value("${match.semaphore.permits:8}") int permits) {
+        return new ThreadPoolExecutor(
+                permits,
+                permits,
+                0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(100),
+                new ThreadFactoryBuilder().setNameFormat("match-pro-%d").build()
+        );
+    }
+
+    @Bean
+    public CompatibilityCalculator compatibilityCalculator() {
+        return new MetadataCompatibilityCalculator();
     }
 }

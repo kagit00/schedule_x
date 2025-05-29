@@ -14,20 +14,6 @@ public final class NodeImportValidator {
         throw new UnsupportedOperationException("unsupported");
     }
 
-    public static void validateDomainAndGroup(String groupId, UUID domainId, UUID jobId, MatchingGroupRepository matchingGroupRepository) {
-        if (groupId == null || groupId.isBlank()) {
-            String error = "Invalid groupId: null or blank";
-            log.error("Job {}: {}", jobId, error);
-            throw new BadRequestException(error);
-        }
-        if (matchingGroupRepository.findByDomainIdAndGroupId(domainId, groupId) == null) {
-            String error = String.format("Invalid domainId=%s or groupId=%s", domainId, groupId);
-            log.error("Job {}: {}", jobId, error);
-            throw new BadRequestException(error);
-        }
-        log.info("Job {}: Validated domainId={} and groupId={}", jobId, domainId, groupId);
-    }
-
     public static boolean isValidPayloadForCostBasedNodes(NodeExchange message) {
         return message != null
                 && message.getFilePath() != null

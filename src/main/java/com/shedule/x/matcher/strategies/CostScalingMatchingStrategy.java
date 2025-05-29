@@ -2,7 +2,7 @@ package com.shedule.x.matcher.strategies;
 
 import com.shedule.x.dto.MatchResult;
 import com.shedule.x.models.*;
-import com.shedule.x.service.GraphBuilder;
+import com.shedule.x.service.GraphRecords;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import java.util.*;
@@ -18,8 +18,8 @@ public class CostScalingMatchingStrategy implements MatchingStrategy {
     }
 
     @Override
-    public Map<String, List<MatchResult>> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
-        Graph graph = graphResult.graph();
+    public Map<String, List<MatchResult>> match(GraphRecords.GraphResult graphResult, String groupId, UUID domainId) {
+        Graph graph = graphResult.getGraph();
         Map<String, List<CostEdge>> residualGraph = buildResidualGraph(graph);
         Map<String, Integer> potential = new HashMap<>();
         Map<String, List<MatchResult>> result = new HashMap<>();
@@ -91,10 +91,10 @@ public class CostScalingMatchingStrategy implements MatchingStrategy {
     }
 
     private int parseCost(Object costObj) {
-        if (costObj instanceof String s) {
-            return Integer.parseInt(s);
-        } else if (costObj instanceof Number number) {
-            return number.intValue();
+        if (costObj instanceof String) {
+            return Integer.parseInt((String) costObj);
+        } else if (costObj instanceof Number) {
+            return ((Number) costObj).intValue();
         }
         return 1;
     }

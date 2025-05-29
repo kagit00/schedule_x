@@ -25,21 +25,22 @@ import java.sql.Statement;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class NodeMetadataBatchWriter {
     private static final int METADATA_BATCH_SIZE = 30000;
-    private static final String COPY_TEMP_SQL = """
-        CREATE TEMP TABLE temp_node_metadata (node_id UUID, meta_key TEXT, meta_value TEXT) ON COMMIT DROP
-        """;
-    private static final String UPSERT_METADATA_SQL = """
-        INSERT INTO public.node_metadata (node_id, meta_key, meta_value)
-        SELECT node_id, meta_key, meta_value FROM temp_node_metadata
-        ON CONFLICT (node_id, meta_key)
-        DO UPDATE SET meta_value = EXCLUDED.meta_value
-        """;
+    private static final String COPY_TEMP_SQL =
+            "CREATE TEMP TABLE temp_node_metadata (node_id UUID, meta_key TEXT, meta_value TEXT) ON COMMIT DROP";
+
+    private static final String UPSERT_METADATA_SQL =
+            "INSERT INTO public.node_metadata (node_id, meta_key, meta_value)\n" +
+                    "SELECT node_id, meta_key, meta_value FROM temp_node_metadata\n" +
+                    "ON CONFLICT (node_id, meta_key)\n" +
+                    "DO UPDATE SET meta_value = EXCLUDED.meta_value";
+
 
     private final JdbcTemplate jdbcTemplate;
     private final MeterRegistry meterRegistry;
@@ -76,7 +77,7 @@ public class NodeMetadataBatchWriter {
         for (Map.Entry<UUID, Map<String, String>> nodeEntry : metadataByNode.entrySet()) {
             List<Map.Entry<UUID, Map.Entry<String, String>>> nodeEntries = nodeEntry.getValue().entrySet().stream()
                     .map(meta -> Map.entry(nodeEntry.getKey(), meta))
-                    .toList();
+                    .collect(Collectors.toList());
 
             if (currentSize + nodeEntries.size() > METADATA_BATCH_SIZE && !currentBatch.isEmpty()) {
                 result.add(currentBatch);

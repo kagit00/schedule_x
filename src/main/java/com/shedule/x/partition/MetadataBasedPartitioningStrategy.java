@@ -2,35 +2,32 @@ package com.shedule.x.partition;
 
 import com.shedule.x.models.Node;
 import lombok.AllArgsConstructor;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.tuple.Pair;
+import org.springframework.stereotype.Component;
+
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
-@AllArgsConstructor
-@Slf4j
+@Component("metadataBasedPartitioningStrategy")
 public class MetadataBasedPartitioningStrategy implements PartitionStrategy {
-    private final String metadataKey;
-    private final String leftValue;
-    private final String rightValue;
-
 
     @Override
-    public Pair<List<Node>, List<Node>> partition(List<Node> nodes) {
-        List<Node> left = new ArrayList<>();
-        List<Node> right = new ArrayList<>();
+    public Pair<Stream<Node>, Stream<Node>> partition(Stream<Node> nodes, String key, String leftValue, String rightValue) {
+        List<Node> nodeList = nodes.collect(Collectors.toList());
 
-        for (Node node : nodes) {
-            Object roleValue = node.getMetaData().get(metadataKey);
-            if (roleValue == null) continue;
+        List<Node> left = nodeList.stream()
+                .filter(node -> leftValue.equals(node.getMetaData().getOrDefault(key, "")))
+                .collect(Collectors.toList());
 
-            String role = roleValue.toString();
-            if (leftValue.equalsIgnoreCase(role)) {
-                left.add(node);
-            } else if (rightValue.equalsIgnoreCase(role)) {
-                right.add(node);
-            }
-        }
-        return Pair.of(left, right);
+        List<Node> right = nodeList.stream()
+                .filter(node -> rightValue.equals(node.getMetaData().getOrDefault(key, "")))
+                .collect(Collectors.toList());
+
+        return Pair.of(left.stream(), right.stream());
     }
+
 }

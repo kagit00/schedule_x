@@ -4,13 +4,14 @@ import com.shedule.x.dto.MatchResult;
 import com.shedule.x.models.Edge;
 import com.shedule.x.models.Graph;
 import com.shedule.x.models.Node;
-import com.shedule.x.service.GraphBuilder;
+import com.shedule.x.service.GraphRecords;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 
@@ -26,8 +27,8 @@ public class TopKWeightedGreedyMatchingStrategy implements MatchingStrategy {
     private final ConcurrentHashMap<String, List<MatchResult>> matches = new ConcurrentHashMap<>();
 
     @Override
-    public Map<String, List<MatchResult>> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
-        Graph graph = graphResult.graph();
+    public Map<String, List<MatchResult>> match(GraphRecords.GraphResult graphResult, String groupId, UUID domainId) {
+        Graph graph = graphResult.getGraph();
         if (graph == null || graph.getNodes().isEmpty()) {
             log.warn("Graph is null or empty, returning empty matches");
             return Collections.emptyMap();
@@ -57,7 +58,7 @@ public class TopKWeightedGreedyMatchingStrategy implements MatchingStrategy {
                 .filter(edge -> !nodeId.equalsIgnoreCase(edge.getToNode().getReferenceId()))
                 .sorted(Comparator.comparingDouble(Edge::getWeight).reversed())
                 .limit(maxMatchesPerNode)
-                .toList();
+                .collect(Collectors.toList());
 
         if (!edges.isEmpty()) {
             List<MatchResult> nodeMatches = edges.stream()
@@ -65,7 +66,7 @@ public class TopKWeightedGreedyMatchingStrategy implements MatchingStrategy {
                             .partnerId(edge.getToNode().getReferenceId())
                             .score(edge.getWeight())
                             .build())
-                    .toList();
+                    .collect(Collectors.toList());
 
             matches.put(nodeId, nodeMatches);
         }

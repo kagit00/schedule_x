@@ -5,29 +5,22 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jayway.jsonpath.JsonPath;
-import com.shedule.x.exceptions.BadRequestException;
 import lombok.extern.slf4j.Slf4j;
-
-
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.net.URL;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
-import java.util.Base64;
 import java.util.List;
-import java.util.zip.GZIPInputStream;
 
 
 @Slf4j
 public final class BasicUtility {
-    private static final ObjectMapper om = new ObjectMapper();
-
-    static {
-        om.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-    }
+    private static final ObjectMapper om = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);;
+    private static final LocalDateTime PG_EPOCH = LocalDateTime.of(2000, 1, 1, 0, 0, 0);
 
     private BasicUtility() {
         throw new UnsupportedOperationException("Not supported");
@@ -75,31 +68,6 @@ public final class BasicUtility {
         return obj != null ? obj.toString() : "";
     }
 
-    public static byte[] parseFileContent(Object rawContent) {
-        if (rawContent instanceof byte[] c) {
-            return decompress(c);
-        } else if (rawContent instanceof String s) {
-            byte[] decoded = Base64.getDecoder().decode(s);
-            return decompress(decoded);
-        }
-        throw new BadRequestException("Invalid fileContent type: " + rawContent.getClass());
-    }
-
-    private static byte[] decompress(byte[] compressedData) {
-        try (ByteArrayInputStream bais = new ByteArrayInputStream(compressedData);
-             GZIPInputStream gzipIn = new GZIPInputStream(bais);
-             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-
-            byte[] buffer = new byte[4096];
-            int len;
-            while ((len = gzipIn.read(buffer)) != -1) {
-                out.write(buffer, 0, len);
-            }
-            return out.toByteArray();
-        } catch (IOException e) {
-            throw new BadRequestException("Failed to decompress fileContent: " + e.getMessage());
-        }
-    }
 
     public static <T> T safeParse(String payload, Class<T> clazz) {
         try {
@@ -109,4 +77,24 @@ public final class BasicUtility {
             return null;
         }
     }
+
+    public static <T> T deserializeToBytes(byte[] payload, Class<T> clazz) {
+        try {
+            return om.readValue(payload, clazz);
+        } catch (Exception e) {
+            log.debug("Failed to parse payload into {}:.", clazz.getSimpleName());
+            return null;
+        }
+    }
+
+    public static void writeTimestamp(LocalDateTime timestamp, DataOutputStream out) throws IOException {
+        if (timestamp == null) {
+            log.error("Null timestamp provided for binary COPY");
+            throw new IllegalArgumentException("Timestamp cannot be null");
+        }
+        out.writeInt(8);
+        long microsSincePgEpoch = ChronoUnit.MICROS.between(PG_EPOCH, timestamp);
+        out.writeLong(microsSincePgEpoch);
+    }
+
 }

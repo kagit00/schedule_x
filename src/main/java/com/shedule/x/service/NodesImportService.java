@@ -16,6 +16,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.ListUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.stereotype.Service;
@@ -36,7 +37,6 @@ import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class NodesImportService {
     @Value("${import.node-timeout-ms:500}")
     private long nodeTimeoutMs;
@@ -49,6 +49,18 @@ public class NodesImportService {
     private final ResponseFactory<NodeResponse> nodeResponseFactory;
     private final MeterRegistry meterRegistry;
     private final ThreadPoolTaskExecutor executor;
+
+    public NodesImportService(NodesImportStatusUpdater statusUpdater,
+                              NodesImportProcessor nodesImportProcessor,
+                              ResponseFactory<NodeResponse> nodeResponseFactory,
+                              MeterRegistry meterRegistry,
+                              @Qualifier("nodesImportExecutor") ThreadPoolTaskExecutor executor) {
+        this.statusUpdater = statusUpdater;
+        this.nodesImportProcessor = nodesImportProcessor;
+        this.nodeResponseFactory = nodeResponseFactory;
+        this.meterRegistry = meterRegistry;
+        this.executor = executor;
+    }
 
     public CompletableFuture<Void> processNodesImport(UUID jobId, MultipartFile file, NodeExchange message) {
         String groupId = message.getGroupId();
@@ -123,8 +135,24 @@ public class NodesImportService {
     }
 
     private void joinAndClearFutures(List<CompletableFuture<Void>> futures) {
-        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-        futures.clear();
+        CompletableFuture<Void> resultFuture = new CompletableFuture<>();
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                .thenAcceptAsync(v -> {
+                    futures.clear();
+                    resultFuture.complete(null);
+                }, executor)
+                .exceptionally(t -> {
+                    log.error("Failed to complete futures: {}", t.getMessage());
+                    resultFuture.completeExceptionally(t);
+                    return null;
+                });
+
+        try {
+            resultFuture.get(120, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.error("Error waiting for futures: {}", e.getMessage());
+            throw new RuntimeException("Failed to join and clear futures", e);
+        }
     }
 
     private void finalizeJob(UUID jobId, String groupId, UUID domainId,
@@ -185,7 +213,21 @@ public class NodesImportService {
                 }, executor).orTimeout(nodeTimeoutMs, TimeUnit.MILLISECONDS));
             }
 
-            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+            CompletableFuture<Void> resultFuture = new CompletableFuture<>();
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                    .thenAcceptAsync(v -> resultFuture.complete(null), executor)
+                    .exceptionally(t -> {
+                        log.error("Failed to complete futures for jobId={}: {}", jobId, t.getMessage());
+                        resultFuture.completeExceptionally(t);
+                        return null;
+                    });
+
+            try {
+                resultFuture.get(nodeTimeoutMs, TimeUnit.MILLISECONDS);
+            } catch (Exception e) {
+                log.error("Error waiting for futures for jobId={}: {}", jobId, e.getMessage());
+                throw new RuntimeException(e);
+            }
             return null;
         }, executor).handle((result, throwable) -> {
             if (throwable != null) {

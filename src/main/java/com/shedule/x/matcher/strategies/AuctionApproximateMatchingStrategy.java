@@ -4,7 +4,7 @@ import com.shedule.x.dto.MatchResult;
 import com.shedule.x.models.Edge;
 import com.shedule.x.models.Graph;
 import com.shedule.x.models.Node;
-import com.shedule.x.service.GraphBuilder;
+import com.shedule.x.service.GraphRecords;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import java.util.*;
@@ -16,8 +16,8 @@ public class AuctionApproximateMatchingStrategy implements MatchingStrategy {
     private static final double DEFAULT_EDGE_COST = 1.0;
 
     @Override
-    public Map<String, List<MatchResult>> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
-        Graph graph = graphResult.graph();
+    public Map<String, List<MatchResult>> match(GraphRecords.GraphResult graphResult, String groupId, UUID domainId) {
+        Graph graph = graphResult.getGraph();
         List<Node> leftNodes = graph.getLeftPartition();
         List<Node> rightNodes = graph.getRightPartition();
         Map<String, String> assignment = new HashMap<>();
@@ -71,10 +71,10 @@ public class AuctionApproximateMatchingStrategy implements MatchingStrategy {
     }
 
     private double parseCost(Object costObj) {
-        if (costObj instanceof String string) {
-            return Double.parseDouble(string);
-        } else if (costObj instanceof Number number) {
-            return number.doubleValue();
+        if (costObj instanceof String) {
+            return Double.parseDouble((String) costObj);
+        } else if (costObj instanceof Number) {
+            return ((Number) costObj).doubleValue();
         }
         return DEFAULT_EDGE_COST;
     }

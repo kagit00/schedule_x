@@ -1,6 +1,7 @@
 package com.shedule.x.models;
 
 import com.shedule.x.dto.enums.NodeType;
+import com.shedule.x.validation.ValidEnum;
 import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -25,7 +26,8 @@ public class Node {
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
     @Column(nullable = false)
-    private NodeType type;
+    @ValidEnum(enumClass = NodeType.class, message = "Invalid node type")
+    private String type;
     @Column(name = "reference_id", nullable = false)
     private String referenceId;
     @ElementCollection(fetch = FetchType.LAZY)
@@ -38,4 +40,6 @@ public class Node {
     private LocalDateTime createdAt;
     @Column(nullable = false)
     private UUID domainId;
+    @Column(name = "is_processed")
+    private boolean processed = false;
 }

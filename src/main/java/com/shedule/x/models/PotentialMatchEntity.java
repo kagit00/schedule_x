@@ -41,4 +41,7 @@ public class PotentialMatchEntity {
 
     @Column(nullable = false)
     private UUID domainId;
+
+    @Column(name = "processing_cycle_id")
+    private String processingCycleId;
 }

@@ -2,7 +2,7 @@ package com.shedule.x.matcher.strategies;
 
 import com.shedule.x.dto.MatchResult;
 import com.shedule.x.models.*;
-import com.shedule.x.service.GraphBuilder;
+import com.shedule.x.service.GraphRecords;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import java.util.*;
@@ -15,8 +15,8 @@ public class HungarianMatchingStrategy implements MatchingStrategy {
     private static final int MAX_COST = Integer.MAX_VALUE / 4;
 
     @Override
-    public Map<String, List<MatchResult>> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
-        Graph graph = graphResult.graph();
+    public Map<String, List<MatchResult>> match(GraphRecords.GraphResult graphResult, String groupId, UUID domainId) {
+        Graph graph = graphResult.getGraph();
         List<Node> leftNodes = graph.getLeftPartition();
         List<Node> rightNodes = graph.getRightPartition();
 

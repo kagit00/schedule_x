@@ -3,19 +3,13 @@ package com.shedule.x.config.factory;
 import com.shedule.x.dto.*;
 import com.shedule.x.dto.enums.JobStatus;
 import com.shedule.x.dto.enums.NodeType;
-import com.shedule.x.exceptions.BadRequestException;
-import com.shedule.x.exceptions.InternalServerErrorException;
-import com.shedule.x.models.Node;
-import com.shedule.x.models.NodesImportJob;
-import com.shedule.x.utils.basic.BasicUtility;
+import com.shedule.x.models.*;
+import com.shedule.x.service.GraphRecords;
 import com.shedule.x.utils.basic.DefaultValuesPopulator;
 import com.shedule.x.utils.media.csv.ValueSanitizer;
 import lombok.extern.slf4j.Slf4j;
-
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
 import java.util.*;
-import java.util.zip.GZIPOutputStream;
+
 
 @Slf4j
 public final class GraphRequestFactory {
@@ -43,6 +37,35 @@ public final class GraphRequestFactory {
                 .build();
     }
 
+    public static PotentialMatchEntity convertToPotentialMatch(GraphRecords.PotentialMatch edge, String groupId, UUID domainId) {
+        return PotentialMatchEntity.builder()
+                .matchedAt(DefaultValuesPopulator.getCurrentTimestamp())
+                .matchedReferenceId(edge.getReferenceId())
+                .referenceId(edge.getReferenceId())
+                .compatibilityScore(edge.getCompatibilityScore())
+                .groupId(groupId)
+                .domainId(domainId)
+                .build();
+    }
+
+    public static PotentialMatchEntity convertToPotentialMatch(Edge edge, String groupId, UUID domainId, String pid) {
+        return PotentialMatchEntity.builder()
+                .matchedAt(DefaultValuesPopulator.getCurrentTimestamp())
+                .matchedReferenceId(edge.getToNode().getReferenceId())
+                .referenceId(edge.getFromNode().getReferenceId())
+                .compatibilityScore(edge.getWeight())
+                .groupId(groupId)
+                .domainId(domainId)
+                .processingCycleId(pid)
+                .build();
+    }
+
+    public static String bucketNodes(int numberOfNodes) {
+        if (numberOfNodes <= 100) return "0-100";
+        if (numberOfNodes <= 500) return "101-500";
+        return "501+";
+    }
+
 
     public static List<Node> convertResponsesToNodes(List<NodeResponse> responses, NodeExchange message) {
         long startTime = System.nanoTime();
@@ -61,7 +84,7 @@ public final class GraphRequestFactory {
                         .groupId(messageGroupId)
                         .domainId(domainId)
                         .referenceId(referenceId)
-                        .type(res.getType() != null ? res.getType() : NodeType.USER)
+                        .type(res.getType() != null ? res.getType().name() : NodeType.USER.name())
                         .build();
 
                 long metaStart = System.nanoTime();
@@ -105,7 +128,7 @@ public final class GraphRequestFactory {
                         .groupId(groupId)
                         .domainId(domainId)
                         .referenceId(refId)
-                        .type(type)
+                        .type(type.name())
                         .metaData(new HashMap<>())
                         .createdAt(DefaultValuesPopulator.getCurrentTimestamp())
                         .build();
@@ -128,4 +151,68 @@ public final class GraphRequestFactory {
     public static FileSystemMultipartFile fromPayload(NodeExchange payload) {
         return new FileSystemMultipartFile(payload.getFilePath(), payload.getFileName(), payload.getContentType());
     }
+
+
+    public static PotentialMatchEntity convertEdgeToEntity(Edge edge, String groupId, UUID domainId, String processingCycleId) {
+        return PotentialMatchEntity.builder()
+                .id(UUID.randomUUID())
+                .groupId(groupId)
+                .domainId(domainId)
+                .processingCycleId(processingCycleId)
+                .referenceId(edge.getFromNode().getReferenceId())
+                .matchedReferenceId(edge.getToNode().getReferenceId())
+                .compatibilityScore(edge.getWeight())
+                .matchedAt(DefaultValuesPopulator.getCurrentTimestamp())
+                .build();
+    }
+
+
+
+    public static PerfectMatchEntity convertToPerfectMatch(MatchResult result, String key, String groupId, UUID domainId) {
+        return PerfectMatchEntity.builder()
+                .groupId(groupId)
+                .domainId(domainId)
+                .matchedReferenceId(result.getPartnerId())
+                .compatibilityScore(result.getScore())
+                .referenceId(key)
+                .build();
+    }
+
+    public static PotentialMatchEntity convertToPotentialMatch(GraphRecords.PotentialMatch match) {
+        return PotentialMatchEntity.builder()
+                .groupId(match.getGroupId())
+                .domainId(match.getDomainId())
+                .referenceId(match.getReferenceId())
+                .matchedReferenceId(match.getMatchedReferenceId())
+                .compatibilityScore(match.getCompatibilityScore())
+                .build();
+    }
+
+    public static Edge toEdge(GraphRecords.PotentialMatch match) {
+        Node fromNode = Node.builder()
+                .id(UUID.randomUUID())
+                .referenceId(match.getReferenceId())
+                .groupId(match.getGroupId())
+                .domainId(match.getDomainId())
+                .type("match")
+                .createdAt(DefaultValuesPopulator.getCurrentTimestamp())
+                .build();
+
+        Node toNode = Node.builder()
+                .id(UUID.randomUUID())
+                .referenceId(match.getMatchedReferenceId())
+                .groupId(match.getGroupId())
+                .domainId(match.getDomainId())
+                .type("match")
+                .createdAt(DefaultValuesPopulator.getCurrentTimestamp())
+                .build();
+
+        return Edge.builder()
+                .fromNode(fromNode)
+                .toNode(toNode)
+                .weight(match.getCompatibilityScore())
+                .metaData(new HashMap<>())
+                .build();
+    }
+
 }

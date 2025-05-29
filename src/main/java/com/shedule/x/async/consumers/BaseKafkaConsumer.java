@@ -43,12 +43,11 @@ public abstract class BaseKafkaConsumer {
             meterRegistry.counter("kafka_dlq_messages", "topic", topic, "groupId", groupId).increment();
             return;
         }
-
         long startTime = System.currentTimeMillis();
 
         CompletableFuture.runAsync(() -> {
             try {
-                config.getPayloadProcessor().process(payload).join();
+                config.getPayloadProcessor().process(payload).get();
                 long duration = System.currentTimeMillis() - startTime;
                 meterRegistry.timer("kafka_processing_time", "topic", topic, "groupId", groupId)
                         .record(duration, TimeUnit.MILLISECONDS);

@@ -5,7 +5,8 @@ import com.shedule.x.dto.MatchResult;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 public interface MatchStorageService {
-    void saveMatchResults(Map<String, List<MatchResult>> matches, String groupId, UUID domainId);
+    CompletableFuture<Void> savePerfectMatchResults(Map<String, List<MatchResult>> results, String groupId, UUID domainId);
 }

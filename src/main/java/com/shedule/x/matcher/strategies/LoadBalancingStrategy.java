@@ -4,7 +4,7 @@ import com.shedule.x.dto.MatchResult;
 import com.shedule.x.models.Edge;
 import com.shedule.x.models.Graph;
 import com.shedule.x.models.Node;
-import com.shedule.x.service.GraphBuilder;
+import com.shedule.x.service.GraphRecords;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -15,8 +15,8 @@ import java.util.*;
 public class LoadBalancingStrategy implements MatchingStrategy {
 
     @Override
-    public Map<String, List<MatchResult>> match(GraphBuilder.GraphResult graphResult, String groupId, UUID domainId) {
-        Graph graph = graphResult.graph();
+    public Map<String, List<MatchResult>> match(GraphRecords.GraphResult graphResult, String groupId, UUID domainId) {
+        Graph graph = graphResult.getGraph();
         Map<String, List<MatchResult>> assignment = new HashMap<>();
         Map<String, Integer> rightNodeLoad = new HashMap<>();
 

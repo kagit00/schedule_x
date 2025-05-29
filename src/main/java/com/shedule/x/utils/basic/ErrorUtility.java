@@ -2,6 +2,7 @@ package com.shedule.x.utils.basic;
 
 import com.shedule.x.models.Error;
 import jakarta.servlet.http.HttpServletResponse;
+import lombok.extern.slf4j.Slf4j;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -10,9 +11,8 @@ import org.springframework.http.MediaType;
 import java.io.IOException;
 import java.io.PrintWriter;
 
-
+@Slf4j
 public final class ErrorUtility {
-    private static final Logger logger = LoggerFactory.getLogger(ErrorUtility.class);
 
     private ErrorUtility() {
         throw new UnsupportedOperationException("Not supported");
@@ -46,7 +46,7 @@ public final class ErrorUtility {
             PrintWriter writer = response.getWriter();
             writer.write(str);
         } catch (IOException e) {
-            logger.error(e.getMessage());
+            log.error(e.getMessage());
         }
     }
 }

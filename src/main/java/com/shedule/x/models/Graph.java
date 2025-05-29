@@ -8,6 +8,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Builder
 @Data
@@ -29,11 +30,11 @@ public class Graph {
     }
 
     public List<Node> getNodesByType(NodeType type) {
-        return nodes.stream().filter(node -> node.getType() == type).toList();
+        return nodes.stream().filter(node -> node.getType().equalsIgnoreCase(type.name())).collect(Collectors.toList());
     }
 
     public List<Edge> getEdgesFrom(Node fromNode) {
-        return edges.stream().filter(edge -> edge.getFromNode().equals(fromNode)).toList();
+        return edges.stream().filter(edge -> edge.getFromNode().equals(fromNode)).collect(Collectors.toList());
     }
 
     public Map<String, List<Edge>> getAdjacencyMap() {

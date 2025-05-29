@@ -1,6 +1,7 @@
 package com.shedule.x.config;
 
 
+import io.micrometer.core.instrument.MeterRegistry;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.InvalidTopicException;
@@ -27,7 +28,10 @@ import java.util.concurrent.Executors;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.listener.ContainerProperties;
 import org.springframework.kafka.support.converter.StringJsonMessageConverter;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+
 import java.util.HashMap;
+import java.util.concurrent.ThreadPoolExecutor;
 
 
 @Slf4j
@@ -76,8 +80,17 @@ public class KafkaConfig {
         return new DefaultKafkaProducerFactory<>(buildCommonProducerConfigs());
     }
 
+    @Bean
+    public ConsumerFactory<String, String> consumerFactory() {
+        return new DefaultKafkaConsumerFactory<>(buildConsumerConfigs());
+    }
 
-    // Shared Consumer Configuration
+    private final MeterRegistry meterRegistry;
+
+    public KafkaConfig(MeterRegistry meterRegistry) {
+        this.meterRegistry = meterRegistry;
+    }
+
     private Map<String, Object> buildConsumerConfigs() {
         Map<String, Object> props = new HashMap<>();
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
@@ -88,12 +101,10 @@ public class KafkaConfig {
         props.put(ConsumerConfig.MAX_PARTITION_FETCH_BYTES_CONFIG, MAX_FETCH_BYTES);
         props.put(ConsumerConfig.FETCH_MAX_BYTES_CONFIG, MAX_FETCH_BYTES);
         props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, DEFAULT_MAX_POLL_RECORDS);
+        props.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, 45000);
+        props.put(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG, 15000);
+        props.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, 600000);
         return props;
-    }
-
-    @Bean
-    public ConsumerFactory<String, String> consumerFactory() {
-        return new DefaultKafkaConsumerFactory<>(buildConsumerConfigs());
     }
 
     @Bean(name = "kafkaListenerContainerFactory")
@@ -103,6 +114,17 @@ public class KafkaConfig {
         factory.setConsumerFactory(consumerFactory());
         factory.setConcurrency(2);
         factory.setRecordMessageConverter(new StringJsonMessageConverter());
+
+        ThreadPoolTaskExecutor consumerExecutor = new ThreadPoolTaskExecutor();
+        consumerExecutor.setCorePoolSize(8);
+        consumerExecutor.setMaxPoolSize(8);
+        consumerExecutor.setQueueCapacity(100);
+        consumerExecutor.setThreadNamePrefix("kafka-consumer-");
+        consumerExecutor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+        consumerExecutor.initialize();
+        factory.setContainerCustomizer(container ->
+                container.getContainerProperties().setListenerTaskExecutor(consumerExecutor));
+
 
         ExponentialBackOffWithMaxRetries backOff = new ExponentialBackOffWithMaxRetries(3);
         backOff.setInitialInterval(1000L);
@@ -122,7 +144,12 @@ public class KafkaConfig {
         errorHandler.addNotRetryableExceptions(InvalidTopicException.class);
 
         factory.setCommonErrorHandler(errorHandler);
-        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.BATCH); // Optional: control commit behavior
+        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.BATCH);
+
+        meterRegistry.gauge("kafka_consumer_executor_active_threads",
+                consumerExecutor.getThreadPoolExecutor(), ThreadPoolExecutor::getActiveCount);
+        meterRegistry.gauge("kafka_consumer_executor_queue_size",
+                consumerExecutor.getThreadPoolExecutor(), e -> e.getQueue().size());
 
         return factory;
     }
