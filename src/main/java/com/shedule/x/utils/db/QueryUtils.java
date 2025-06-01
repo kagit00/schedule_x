@@ -1,17 +1,11 @@
-package com.shedule.x.utils.basic;
+package com.shedule.x.utils.db;
 
-public final class Constant {
-    private Constant() {
-        throw new UnsupportedOperationException("Not supported");
-    }
+import lombok.experimental.UtilityClass;
 
-    public static final String GROUP_ID = "group_id";
-    public static final String DOMAIN_ID = "domain_id";
-    public static final String OPS = "operation";
-    public static final String NODES = "nodes";
-    public static final String NODES_METADATA = "metadata";
+@UtilityClass
+public final class QueryUtils {
 
-    public static final String UPSERT_POTENTIAL_MATCHES_SQL =
+    private static final String UPSERT_POTENTIAL_MATCHES_SQL =
             "INSERT INTO public.potential_matches (\n" +
                     "    id,\n" +
                     "    group_id,\n" +
@@ -50,16 +44,16 @@ public final class Constant {
                     "    WHERE group_id = ?\n" +
                     "      AND processing_cycle_id = ?\n" +
                     ") ranked\n" +
-                    "WHERE rn <= 500\n" +
+                    "WHERE rn <= 200\n" +
                     "ON CONFLICT (group_id, reference_id, matched_reference_id)\n" +
                     "DO UPDATE SET\n" +
                     "    compatibility_score = EXCLUDED.compatibility_score,\n" +
                     "    matched_at = EXCLUDED.matched_at";
 
-    public static final String DROP_TEMP_TABLE_SQL =
+    private static final String DROP_TEMP_TABLE_SQL =
             "DROP TABLE IF EXISTS temp_potential_matches";
 
-    public static final String TEMP_TABLE_SQL =
+    private static final String TEMP_TABLE_SQL =
             "CREATE TEMPORARY TABLE IF NOT EXISTS temp_potential_matches (\n" +
                     "    id UUID NOT NULL,\n" +
                     "    group_id VARCHAR(50),\n" +
@@ -71,6 +65,15 @@ public final class Constant {
                     "    matched_at TIMESTAMP\n" +
                     ") ";
 
-    public static final String COUNT_FINAL_MATCHES_SQL =
-            "SELECT COUNT(*) FROM public.potential_matches WHERE group_id = ? AND domain_id = ? AND processing_cycle_id = ? AND status = 'FINALIZED'";
+    public static String getUpsertPotentialMatchesSql() {
+        return UPSERT_POTENTIAL_MATCHES_SQL;
+    }
+
+    public static String getDropTempTableSql() {
+        return DROP_TEMP_TABLE_SQL;
+    }
+
+    public static String getTempTableSql() {
+        return TEMP_TABLE_SQL;
+    }
 }

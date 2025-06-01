@@ -1,8 +1,11 @@
 package com.shedule.x.scheduler;
 
+import com.shedule.x.config.QueueConfig;
 import com.shedule.x.config.QueueManagerConfig;
+import com.shedule.x.config.factory.GraphRequestFactory;
 import com.shedule.x.config.factory.QueueManagerFactory;
 import com.shedule.x.models.Domain;
+import com.shedule.x.processors.Cleaner;
 import com.shedule.x.processors.MatchesCreationJobExecutor;
 import com.shedule.x.processors.QueueManagerImpl;
 import com.shedule.x.repo.DomainRepository;
@@ -33,8 +36,9 @@ public class MatchesCreationScheduler {
     private final ConcurrentMap<String, Semaphore> groupLocks = new ConcurrentHashMap<>();
     private final ExecutorService batchExecutor;
     private final QueueManagerFactory queueManagerFactory;
+    private final Cleaner cleaner;
 
-    @Value("${match.queue.capacity:9000000}")
+    @Value("${match.queue.capacity:500000}")
     private int queueCapacity;
 
     @Value("${match.flush-interval-seconds:5}")
@@ -62,7 +66,8 @@ public class MatchesCreationScheduler {
             MeterRegistry meterRegistry,
             QueueManagerFactory queueManagerFactory,
             @Qualifier("matchCreationExecutorService") ExecutorService batchExecutor,
-            @Value("${match.max-concurrent-domains:2}") int maxConcurrentDomains
+            @Value("${match.max-concurrent-domains:2}") int maxConcurrentDomains,
+            Cleaner cleaner
     ) {
         this.domainRepository = domainRepository;
         this.matchingGroupRepository = matchingGroupRepository;
@@ -71,6 +76,8 @@ public class MatchesCreationScheduler {
         this.queueManagerFactory = queueManagerFactory;
         this.domainSemaphore = new Semaphore(maxConcurrentDomains, true);
         this.batchExecutor = batchExecutor;
+        this.cleaner = cleaner;
+
         if (batchExecutor instanceof ThreadPoolExecutor tpe) {
             int poolSize = tpe.getMaximumPoolSize();
             int requiredSize = maxConcurrentDomains + 2;
@@ -81,7 +88,7 @@ public class MatchesCreationScheduler {
         }
     }
 
-    @Scheduled(fixedDelayString = "${match.save.delay:900000}")
+    @Scheduled(fixedDelayString = "${match.save.delay:600000}")
     public void processAllDomainsScheduled() {
         Timer.Sample sample = Timer.start(meterRegistry);
         String cycleId = DefaultValuesPopulator.getUid();
@@ -116,6 +123,7 @@ public class MatchesCreationScheduler {
                     log.info("Completed batch matching at {}, cycleId={}", DefaultValuesPopulator.getCurrentTimestamp(), cycleId);
                     resultFuture.complete(null);
                 }, batchExecutor)
+                .whenComplete((v, t) -> cleaner.clean(true))
                 .exceptionally(t -> {
                     log.error("Batch processing failed, cycleId={}: {}", cycleId, t.getMessage(), t);
                     resultFuture.completeExceptionally(t);
@@ -172,6 +180,7 @@ public class MatchesCreationScheduler {
                 .whenComplete((v, e) -> {
                     groupSemaphore.release();
                     domainSemaphore.release();
+                    cleaner.clean(false);
                     log.info("Released locks for groupId={} domainId={} cycleId={}, permits: domain={} group={}",
                             groupId, domainId, cycleId,
                             domainSemaphore.availablePermits(), groupSemaphore.availablePermits());
@@ -192,18 +201,21 @@ public class MatchesCreationScheduler {
         QueueManagerConfig config = new QueueManagerConfig(
                 queueCapacity, flushIntervalSeconds, drainWarningThreshold, boostBatchFactor, maxFinalBatchSize
         );
-        QueueManagerImpl queueManager = queueManagerFactory.create(groupId, domainId, DefaultValuesPopulator.getUid(), config);
-        if (queueManager == null) {
+
+        QueueConfig queueConfig = GraphRequestFactory.getQueueConfig(groupId, domainId, DefaultValuesPopulator.getUid(), config);
+        QueueManagerImpl queueManager = queueManagerFactory.create(queueConfig);
+
+        if (Objects.isNull(queueManager)) {
             log.warn("No QueueManager for groupId={} domainId={} cycleId={}", groupId, domainId, cycleId);
             return;
         }
 
-        long queueSize = 0;
+        long queueSize;
         long startTime = System.currentTimeMillis();
         CompletableFuture<Void> flushFuture = CompletableFuture.completedFuture(null);
         for (int i = 0; i < maxIterations; i++) {
             queueSize = queueManager.getQueueSize();
-            log.info("Iteration {}: queueSize={} for groupId={} cycleId={}", i, queueSize, groupId, cycleId);
+            log.debug("Iteration {}: queueSize={} for groupId={} cycleId={}", i, queueSize, groupId, cycleId);
             if (queueSize == 0) break;
 
             flushFuture = flushFuture.thenComposeAsync(v -> {
@@ -216,7 +228,7 @@ public class MatchesCreationScheduler {
                 return CompletableFuture.completedFuture(null);
             }, batchExecutor);
 
-            if (System.currentTimeMillis() - startTime > shutdownLimitSeconds * 1000) {
+            if (System.currentTimeMillis() - startTime > shutdownLimitSeconds * 1000L) {
                 log.warn("Shutdown limit of {}s reached, {} matches remain for groupId={} cycleId={}",
                         shutdownLimitSeconds, queueSize, groupId, cycleId);
                 meterRegistry.counter("matches_dropped_due_to_shutdown", "groupId", groupId,
@@ -245,13 +257,13 @@ public class MatchesCreationScheduler {
 
     private void logExecutorState() {
         if (batchExecutor instanceof ThreadPoolExecutor tpe) {
-            log.info("Async pool: active={} queue={} completed={}",
+            log.debug("Async pool: active={} queue={} completed={}",
                     tpe.getActiveCount(), tpe.getQueue().size(), tpe.getCompletedTaskCount());
         }
     }
 
     private void logSemaphoreState(String groupId) {
-        log.info("Permits: domain={} group={}",
+        log.debug("Permits: domain={} group={}",
                 domainSemaphore.availablePermits(),
                 groupLocks.getOrDefault(groupId, new Semaphore(1)).availablePermits());
     }

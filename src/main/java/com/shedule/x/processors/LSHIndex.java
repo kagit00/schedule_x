@@ -17,4 +17,5 @@ public interface LSHIndex {
     Set<UUID> querySync(int[] metadata, UUID nodeId);
     long totalBucketsCount();
     boolean isBuilding();
+    void clean();
 }

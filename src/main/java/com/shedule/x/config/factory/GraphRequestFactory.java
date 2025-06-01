@@ -1,5 +1,7 @@
 package com.shedule.x.config.factory;
 
+import com.shedule.x.config.QueueConfig;
+import com.shedule.x.config.QueueManagerConfig;
 import com.shedule.x.dto.*;
 import com.shedule.x.dto.enums.JobStatus;
 import com.shedule.x.dto.enums.NodeType;
@@ -212,6 +214,15 @@ public final class GraphRequestFactory {
                 .toNode(toNode)
                 .weight(match.getCompatibilityScore())
                 .metaData(new HashMap<>())
+                .build();
+    }
+
+    public static QueueConfig getQueueConfig(String groupId, UUID domainId, String processingCycleId, QueueManagerConfig queueManagerConfig) {
+        return QueueConfig.builder()
+                .groupId(groupId).processingCycleId(processingCycleId)
+                .capacity(queueManagerConfig.getCapacity()).boostBatchFactor(queueManagerConfig.getBoostBatchFactor())
+                .flushIntervalSeconds(queueManagerConfig.getFlushIntervalSeconds()).maxFinalBatchSize(queueManagerConfig.getMaxFinalBatchSize())
+                .drainWarningThreshold(queueManagerConfig.getDrainWarningThreshold()).domainId(domainId)
                 .build();
     }
 

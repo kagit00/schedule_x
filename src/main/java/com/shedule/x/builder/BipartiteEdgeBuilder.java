@@ -3,6 +3,7 @@ package com.shedule.x.builder;
 import com.shedule.x.metrics.GraphBuilderMetrics;
 import com.shedule.x.models.Edge;
 import com.shedule.x.models.Node;
+import com.shedule.x.processors.MetadataCompatibilityCalculator;
 import com.shedule.x.service.CompatibilityCalculator;
 import com.shedule.x.service.GraphRecords;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -37,11 +38,10 @@ public class BipartiteEdgeBuilder {
 
     public BipartiteEdgeBuilder(
             MeterRegistry meterRegistry,
-            GraphBuilderMetrics metrics,
-            CompatibilityCalculator compatibilityCalculator) {
+            GraphBuilderMetrics metrics) {
         this.meterRegistry = meterRegistry;
         this.metrics = metrics;
-        this.compatibilityCalculator = compatibilityCalculator;
+        this.compatibilityCalculator = new MetadataCompatibilityCalculator();
     }
 
     public void processBatch(

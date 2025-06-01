@@ -3,10 +3,9 @@ package com.shedule.x.processors;
 import com.esotericsoftware.kryo.kryo5.Kryo;
 import com.esotericsoftware.kryo.kryo5.io.Input;
 import com.esotericsoftware.kryo.kryo5.io.Output;
-import com.esotericsoftware.kryo.kryo5.serializers.FieldSerializer;
+import com.shedule.x.config.factory.SerializerContext;
 import com.shedule.x.config.factory.AutoCloseableStream;
 import com.shedule.x.config.factory.GraphRequestFactory;
-import com.shedule.x.config.factory.UUIDSerializer;
 import com.shedule.x.exceptions.InternalServerErrorException;
 import com.shedule.x.models.Edge;
 
@@ -31,7 +30,6 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-import java.util.stream.StreamSupport;
 
 @Slf4j
 @Component
@@ -96,8 +94,8 @@ public class GraphStore implements AutoCloseable {
                     .fileMmapEnable()
                     .fileMmapPreclearDisable()
                     .cleanerHackEnable()
-                    .allocateStartSize(2_147_483_648L) // 2GB
-                    .allocateIncrement(1_147_483_648L)
+                    .allocateStartSize(512 * 1024 * 1024L)
+                    .allocateIncrement(256 * 1024 * 1024L)
                     .transactionEnable()
                     .concurrencyScale(32)
                     .make();
@@ -122,175 +120,16 @@ public class GraphStore implements AutoCloseable {
         }
     }
 
-    public CompletableFuture<Void> persistEdgesAsync(List<GraphRecords.PotentialMatch> matches, String groupId, int chunkIndex) {
-        if (matches.isEmpty()) {
-            log.debug("No matches to persist for groupId={}, chunkIndex={}", groupId, chunkIndex);
-            return CompletableFuture.completedFuture(null);
-        }
-
-        Instant submitStart = Instant.now();
-        List<CompletableFuture<Void>> batchFutures = new ArrayList<>();
-        for (List<GraphRecords.PotentialMatch> chunk : ListUtils.partition(matches, batchSize)) {
-            batchFutures.add(CompletableFuture.runAsync(() -> persistBatchAsync(chunk, groupId, chunkIndex), mapdbExecutor)
-                    .orTimeout(10, TimeUnit.SECONDS)
-                    .whenComplete((v, e) -> {
-                        if (e != null) {
-                            log.error("Failed to persist batch for groupId={}, chunkIndex={}: {}", groupId, chunkIndex, e.getMessage());
-                            meterRegistry.counter("mapdb_persist_batch_errors", "groupId", groupId).increment(chunk.size());
-                        }
-                    }));
-        }
-
-        return CompletableFuture.allOf(batchFutures.toArray(new CompletableFuture[0]))
-                .thenRun(() -> {
-                    try {
-                        Instant commitStart = Instant.now();
-                        db.commit();
-                        pendingCommits.set(0);
-                        long durationMs = Duration.between(commitStart, Instant.now()).toMillis();
-                        meterRegistry.timer("mapdb_commit_latency", "groupId", groupId).record(Duration.ofMillis(durationMs));
-                        meterRegistry.counter("mapdb_commits", "groupId", groupId).increment();
-                        log.info("Committed {} edges for groupId={}, chunkIndex={} in {} ms",
-                                matches.size(), groupId, chunkIndex, durationMs);
-                        if (durationMs > 1000) {
-                            log.warn("Commit for groupId={}, chunkIndex={} took {} ms", groupId, chunkIndex, durationMs);
-                        }
-                    } catch (Exception e) {
-                        log.error("Failed to commit for groupId={}, chunkIndex={}: {}", groupId, chunkIndex, e.getMessage());
-                        meterRegistry.counter("mapdb_commit_errors", "groupId", groupId).increment();
-                        throw new InternalServerErrorException("Failed to commit batch");
-                    }
-                })
-                .whenComplete((v, e) -> {
-                    meterRegistry.timer("mapdb_persist_submit_latency", "groupId", groupId)
-                            .record(Duration.between(submitStart, Instant.now()));
-                    if (e != null) {
-                        log.error("Failed to persist edges for groupId={}, chunkIndex={}: {}", groupId, chunkIndex, e.getMessage());
-                        meterRegistry.counter("mapdb_persist_errors", "groupId", groupId).increment(matches.size());
-                    } else {
-                        meterRegistry.counter("mapdb_edges_persisted", "groupId", groupId).increment(matches.size());
-                    }
-                });
-    }
-
-    private void persistBatchAsync(List<GraphRecords.PotentialMatch> subBatch, String groupId, int chunkIndex) {
-        try {
-            Instant writeStart = Instant.now();
-            for (GraphRecords.PotentialMatch match : subBatch) {
-                String key = String.format("%s:%d:%s:%s", groupId, chunkIndex, match.getReferenceId(), match.getMatchedReferenceId());
-                map.put(key, serializeMatch(match));
-            }
-            long durationMs = Duration.between(writeStart, Instant.now()).toMillis();
-            meterRegistry.timer("mapdb_persist_latency", "groupId", groupId).record(Duration.ofMillis(durationMs));
-            meterRegistry.counter("mapdb_edges_persisted", "groupId", groupId).increment(subBatch.size());
-            log.debug("Persisted {} edges for groupId={}, chunkIndex={} in {} ms",
-                    subBatch.size(), groupId, chunkIndex, durationMs);
-            if (durationMs > 1000) {
-                log.warn("Batch persist of {} edges for groupId={}, chunkIndex={} took {} ms",
-                        subBatch.size(), groupId, chunkIndex, durationMs);
-            }
-        } catch (Exception e) {
-            log.error("Failed to persist batch for groupId={}, chunkIndex={}: {}", groupId, chunkIndex, e.getMessage());
-            meterRegistry.counter("mapdb_persist_errors", "groupId", groupId).increment(subBatch.size());
-            throw new InternalServerErrorException("Failed to persist batch to MapDB");
-        }
-    }
-
     public CompletableFuture<Void> persistEdgesAsyncFallback(List<GraphRecords.PotentialMatch> matches, String groupId, int chunkIndex, Throwable t) {
         log.warn("Persist failed for groupId={}, chunkIndex={}: {}", groupId, chunkIndex, t.getMessage());
         meterRegistry.counter("mapdb_persist_fallbacks", "groupId", groupId).increment(matches.size());
         return CompletableFuture.completedFuture(null);
     }
 
-    public AutoCloseableStream<Edge> streamEdges(UUID domainId, String groupId) {
-        if (domainId == null) {
-            log.error("Invalid domainId for groupId={}", groupId);
-            throw new IllegalArgumentException("domainId must not be null");
-        }
-
-        Instant streamStart = Instant.now();
-        List<String> keys = map.keySet().stream()
-                .filter(k -> k != null && k.startsWith(groupId))
-                .collect(Collectors.toList());
-
-        meterRegistry.counter("mapdb_keys_found", "groupId", groupId).increment(keys.size());
-
-        Stream<Edge> stream = StreamSupport.stream(
-                        Spliterators.spliteratorUnknownSize(keys.iterator(), Spliterator.ORDERED), false)
-                .map(key -> {
-                    byte[] data = map.get(key);
-                    if (data != null) {
-                        try {
-                            GraphRecords.PotentialMatch match = deserializeMatch(data, groupId, domainId);
-                            meterRegistry.counter("mapdb_edges_streamed", "groupId", groupId).increment();
-                            return toEdge(match);
-                        } catch (Exception e) {
-                            log.error("Failed to deserialize match for key={} in groupId={}: {}", key, groupId, e.getMessage());
-                            meterRegistry.counter("mapdb_deserialize_errors", "groupId", groupId).increment();
-                            return null;
-                        }
-                    }
-                    return null;
-                })
-                .filter(Objects::nonNull)
-                .onClose(() -> {
-                    long durationMs = Duration.between(streamStart, Instant.now()).toMillis();
-                    meterRegistry.timer("mapdb_stream_latency", "groupId", groupId).record(Duration.ofMillis(durationMs));
-                    log.info("Streamed edges for groupId={} in {} ms", groupId, durationMs);
-                });
-
-        return new AutoCloseableStream<>(stream);
-    }
-
     public AutoCloseableStream<Edge> streamEdgesFallback(UUID domainId, String groupId, int topK, Throwable t) {
         log.warn("Stream failed for groupId={}: {}", groupId, t.getMessage());
         meterRegistry.counter("mapdb_stream_fallbacks", "groupId", groupId).increment();
         return new AutoCloseableStream<>(Stream.empty());
-    }
-
-    public void cleanEdges(String groupId) {
-        try {
-            Instant cleanStart = Instant.now();
-            CompletableFuture<Void> resultFuture = new CompletableFuture<>();
-            CompletableFuture.runAsync(() -> {
-                try {
-                    List<String> keysToRemove = map.keySet()
-                            .stream()
-                            .filter(key -> key != null && key.startsWith(groupId))
-                            .collect(Collectors.toList());
-
-                    for (List<String> batch : ListUtils.partition(keysToRemove, batchSize)) {
-                        batch.forEach(map::remove);
-                    }
-
-                    db.commit();
-
-                    long durationMs = Duration.between(cleanStart, Instant.now()).toMillis();
-                    meterRegistry.timer("mapdb_clean_latency", "groupId", groupId)
-                            .record(Duration.ofMillis(durationMs));
-                    meterRegistry.counter("mapdb_edges_cleaned", "groupId", groupId)
-                            .increment(keysToRemove.size());
-
-                    if (durationMs > 1000) {
-                        log.warn("Cleaning {} edges for groupId={} took {} ms", keysToRemove.size(), groupId, durationMs);
-                    }
-                    resultFuture.complete(null);
-                } catch (Exception e) {
-                    log.error("Async clean failed for groupId={}: {}", groupId, e.getMessage(), e);
-                    resultFuture.completeExceptionally(new InternalServerErrorException("Failed to clean edges in MapDB"));
-                }
-            }, cleanupExecutor).exceptionally(t -> {
-                log.error("Failed to initiate clean for groupId={}: {}", groupId, t.getMessage(), t);
-                resultFuture.completeExceptionally(t);
-                return null;
-            });
-
-            resultFuture.get(30, TimeUnit.SECONDS);
-        } catch (Exception e) {
-            log.error("Failed to initiate clean for groupId={}: {}", groupId, e.getMessage(), e);
-            meterRegistry.counter("mapdb_clean_errors", "groupId", groupId).increment();
-            throw new InternalServerErrorException("Failed to clean edges in MapDB");
-        }
     }
 
 
@@ -339,17 +178,171 @@ public class GraphStore implements AutoCloseable {
         }
     }
 
-    private final ThreadLocal<Kryo> kryoThreadLocal = ThreadLocal.withInitial(() -> {
-        Kryo kryo = new Kryo();
-        kryo.setRegistrationRequired(true);
-        kryo.register(UUID.class, new UUIDSerializer());
-        kryo.register(GraphRecords.PotentialMatch.class, new FieldSerializer<>(kryo, GraphRecords.PotentialMatch.class));
-        return kryo;
-    });
+    private Edge toEdge(GraphRecords.PotentialMatch match) {
+        return GraphRequestFactory.toEdge(match);
+    }
+
+    public CompletableFuture<Void> persistEdgesAsync(List<GraphRecords.PotentialMatch> matches, String groupId, int chunkIndex) {
+        if (matches.isEmpty()) {
+            log.debug("No matches to persist for groupId={}, chunkIndex={}", groupId, chunkIndex);
+            return CompletableFuture.completedFuture(null);
+        }
+
+        Instant submitStart = Instant.now();
+        int dynamicBatchSize = adjustBatchSize(matches.size());
+        List<CompletableFuture<Void>> batchFutures = new ArrayList<>();
+        for (List<GraphRecords.PotentialMatch> chunk : ListUtils.partition(matches, dynamicBatchSize)) {
+            batchFutures.add(CompletableFuture.runAsync(() -> persistBatchAsync(chunk, groupId, chunkIndex), mapdbExecutor)
+                    .orTimeout(15, TimeUnit.SECONDS)
+                    .whenComplete((v, e) -> {
+                        if (e != null) {
+                            log.error("Failed to persist batch for groupId={}, chunkIndex={}: {}",
+                                    groupId, chunkIndex, e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName(), e);
+                            meterRegistry.counter("mapdb_persist_batch_errors", "groupId", groupId).increment(chunk.size());
+                        }
+                    }));
+        }
+
+        return CompletableFuture.allOf(batchFutures.toArray(new CompletableFuture[0]))
+                .thenRunAsync(() -> {
+                    try {
+                        Instant commitStart = Instant.now();
+                        db.commit();
+                        pendingCommits.set(0);
+                        long durationMs = Duration.between(commitStart, Instant.now()).toMillis();
+                        meterRegistry.timer("mapdb_commit_latency", "groupId", groupId).record(Duration.ofMillis(durationMs));
+                        meterRegistry.counter("mapdb_commits", "groupId", groupId).increment();
+                        log.info("Committed {} edges for groupId={}, chunkIndex={} in {} ms",
+                                matches.size(), groupId, chunkIndex, durationMs);
+                        if (durationMs > 1000) {
+                            log.warn("Commit for groupId={}, chunkIndex={} took {} ms", groupId, chunkIndex, durationMs);
+                        }
+                    } catch (Exception e) {
+                        log.error("Failed to commit for groupId={}, chunkIndex={}: {}",
+                                groupId, chunkIndex, e.getMessage(), e);
+                        meterRegistry.counter("mapdb_commit_errors", "groupId", groupId).increment();
+                        throw new InternalServerErrorException("Failed to commit batch");
+                    }
+                }, commitExecutor)
+                .whenComplete((v, e) -> {
+                    meterRegistry.timer("mapdb_persist_submit_latency", "groupId", groupId)
+                            .record(Duration.between(submitStart, Instant.now()));
+                    if (e != null) {
+                        log.error("Failed to persist edges for groupId={}, chunkIndex={}: {}",
+                                groupId, chunkIndex, e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName(), e);
+                        meterRegistry.counter("mapdb_persist_errors", "groupId", groupId).increment(matches.size());
+                    } else {
+                        meterRegistry.counter("mapdb_edges_persisted", "groupId", groupId).increment(matches.size());
+                    }
+                });
+    }
+
+    private int adjustBatchSize(int totalEdges) {
+        return Math.min(batchSize, totalEdges > 100_000 ? batchSize / 2 : batchSize); // Reduce batch size for large datasets
+    }
+
+    private void persistBatchAsync(List<GraphRecords.PotentialMatch> subBatch, String groupId, int chunkIndex) {
+        try {
+            Instant writeStart = Instant.now();
+            for (GraphRecords.PotentialMatch match : subBatch) {
+                String key = compactKey(groupId, chunkIndex, match);
+                map.put(key, serializeMatch(match));
+            }
+            long durationMs = Duration.between(writeStart, Instant.now()).toMillis();
+            meterRegistry.timer("mapdb_persist_latency", "groupId", groupId).record(Duration.ofMillis(durationMs));
+            meterRegistry.counter("mapdb_edges_persisted", "groupId", groupId).increment(subBatch.size());
+            log.debug("Persisted {} edges for groupId={}, chunkIndex={} in {} ms",
+                    subBatch.size(), groupId, chunkIndex, durationMs);
+            if (durationMs > 1000) {
+                log.warn("Batch persist of {} edges for groupId={}, chunkIndex={} took {} ms",
+                        subBatch.size(), groupId, chunkIndex, durationMs);
+            }
+        } catch (Exception e) {
+            log.error("Failed to persist batch for groupId={}, chunkIndex={}: {}",
+                    groupId, chunkIndex, e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName(), e);
+            meterRegistry.counter("mapdb_persist_errors", "groupId", groupId).increment(subBatch.size());
+            throw new InternalServerErrorException("Failed to persist batch to MapDB");
+        }
+    }
+
+    public AutoCloseableStream<Edge> streamEdges(UUID domainId, String groupId) {
+        if (domainId == null) {
+            log.error("Invalid domainId for groupId={}", groupId);
+            throw new IllegalArgumentException("domainId must not be null");
+        }
+
+        Instant streamStart = Instant.now();
+        Stream<Edge> stream = map.keySet().stream()
+                .filter(k -> k != null && k.startsWith(groupId + ":"))
+                .map(key -> {
+                    byte[] data = map.get(key);
+                    if (data != null) {
+                        try {
+                            GraphRecords.PotentialMatch match = deserializeMatch(data, groupId, domainId);
+                            meterRegistry.counter("mapdb_edges_streamed", "groupId", groupId).increment();
+                            return toEdge(match);
+                        } catch (Exception e) {
+                            log.error("Failed to deserialize match for key={} in groupId={}: {}",
+                                    key, groupId, e.getMessage(), e);
+                            meterRegistry.counter("mapdb_deserialize_errors", "groupId", groupId).increment();
+                            return null;
+                        }
+                    }
+                    return null;
+                })
+                .filter(Objects::nonNull)
+                .onClose(() -> {
+                    long durationMs = Duration.between(streamStart, Instant.now()).toMillis();
+                    meterRegistry.timer("mapdb_stream_latency", "groupId", groupId).record(Duration.ofMillis(durationMs));
+                    log.info("Streamed edges for groupId={} in {} ms", groupId, durationMs);
+                });
+
+        return new AutoCloseableStream<>(stream);
+    }
+
+    public void cleanEdges(String groupId) {
+        try {
+            Instant cleanStart = Instant.now();
+            Iterator<String> keyIterator = map.keySet().iterator();
+            List<String> batch = new ArrayList<>(batchSize / 2);
+            int removedCount = 0;
+
+            while (keyIterator.hasNext()) {
+                String key = keyIterator.next();
+                if (key != null && key.startsWith(groupId + ":")) {
+                    batch.add(key);
+                    if (batch.size() >= batchSize / 2) {
+                        batch.forEach(map::remove);
+                        db.commit();
+                        removedCount += batch.size();
+                        batch.clear();
+                    }
+                }
+            }
+
+            if (!batch.isEmpty()) {
+                batch.forEach(map::remove);
+                db.commit();
+                removedCount += batch.size();
+            }
+
+            long durationMs = Duration.between(cleanStart, Instant.now()).toMillis();
+            meterRegistry.timer("mapdb_clean_latency", "groupId", groupId).record(Duration.ofMillis(durationMs));
+            meterRegistry.counter("mapdb_edges_cleaned", "groupId", groupId).increment(removedCount);
+            if (durationMs > 1000) {
+                log.warn("Cleaning {} edges for groupId={} took {} ms", removedCount, groupId, durationMs);
+            }
+        } catch (Exception e) {
+            log.error("Clean failed for groupId={}: {}", groupId, e.getMessage(), e);
+            meterRegistry.counter("mapdb_clean_errors", "groupId", groupId).increment();
+            throw new InternalServerErrorException("Failed to clean edges in MapDB");
+        }
+    }
+
 
     private byte[] serializeMatch(GraphRecords.PotentialMatch match) {
-        Kryo kryo = kryoThreadLocal.get();
-        try (Output output = new Output(128, 1024)) {
+        Kryo kryo = SerializerContext.get();
+        try (Output output = new Output(64, 512)) {
             kryo.writeObject(output, match);
             return output.toBytes();
         } catch (Exception e) {
@@ -359,8 +352,26 @@ public class GraphStore implements AutoCloseable {
         }
     }
 
+    public CompletableFuture<Void> evictCache() {
+        return CompletableFuture.runAsync(() -> {
+            try {
+                Instant evictStart = Instant.now();
+                map.clear();
+                db.commit();
+                long durationMs = Duration.between(evictStart, Instant.now()).toMillis();
+                meterRegistry.timer("mapdb_evict_cache_latency").record(Duration.ofMillis(durationMs));
+                meterRegistry.counter("mapdb_cache_evictions").increment();
+                log.info("Cleared MapDB store in {} ms", durationMs);
+            } catch (Exception e) {
+                log.error("Failed to clear MapDB store: {}", e.getMessage(), e);
+                meterRegistry.counter("mapdb_evict_cache_errors").increment();
+                throw new InternalServerErrorException("Failed to clear MapDB store");
+            }
+        }, cleanupExecutor);
+    }
+
     private GraphRecords.PotentialMatch deserializeMatch(byte[] data, String groupId, UUID domainId) {
-        Kryo kryo = kryoThreadLocal.get();
+        Kryo kryo = SerializerContext.get();
         try (Input input = new Input(data)) {
             GraphRecords.PotentialMatch match = kryo.readObject(input, GraphRecords.PotentialMatch.class);
             return new GraphRecords.PotentialMatch(
@@ -376,7 +387,8 @@ public class GraphStore implements AutoCloseable {
         }
     }
 
-    private Edge toEdge(GraphRecords.PotentialMatch match) {
-        return GraphRequestFactory.toEdge(match);
+
+    private String compactKey(String groupId, int chunkIndex, GraphRecords.PotentialMatch match) {
+        return groupId + ":" + chunkIndex + ":" + match.getReferenceId() + ":" + match.getMatchedReferenceId();
     }
 }

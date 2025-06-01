@@ -1,5 +1,6 @@
 package com.shedule.x.processors;
 
+import com.shedule.x.config.QueueConfig;
 import com.shedule.x.config.QueueManagerConfig;
 import com.shedule.x.config.factory.AutoCloseableStream;
 import com.shedule.x.config.factory.GraphRequestFactory;
@@ -141,7 +142,9 @@ public class MatchProcessorImp implements MatchProcessor {
             return CompletableFuture.completedFuture(null);
         }
 
-        QueueManagerImpl manager = queueManagerFactory.create(groupId, domainId, processingCycleId, queueManagerConfig);
+        QueueConfig queueConfig = GraphRequestFactory.getQueueConfig(groupId, domainId, processingCycleId, queueManagerConfig);
+        QueueManagerImpl manager = queueManagerFactory.create(queueConfig);
+
         return processBatchIfNeeded(manager, null, batchSize, groupId, domainId, processingCycleId)
                 .exceptionallyCompose(throwable -> savePendingMatchesFallback(groupId, domainId, processingCycleId, batchSize, throwable));
     }
@@ -244,7 +247,9 @@ public class MatchProcessorImp implements MatchProcessor {
     private CompletableFuture<Void> savePendingMatchesBlocking(
             String groupId, UUID domainId, Integer batchSize, String processingCycleId
     ) {
-        QueueManagerImpl manager = queueManagerFactory.create(groupId, domainId, processingCycleId, queueManagerConfig);
+        QueueConfig queueConfig = GraphRequestFactory.getQueueConfig(groupId, domainId, processingCycleId, queueManagerConfig);
+        QueueManagerImpl manager = queueManagerFactory.create(queueConfig);
+
         BlockingQueue<GraphRecords.PotentialMatch> queue = manager.getQueue();
         long startTime = System.currentTimeMillis();
         long totalProcessed = 0;
@@ -420,7 +425,6 @@ public class MatchProcessorImp implements MatchProcessor {
                     .record(Duration.between(start, Instant.now()));
             log.info("Final match count for groupId={}, domainId={}, processingCycleId={}: {}", groupId, domainId, processingCycleId, count);
 
-            // Perform GraphStore cleanup after counting
             try {
                 graphStore.cleanEdges(groupId);
                 log.info("Cleaned GraphStore edges for groupId={}", groupId);
@@ -505,7 +509,9 @@ public class MatchProcessorImp implements MatchProcessor {
             return CompletableFuture.completedFuture(null);
         }
 
-        QueueManagerImpl manager = queueManagerFactory.create(groupId, domainId, processingCycleId, queueManagerConfig);
+        QueueConfig queueConfig = GraphRequestFactory.getQueueConfig(groupId, domainId, processingCycleId, queueManagerConfig);
+        QueueManagerImpl manager = queueManagerFactory.create(queueConfig);
+
         BlockingQueue<GraphRecords.PotentialMatch> pendingMatches = manager.getQueue();
 
         double queueLoad = (double) pendingMatches.size() / queueManagerConfig.getCapacity();

@@ -3,9 +3,9 @@ package com.shedule.x.config;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.shedule.x.builder.FlatEdgeBuildingStrategy;
 import com.shedule.x.builder.MetadataEdgeBuildingStrategy;
+import com.shedule.x.processors.EdgeProcessor;
 import com.shedule.x.processors.LSHIndexImpl;
 import com.shedule.x.processors.PotentialMatchSaver;
-import com.shedule.x.service.CompatibilityCalculator;
 import com.shedule.x.processors.MetadataEncoder;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
@@ -21,7 +21,7 @@ import java.util.concurrent.*;
 
 @Slf4j
 @Configuration
-public class EdgeBuildingConfiguration {
+public class GraphConfig {
 
     @Bean("lshExecutor")
     public ExecutorService lshExecutorService(MeterRegistry meterRegistry) {
@@ -64,7 +64,11 @@ public class EdgeBuildingConfiguration {
             @Value("${graph.builder.candidate.limit:1000}") int topK,
             MeterRegistry meterRegistry,
             @Qualifier("lshExecutor") ExecutorService lshExecutor) {
-        return new LSHIndexImpl(numHashTables, numBands, meterRegistry, lshExecutor, topK);
+        return new LSHIndexImpl(
+                LSHConfig.builder().numBands(numBands).numHashTables(numHashTables).topK(topK).build(),
+                meterRegistry,
+                lshExecutor
+        );
     }
 
     @Bean
@@ -76,19 +80,21 @@ public class EdgeBuildingConfiguration {
 
     @Bean
     public MetadataEdgeBuildingStrategy metadataEdgeBuildingStrategy(
+            EdgeProcessor edgeProcessor,
             LSHIndexImpl lshIndexImpl,
-            CompatibilityCalculator calculator,
             MetadataEncoder encoder,
             @Qualifier("graphBuildExecutor") ExecutorService executor,
-            @Value("${graph.builder.candidate.limit:1000}") Integer candidateLimit,
+            @Value("${graph.builder.candidate.limit:200}") Integer candidateLimit,
             @Value("${graph.builder.similarity.threshold:0.01}") Double similarityThreshold) {
         return new MetadataEdgeBuildingStrategy(
+                EdgeBuildingConfig.builder()
+                        .candidateLimit(candidateLimit).similarityThreshold(similarityThreshold)
+                        .chunkTimeoutSeconds(60).maxRetries(3).retryDelayMillis(10000)
+                        .build(),
                 lshIndexImpl,
-                calculator,
                 encoder,
-                candidateLimit,
-                similarityThreshold,
-                executor
+                executor,
+                edgeProcessor
         );
     }
 

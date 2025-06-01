@@ -1,5 +1,6 @@
 package com.shedule.x.config.factory;
 
+import com.shedule.x.config.QueueConfig;
 import com.shedule.x.config.QueueManagerConfig;
 import com.shedule.x.processors.QueueManagerImpl;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -34,11 +35,9 @@ public class QueueManagerFactory {
         this.flushSignalCallback = flushSignalCallback;
     }
 
-    public QueueManagerImpl create(String groupId, UUID domainId, String processingCycleId, QueueManagerConfig config) {
+    public QueueManagerImpl create(QueueConfig config) {
         return QueueManagerImpl.getOrCreate(
-                groupId, domainId, processingCycleId, config.getCapacity(), meterRegistry,
-                config.getFlushIntervalSeconds(), config.getDrainWarningThreshold(),
-                config.getBoostBatchFactor(), config.getMaxFinalBatchSize(),
+                config, meterRegistry,
                 mappingExecutor, flushExecutor, flushScheduler, flushSignalCallback
         );
     }

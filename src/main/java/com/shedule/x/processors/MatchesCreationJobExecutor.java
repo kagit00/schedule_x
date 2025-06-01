@@ -29,7 +29,7 @@ public class MatchesCreationJobExecutor {
             @Qualifier("matchCreationExecutorService") ExecutorService batchExecutor,
             MeterRegistry meterRegistry,
             @Value("${match.batch-limit:500}") int batchLimit,
-            @Value("${nodes.limit.full.job:2000}") int nodesLimitForFullJob,
+            @Value("${nodes.limit.full.job:1000}") int nodesLimitForFullJob,
             @Value("${match.max-retries:3}") int maxRetries,
             @Value("${match.retry-delay-millis:1000}") long retryDelayMillis,
             @Value("${match.max-concurrent-pages:1}") int maxConcurrentPages

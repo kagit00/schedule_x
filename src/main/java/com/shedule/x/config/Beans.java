@@ -5,9 +5,7 @@ import com.shedule.x.config.factory.QueueManagerFactory;
 import com.shedule.x.dto.NodeResponse;
 import com.shedule.x.config.factory.NodeResponseFactory;
 import com.shedule.x.config.factory.ResponseFactory;
-import com.shedule.x.processors.MetadataCompatibilityCalculator;
 import com.shedule.x.processors.QueueManagerImpl;
-import com.shedule.x.service.CompatibilityCalculator;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -282,10 +280,5 @@ public class Beans {
                 new LinkedBlockingQueue<>(100),
                 new ThreadFactoryBuilder().setNameFormat("match-pro-%d").build()
         );
-    }
-
-    @Bean
-    public CompatibilityCalculator compatibilityCalculator() {
-        return new MetadataCompatibilityCalculator();
     }
 }

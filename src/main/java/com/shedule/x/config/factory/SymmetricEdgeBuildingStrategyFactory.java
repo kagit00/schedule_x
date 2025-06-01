@@ -3,11 +3,10 @@ package com.shedule.x.config.factory;
 import com.shedule.x.builder.FlatEdgeBuildingStrategy;
 import com.shedule.x.builder.MetadataEdgeBuildingStrategy;
 import com.shedule.x.builder.SymmetricEdgeBuildingStrategy;
+import com.shedule.x.config.EdgeBuildingConfig;
 import com.shedule.x.models.Node;
-import com.shedule.x.processors.LSHIndex;
-import com.shedule.x.processors.LSHIndexImpl;
+import com.shedule.x.processors.*;
 import com.shedule.x.service.CompatibilityCalculator;
-import com.shedule.x.processors.MetadataEncoder;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -23,24 +22,24 @@ import java.util.stream.Collectors;
 public class SymmetricEdgeBuildingStrategyFactory {
     private final FlatEdgeBuildingStrategy flatEdgeBuildingStrategy;
     private final ObjectProvider<LSHIndex> lshIndexProvider;
-    private final CompatibilityCalculator compatibilityCalculator;
     private final MetadataEncoder encoder;
     private final Integer candidateLimit;
     private final Double similarityThreshold;
     private final ExecutorService executor;
 
     @Autowired
+    private EdgeProcessor edgeProcessor;
+
+    @Autowired
     public SymmetricEdgeBuildingStrategyFactory(
             FlatEdgeBuildingStrategy flatEdgeBuildingStrategy,
             ObjectProvider<LSHIndex> lshIndexProvider,
-            CompatibilityCalculator compatibilityCalculator,
             MetadataEncoder encoder,
             Integer candidateLimit,
             Double similarityThreshold,
             @Qualifier("graphBuildExecutor") ExecutorService executor) {
         this.flatEdgeBuildingStrategy = flatEdgeBuildingStrategy;
         this.lshIndexProvider = lshIndexProvider;
-        this.compatibilityCalculator = compatibilityCalculator;
         this.candidateLimit = candidateLimit;
         this.similarityThreshold = similarityThreshold;
         this.encoder = encoder;
@@ -54,12 +53,14 @@ public class SymmetricEdgeBuildingStrategyFactory {
             return flatEdgeBuildingStrategy;
         } else {
             return new MetadataEdgeBuildingStrategy(
+                    EdgeBuildingConfig.builder()
+                            .candidateLimit(candidateLimit).similarityThreshold(similarityThreshold)
+                            .chunkTimeoutSeconds(60).maxRetries(3).retryDelayMillis(10000)
+                            .build(),
                     lshIndexProvider.getObject(),
-                    compatibilityCalculator,
                     encoder,
-                    candidateLimit,
-                    similarityThreshold,
-                    executor
+                    executor,
+                    edgeProcessor
             );
         }
     }
