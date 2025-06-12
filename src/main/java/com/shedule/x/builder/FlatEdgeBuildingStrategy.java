@@ -53,13 +53,13 @@ public class FlatEdgeBuildingStrategy implements SymmetricEdgeBuildingStrategy {
         private final Collection<GraphRecords.PotentialMatch> matches;
         private final List<PotentialMatchEntity> batch;
         private final AtomicInteger counter;
-        private final String groupId;
+        private final UUID groupId;
         private final UUID domainId;
     }
 
     @Override
     public void processBatch(List<Node> batch, Graph graph, Collection<GraphRecords.PotentialMatch> matches, Set<Edge> edges, MatchingRequest request, Map<String, Object> context) {
-        String groupId = request.getGroupId();
+        UUID groupId = request.getGroupId();
         log.info("Processing batch of {} nodes for groupId={}", batch.size(), groupId);
         try {
             AtomicInteger counter = new AtomicInteger();

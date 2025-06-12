@@ -27,28 +27,11 @@ public final class HeaderNormalizer {
 
     private static String normalize(String header) {
         String normalized = header.toLowerCase().replaceAll("[^a-z0-9_]", "_");
-        switch (normalized) {
-            case "referenceid":
-            case "refid":
-            case "ref_id":
-            case "ref":
-            case "reference":
-            case "id":
-            case "userid":
-            case "user_id":
-                return FIELD_REFERENCE_ID;
-            case "groupid":
-            case "group_id":
-            case "group":
-            case "grp_id":
-            case "grp":
-                return FIELD_GROUP_ID;
-            case "nodetype":
-            case "node_type":
-            case "type":
-                return FIELD_TYPE;
-            default:
-                return normalized;
-        }
+        return switch (normalized) {
+            case "referenceid", "refid", "ref_id", "ref", "reference", "id", "userid", "user_id" -> FIELD_REFERENCE_ID;
+            case "groupid", "group_id", "group", "grp_id", "grp" -> FIELD_GROUP_ID;
+            case "nodetype", "node_type", "type" -> FIELD_TYPE;
+            default -> normalized;
+        };
     }
 }

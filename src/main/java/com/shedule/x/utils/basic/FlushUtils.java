@@ -13,13 +13,13 @@ import java.util.concurrent.atomic.AtomicLong;
 @Slf4j
 @UtilityClass
 public final class FlushUtils {
-    public static void executeFlush(Semaphore semaphore, ExecutorService executor, QueueManagerImpl.QuadFunction<String, UUID, Integer, String, CompletableFuture<Void>> callback,
-                                    String groupId, UUID domainId, int batchSize, String processingCycleId,
+    public static void executeFlush(Semaphore semaphore, ExecutorService executor, QueueManagerImpl.QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> callback,
+                                    UUID groupId, UUID domainId, int batchSize, String processingCycleId,
                                     MeterRegistry meterRegistry, AtomicLong lastFlushedQueueSize) {
         try {
             if (!semaphore.tryAcquire(30, TimeUnit.SECONDS)) {
                 log.warn("Timeout acquiring semaphore for groupId={}", groupId);
-                meterRegistry.counter("semaphore_acquire_timeout", "groupId", groupId).increment();
+                meterRegistry.counter("semaphore_acquire_timeout", "groupId", groupId.toString()).increment();
                 return;
             }
             CompletableFuture.runAsync(() ->
@@ -30,7 +30,7 @@ public final class FlushUtils {
                                             log.error("Flush failed for groupId={}", groupId, ex);
                                         } else {
                                             lastFlushedQueueSize.set(batchSize);
-                                            meterRegistry.counter("graph_builder_flushes", "groupId", groupId).increment();
+                                            meterRegistry.counter("graph_builder_flushes", "groupId", groupId.toString()).increment();
                                         }
                                     }), executor)
                     .whenComplete((v, e) -> semaphore.release())
@@ -45,8 +45,8 @@ public final class FlushUtils {
         }
     }
 
-    public static void executeBlockingFlush(Semaphore semaphore, QueueManagerImpl.QuadFunction<String, UUID, Integer, String, CompletableFuture<Void>> callback,
-                                            String groupId, UUID domainId, int batchSize, String processingCycleId) {
+    public static void executeBlockingFlush(Semaphore semaphore, QueueManagerImpl.QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> callback,
+                                            UUID groupId, UUID domainId, int batchSize, String processingCycleId) {
         boolean acquired = false;
         try {
             acquired = semaphore.tryAcquire(30, TimeUnit.SECONDS);
@@ -75,8 +75,8 @@ public final class FlushUtils {
         }
     }
 
-    public static void executeBoostedFlush(Semaphore semaphore, ExecutorService executor, QueueManagerImpl.QuadFunction<String, UUID, Integer, String, CompletableFuture<Void>> callback,
-                                           String groupId, UUID domainId, int batchSize, String processingCycleId, AtomicBoolean boostedDrainInProgress) {
+    public static void executeBoostedFlush(Semaphore semaphore, ExecutorService executor, QueueManagerImpl.QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> callback,
+                                           UUID groupId, UUID domainId, int batchSize, String processingCycleId, AtomicBoolean boostedDrainInProgress) {
         if (!semaphore.tryAcquire()) {
             log.warn("Failed to acquire boostedFlushSemaphore for groupId={}", groupId);
             boostedDrainInProgress.set(false);

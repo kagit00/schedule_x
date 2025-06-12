@@ -21,7 +21,7 @@ public interface GraphRecords {
         private String referenceId;
         private String matchedReferenceId;
         private double compatibilityScore;
-        private String groupId;
+        private UUID groupId;
         private UUID domainId;
     }
 

@@ -18,18 +18,6 @@ public final class Connector {
         throw new UnsupportedOperationException("Unsupported operation");
     }
 
-    /**
-     * Performs an HTTP request to the specified URL using the provided API key, title,
-     * section type, and HTTP method type. The request is sent with JSON content and the
-     * appropriate authorization header.
-     *
-     * @param url the URL to send the request to
-     * @param apiKey the API key for authorization
-     * @param title the title related to the request (used for generating content)
-     * @param sectionType the type of section for which content should be generated
-     * @param methodType the HTTP method to use for the request (e.g., GET, POST)
-     * @return the raw response body as a string
-     */
     public static String performRequest(String url, String apiKey, String title, String sectionType, HttpMethod methodType) {
         String rawResponse = "";
         try {
@@ -50,14 +38,6 @@ public final class Connector {
         return rawResponse;
     }
 
-    /**
-     * Creates an HttpEntity with a body and headers to send with the request.
-     *
-     * @param title the title related to the request
-     * @param sectionType the type of section for which content should be generated
-     * @param headers the HTTP headers to be used
-     * @return a configured HttpEntity containing the request body and headers
-     */
     private static HttpEntity<Map<String, Object>> getMapHttpEntity(String title, String sectionType, HttpHeaders headers) {
         Map<String, Object> requestBody = new HashMap<>();
         List<Map<String, String>> messages = new ArrayList<>();

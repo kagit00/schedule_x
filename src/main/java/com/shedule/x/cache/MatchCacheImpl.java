@@ -17,8 +17,6 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.*;
 import org.springframework.stereotype.Component;
-
-
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -26,7 +24,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
-
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.ScanOptions;
@@ -69,7 +66,7 @@ public class MatchCacheImpl implements MatchCache {
     @Retry(name = "matchCache")
     @CircuitBreaker(name = "matchCache", fallbackMethod = "cacheMatchesFallback")
     @Override
-    public void cacheMatches(List<GraphRecords.PotentialMatch> matches, String groupId, UUID domainId, String processingCycleId) {
+    public void cacheMatches(List<GraphRecords.PotentialMatch> matches, UUID groupId, UUID domainId, String processingCycleId) {
         if (shutdownInitiated) {
             log.warn("Match caching aborted for groupId={}, processingCycleId={} due to shutdown", groupId, processingCycleId);
             throw new IllegalStateException("MatchCache is shutting down");
@@ -92,7 +89,7 @@ public class MatchCacheImpl implements MatchCache {
                             } catch (Exception e) {
                                 log.warn("Failed to serialize match for groupId={}, domainId={}, processingCycleId={}, skipping: {}",
                                         groupId, domainId, processingCycleId, e.getMessage());
-                                meterRegistry.counter("match_cache_errors", "groupId", groupId, "domainId", domainId.toString(),
+                                meterRegistry.counter("match_cache_errors", "groupId", groupId.toString(), "domainId", domainId.toString(),
                                         "processingCycleId", processingCycleId, "error_type", "serialization").increment();
                             }
                         }
@@ -105,20 +102,20 @@ public class MatchCacheImpl implements MatchCache {
                 Boolean expireSuccess = redisTemplate.expire(zsetKey, Duration.ofSeconds(cacheTimeoutSeconds));
                 if (!Boolean.TRUE.equals(expireSuccess)) {
                     log.error("Failed to set expiration for key={} for groupId={}, processingCycleId={}", zsetKey, groupId, processingCycleId);
-                    meterRegistry.counter("match_cache_errors", "groupId", groupId, "error_type", "expire").increment();
+                    meterRegistry.counter("match_cache_errors", "groupId", groupId.toString(), "error_type", "expire").increment();
                     resultFuture.completeExceptionally(new InternalServerErrorException("Failed to set expiration for cache key"));
                     return;
                 }
                 expireSuccess = redisTemplate.expire(keySet, Duration.ofSeconds(cacheTimeoutSeconds));
                 if (!Boolean.TRUE.equals(expireSuccess)) {
                     log.error("Failed to set expiration for keySet={} for groupId={}, processingCycleId={}", keySet, groupId, processingCycleId);
-                    meterRegistry.counter("match_cache_errors", "groupId", groupId, "error_type", "expire").increment();
+                    meterRegistry.counter("match_cache_errors", "groupId", groupId.toString(), "error_type", "expire").increment();
                     resultFuture.completeExceptionally(new InternalServerErrorException("Failed to set expiration for key set"));
                     return;
                 }
                 resultFuture.complete(null);
             }, cacheExecutor).exceptionally(t -> {
-                meterRegistry.counter("match_cache_errors", "groupId", groupId, "domainId", domainId.toString(),
+                meterRegistry.counter("match_cache_errors", "groupId", groupId.toString(), "domainId", domainId.toString(),
                         "processingCycleId", processingCycleId, "error_type", "cache").increment();
                 log.error("Failed to cache matches for groupId={}, domainId={}, processingCycleId={}: {}.", groupId, domainId, processingCycleId, t.getMessage());
                 resultFuture.completeExceptionally(new CompletionException("Failed to cache matches", t));
@@ -126,18 +123,18 @@ public class MatchCacheImpl implements MatchCache {
             });
 
             resultFuture.get(cacheTimeoutSeconds, TimeUnit.SECONDS);
-            meterRegistry.counter("match_cache_total", "groupId", groupId, "domainId", domainId.toString(),
+            meterRegistry.counter("match_cache_total", "groupId", groupId.toString(), "domainId", domainId.toString(),
                     "processingCycleId", processingCycleId).increment(matches.size());
             log.info("Cached {} matches to key={} for groupId={}, domainId={}, processingCycleId={}",
                     matches.size(), zsetKey, groupId, domainId, processingCycleId);
         } catch (Exception e) {
-            meterRegistry.counter("match_cache_errors", "groupId", groupId, "domainId", domainId.toString(),
+            meterRegistry.counter("match_cache_errors", "groupId", groupId.toString(), "domainId", domainId.toString(),
                     "processingCycleId", processingCycleId, "error_type", "cache").increment();
             log.error("Failed to cache matches for groupId={}, domainId={}, processingCycleId={}: {}",
                     groupId, domainId, processingCycleId, e.getMessage());
             throw new CompletionException("Failed to cache matches", e);
         } finally {
-            sample.stop(meterRegistry.timer("match_cache_duration", "groupId", groupId, "domainId", domainId.toString(),
+            sample.stop(meterRegistry.timer("match_cache_duration", "groupId", groupId.toString(), "domainId", domainId.toString(),
                     "processingCycleId", processingCycleId));
         }
     }
@@ -145,7 +142,7 @@ public class MatchCacheImpl implements MatchCache {
     @Retry(name = "matchCache")
     @CircuitBreaker(name = "matchCache", fallbackMethod = "streamEdgesFallback")
     @Override
-    public AutoCloseableStream<Edge> streamEdges(String groupId, UUID domainId, String processingCycleId, int topK) {
+    public AutoCloseableStream<Edge> streamEdges(UUID groupId, UUID domainId, String processingCycleId, int topK) {
         if (shutdownInitiated) {
             log.warn("Edge streaming aborted for groupId={}, processingCycleId={} due to shutdown", groupId, processingCycleId);
             return new AutoCloseableStream<>(Stream.empty());
@@ -162,7 +159,7 @@ public class MatchCacheImpl implements MatchCache {
                         matches != null ? matches.size() : 0, zsetKey, groupId, domainId, processingCycleId);
                 resultFuture.complete(matches);
             }, cacheExecutor).exceptionally(t -> {
-                meterRegistry.counter("match_cache_errors", "groupId", groupId, "domainId", domainId.toString(),
+                meterRegistry.counter("match_cache_errors", "groupId", groupId.toString(), "domainId", domainId.toString(),
                         "processingCycleId", processingCycleId, "error_type", "stream").increment();
                 log.error("Failed to stream edges for groupId={}, domainId={}, processingCycleId={}: {}",
                         groupId, domainId, processingCycleId, t.getMessage());
@@ -180,15 +177,15 @@ public class MatchCacheImpl implements MatchCache {
                     .map(payload -> BasicUtility.deserializeToBytes(payload, GraphRecords.PotentialMatch.class))
                     .filter(Objects::nonNull)
                     .map(this::toEdge)
-                    .peek(edge -> meterRegistry.counter("match_cache_streamed", "groupId", groupId, "domainId", domainId.toString(),
+                    .peek(edge -> meterRegistry.counter("match_cache_streamed", "groupId", groupId.toString(), "domainId", domainId.toString(),
                             "processingCycleId", processingCycleId).increment());
             return new AutoCloseableStream<>(edgeStream.onClose(() -> sample.stop(meterRegistry.timer(
-                    "match_cache_stream_duration", "groupId", groupId, "domainId", domainId.toString(),
+                    "match_cache_stream_duration", "groupId", groupId.toString(), "domainId", domainId.toString(),
                     "processingCycleId", processingCycleId))));
         } catch (Exception e) {
-            meterRegistry.counter("match_cache_errors", "groupId", groupId, "domainId", domainId.toString(),
+            meterRegistry.counter("match_cache_errors", "groupId", groupId.toString(), "domainId", domainId.toString(),
                     "processingCycleId", processingCycleId, "error_type", "stream").increment();
-            log.error("Failed to stream edges for groupId={}, domainId={}, processingCycleId={}: {}",
+            log.error("Failed to stream edges for groupId={}, domainId={}, processingCycleId={}: {}.",
                     groupId, domainId, processingCycleId, e.getMessage());
             throw new CompletionException("Failed to stream edges", e);
         }
@@ -197,7 +194,7 @@ public class MatchCacheImpl implements MatchCache {
     @Retry(name = "matchCache")
     @CircuitBreaker(name = "matchCache", fallbackMethod = "getCachedMatchKeysFallback")
     @Override
-    public Set<String> getCachedMatchKeysForDomainAndGroup(String groupId, UUID domainId) {
+    public Set<String> getCachedMatchKeysForDomainAndGroup(UUID groupId, UUID domainId) {
         if (shutdownInitiated) {
             log.warn("Key retrieval aborted for groupId={} due to shutdown", groupId);
             return Collections.emptySet();
@@ -211,32 +208,32 @@ public class MatchCacheImpl implements MatchCache {
                     redisTemplate.opsForSet().members(keySet), cacheExecutor
             ).thenAcceptAsync(keys -> {
                 Set<String> result = keys != null ? keys.stream().map(String::new).collect(Collectors.toSet()) : Collections.emptySet();
-                meterRegistry.counter("match_cache_keys_retrieved", "groupId", groupId, "domainId", domainId.toString()).increment(result.size());
+                meterRegistry.counter("match_cache_keys_retrieved", "groupId", groupId.toString(), "domainId", domainId.toString()).increment(result.size());
                 log.debug("Retrieved {} cached match keys for groupId={}, domainId={}", result.size(), groupId, domainId);
                 resultFuture.complete(result);
             }, cacheExecutor).exceptionally(t -> {
-                meterRegistry.counter("match_cache_errors", "groupId", groupId, "domainId", domainId.toString(),
+                meterRegistry.counter("match_cache_errors", "groupId", groupId.toString(), "domainId", domainId.toString(),
                         "error_type", "keys").increment();
-                log.error("Failed to retrieve cached match keys for groupId={}, domainId={}: {}", groupId, domainId, t.getMessage());
+                log.error("-Failed to retrieve cached match keys for groupId={}, domainId={}: {}", groupId, domainId, t.getMessage());
                 resultFuture.completeExceptionally(t);
                 return null;
             });
 
             return resultFuture.get(30, TimeUnit.SECONDS);
         } catch (Exception e) {
-            meterRegistry.counter("match_cache_errors", "groupId", groupId, "domainId", domainId.toString(),
+            meterRegistry.counter("match_cache_errors", "groupId", groupId.toString(), "domainId", domainId.toString(),
                     "error_type", "keys").increment();
             log.error("Failed to retrieve cached match keys for groupId={}, domainId={}: {}", groupId, domainId, e.getMessage());
             throw new CompletionException("Failed to retrieve cached match keys", e);
         } finally {
-            sample.stop(meterRegistry.timer("match_cache_keys_duration", "groupId", groupId, "domainId", domainId.toString()));
+            sample.stop(meterRegistry.timer("match_cache_keys_duration", "groupId", groupId.toString(), "domainId", domainId.toString()));
         }
     }
 
     @Retry(name = "matchCache")
     @CircuitBreaker(name = "matchCache", fallbackMethod = "clearMatchesFallback")
     @Override
-    public void clearMatches(String groupId) {
+    public void clearMatches(UUID groupId) {
         if (shutdownInitiated) {
             log.warn("Match clearing aborted for groupId={} due to shutdown", groupId);
             throw new IllegalStateException("MatchCache is shutting down");
@@ -249,7 +246,7 @@ public class MatchCacheImpl implements MatchCache {
             CompletableFuture.supplyAsync(() -> scanKeys(pattern), cacheExecutor)
                     .thenAcceptAsync(keyFuture::complete, cacheExecutor)
                     .exceptionally(t -> {
-                        meterRegistry.counter("match_cache_errors", "groupId", groupId, "error_type", "clear").increment();
+                        meterRegistry.counter("match_cache_errors", "groupId", groupId.toString(), "error_type", "clear").increment();
                         log.error("Failed to scan keys for groupId={}: {}", groupId, t.getMessage());
                         keyFuture.completeExceptionally(t);
                         return null;
@@ -274,43 +271,43 @@ public class MatchCacheImpl implements MatchCache {
                         deleteFuture.complete(null);
                     }, cacheExecutor)
                     .exceptionally(t -> {
-                        meterRegistry.counter("match_cache_errors", "groupId", groupId, "error_type", "clear").increment();
+                        meterRegistry.counter("match_cache_errors", "groupId", groupId.toString(), "error_type", "clear").increment();
                         deleteFuture.completeExceptionally(t);
                         return null;
                     });
 
             deleteFuture.get(30, TimeUnit.SECONDS);
         } catch (Exception e) {
-            meterRegistry.counter("match_cache_errors", "groupId", groupId, "error_type", "clear").increment();
+            meterRegistry.counter("match_cache_errors", "groupId", groupId.toString(), "error_type", "clear").increment();
             log.error("Failed to clear matches for groupId={}: {}", groupId, e.getMessage());
             throw new CompletionException("Failed to clear matches", e);
         } finally {
-            sample.stop(meterRegistry.timer("match_cache_clear_duration", "groupId", groupId));
+            sample.stop(meterRegistry.timer("match_cache_clear_duration", "groupId", groupId.toString()));
         }
     }
 
-    public void cacheMatchesFallback(List<GraphRecords.PotentialMatch> matches, String groupId, UUID domainId, String processingCycleId, Throwable t) {
-        meterRegistry.counter("match_cache_fallbacks", "groupId", groupId, "domainId", domainId.toString(),
+    public void cacheMatchesFallback(List<GraphRecords.PotentialMatch> matches, UUID groupId, UUID domainId, String processingCycleId, Throwable t) {
+        meterRegistry.counter("match_cache_fallbacks", "groupId", groupId.toString(), "domainId", domainId.toString(),
                 "processingCycleId", processingCycleId, "error_type", "cache").increment(matches.size());
     }
 
-    public AutoCloseableStream<Edge> streamEdgesFallback(String groupId, UUID domainId, String processingCycleId, int topK, Throwable t) {
+    public AutoCloseableStream<Edge> streamEdgesFallback(UUID groupId, UUID domainId, String processingCycleId, int topK, Throwable t) {
         log.warn("Cache unavailable for groupId={}, domainId={}, processingCycleId={}, returning empty stream: {}", groupId, domainId, processingCycleId, t.getMessage());
-        meterRegistry.counter("match_cache_fallbacks", "groupId", groupId, "domainId", domainId.toString(),
+        meterRegistry.counter("match_cache_fallbacks", "groupId", groupId.toString(), "domainId", domainId.toString(),
                 "processingCycleId", processingCycleId, "error_type", "stream").increment();
         return new AutoCloseableStream<>(Stream.empty());
     }
 
-    public Set<String> getCachedMatchKeysFallback(String groupId, UUID domainId, Throwable t) {
+    public Set<String> getCachedMatchKeysFallback(UUID groupId, UUID domainId, Throwable t) {
         log.warn("Cache unavailable for groupId={}, domainId={}: {}", groupId, domainId, t.getMessage());
-        meterRegistry.counter("match_cache_fallbacks", "groupId", groupId, "domainId", domainId.toString(),
+        meterRegistry.counter("match_cache_fallbacks", "groupId", groupId.toString(), "domainId", domainId.toString(),
                 "error_type", "keys").increment();
         return Collections.emptySet();
     }
 
-    public void clearMatchesFallback(String groupId, Throwable t) {
+    public void clearMatchesFallback(UUID groupId, Throwable t) {
         log.warn("Cache unavailable for groupId={}, skipping clear: {}", groupId, t.getMessage());
-        meterRegistry.counter("match_cache_fallbacks", "groupId", groupId, "error_type", "clear").increment();
+        meterRegistry.counter("match_cache_fallbacks", "groupId", groupId.toString(), "error_type", "clear").increment();
     }
 
     private byte[] serialize(GraphRecords.PotentialMatch match) {

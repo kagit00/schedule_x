@@ -29,13 +29,6 @@ public class BipartiteEdgeBuilder {
     @Value("${bipartite.edge.build.similarity-threshold:0.05}")
     private Double similarityThreshold;
 
-    @Getter
-    @AllArgsConstructor
-    public class EdgeBuildResult {
-        private final Set<Edge> edges;
-        private final List<GraphRecords.PotentialMatch> matches;
-    }
-
     public BipartiteEdgeBuilder(
             MeterRegistry meterRegistry,
             GraphBuilderMetrics metrics) {
@@ -49,7 +42,7 @@ public class BipartiteEdgeBuilder {
             List<Node> rightBatch,
             List<GraphRecords.PotentialMatch> matches,
             Set<Edge> edges,
-            String groupId,
+            UUID groupId,
             UUID domainId,
             Map<String, Object> context
     ) {
@@ -76,8 +69,8 @@ public class BipartiteEdgeBuilder {
             }
         }
 
-        sample.stop(meterRegistry.timer("bipartite_builder_edge_compute", "groupId", groupId));
-        meterRegistry.counter("matches_generated_total", "groupId", groupId, "mode", "bipartite").increment(matches.size());
+        sample.stop(meterRegistry.timer("bipartite_builder_edge_compute", "groupId", groupId.toString()));
+        meterRegistry.counter("matches_generated_total", "groupId", groupId.toString(), "mode", "bipartite").increment(matches.size());
         log.debug("Completed bipartite batch for groupId={}, generated {} matches", groupId, matches.size());
     }
 }

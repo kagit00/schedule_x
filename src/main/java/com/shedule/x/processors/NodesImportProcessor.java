@@ -7,6 +7,7 @@ import com.shedule.x.exceptions.InternalServerErrorException;
 import com.shedule.x.models.Node;
 import com.shedule.x.repo.NodesImportJobRepository;
 import com.shedule.x.repo.NodeRepository;
+import com.shedule.x.service.GroupConfigService;
 import com.shedule.x.utils.db.BatchUtils;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.RequiredArgsConstructor;
@@ -25,7 +26,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 @Component
 @RequiredArgsConstructor
 public class NodesImportProcessor {
-
+    private final GroupConfigService groupConfigService;
     private final NodesImportJobRepository nodesImportJobRepository;
     private final NodeRepository nodeRepository;
     private final MeterRegistry meterRegistry;
@@ -47,7 +48,7 @@ public class NodesImportProcessor {
         retryTemplate.execute(context -> {
             long startTime = System.nanoTime();
             totalParsed.addAndGet(batch.size());
-            List<Node> nodes = GraphRequestFactory.convertResponsesToNodes(batch, message);
+            List<Node> nodes = GraphRequestFactory.convertResponsesToNodes(batch, message, groupConfigService);
             log.info("Job {}: Converted {} nodes in {} ms", jobId, nodes.size(), (System.nanoTime() - startTime) / 1_000_000);
 
             if (!nodes.isEmpty()) {

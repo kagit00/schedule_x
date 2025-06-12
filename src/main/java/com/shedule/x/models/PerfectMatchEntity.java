@@ -27,7 +27,7 @@ public class PerfectMatchEntity {
     private UUID id;
 
     @Column(nullable = false)
-    private String groupId;
+    private UUID groupId;
 
     @Column(nullable = false, name = "reference_id")
     private String referenceId;
@@ -42,4 +42,7 @@ public class PerfectMatchEntity {
 
     @Column(nullable = false)
     private UUID domainId;
+
+    @Column(name = "processing_cycle_id")
+    private String processingCycleId;
 }

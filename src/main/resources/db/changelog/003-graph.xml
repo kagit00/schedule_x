@@ -527,4 +527,11 @@
         </addColumn>
     </changeSet>
 
+    <changeSet id="20250607-01-alter-nodes-column" author="kaustav">
+        <modifyDataType
+                tableName="nodes"
+                columnName="group_id"
+                newDataType="UUID" />
+    </changeSet>
+
 </databaseChangeLog>

@@ -27,7 +27,7 @@ public class PotentialMatchSaver {
     }
 
     public CompletableFuture<Void> saveMatchesAsync(
-            List<PotentialMatchEntity> matches, String groupId, UUID domainId, String processingCycleId, boolean finalize) {
+            List<PotentialMatchEntity> matches, UUID groupId, UUID domainId, String processingCycleId, boolean finalize) {
         if (shutdownInitiated) {
             log.warn("Save aborted for groupId={} due to shutdown", groupId);
             return CompletableFuture.failedFuture(new IllegalStateException("PotentialMatchSaver is shutting down"));
@@ -53,7 +53,7 @@ public class PotentialMatchSaver {
         return storageProcessor.countFinalMatches(groupId, domainId, processingCycleId);
     }
 
-    public CompletableFuture<Void> deleteByGroupId(String groupId) {
+    public CompletableFuture<Void> deleteByGroupId(UUID groupId) {
         if (shutdownInitiated) {
             log.warn("Delete aborted for groupId={} due to shutdown", groupId);
             return CompletableFuture.failedFuture(new IllegalStateException("PotentialMatchSaver is shutting down"));

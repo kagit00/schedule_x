@@ -1,5 +1,6 @@
 package com.shedule.x.repo;
 
+import com.shedule.x.config.factory.KeysetPageable;
 import com.shedule.x.exceptions.InternalServerErrorException;
 import com.shedule.x.models.Node;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -46,7 +47,7 @@ public class NodeRepositoryCustomImpl implements NodeRepositoryCustom {
             PlatformTransactionManager transactionManager,
             @Value("${node-fetch.thread-pool-size:#{T(java.lang.Runtime).getRuntime().availableProcessors()}}") int threadPoolSize,
             @Value("${node-fetch.queue-capacity:100}") int queueCapacity,
-            @Value("${node-fetch.batch-size:1000}") int batchSize,
+            @Value("${node-fetch.batch-size:100}") int batchSize,
             @Value("${node-fetch.future-timeout-seconds:30}") long futureTimeoutSeconds
     ) {
         this.entityManager = entityManager;
@@ -65,7 +66,7 @@ public class NodeRepositoryCustomImpl implements NodeRepositoryCustom {
     }
 
     @Override
-    public List<UUID> findIdsByGroupIdAndDomainId(String groupId, UUID domainId, Pageable pageable, LocalDateTime createdAfter) {
+    public List<UUID> findIdsByGroupIdAndDomainId(UUID groupId, UUID domainId, Pageable pageable, LocalDateTime createdAfter) {
         Timer.Sample sample = Timer.start(meterRegistry);
         try {
             String jpql = buildIdQuery(createdAfter, pageable);
@@ -73,21 +74,21 @@ public class NodeRepositoryCustomImpl implements NodeRepositoryCustom {
                     .setParameter("groupId", groupId)
                     .setParameter("domainId", domainId)
                     .setHint("org.hibernate.cacheable", true)
-                    .setHint("org.hibernate.fetchSize", batchSize); // Optimize fetch size
+                    .setHint("org.hibernate.fetchSize", batchSize);
             if (createdAfter != null) {
                 query.setParameter("createdAfter", createdAfter);
             }
             applyPagination(query, pageable);
             List<UUID> result = query.getResultList();
             log.info("Fetched {} node IDs for groupId={}", result.size(), groupId);
-            meterRegistry.counter("node_ids_fetched_total", Tags.of("groupId", groupId)).increment(result.size());
+            meterRegistry.counter("node_ids_fetched_total", Tags.of("groupId", groupId.toString())).increment(result.size());
             return result;
         } catch (Exception e) {
-            meterRegistry.counter("node_fetch_ids_errors", Tags.of("groupId", groupId)).increment();
+            meterRegistry.counter("node_fetch_ids_errors", Tags.of("groupId", groupId.toString())).increment();
             log.error("Failed to fetch node IDs for groupId={}", groupId, e);
             throw new InternalServerErrorException("Failed to fetch node IDs");
         } finally {
-            sample.stop(meterRegistry.timer("node_fetch_ids_duration", Tags.of("groupId", groupId)));
+            sample.stop(meterRegistry.timer("node_fetch_ids_duration", Tags.of("groupId", groupId.toString())));
         }
     }
 
@@ -139,24 +140,51 @@ public class NodeRepositoryCustomImpl implements NodeRepositoryCustom {
     }
 
     @Override
+    @Transactional
+    public void markAsProcessedByReferenceId(List<String> referenceIds, UUID domainId) {
+        Timer.Sample sample = Timer.start(meterRegistry);
+        try {
+            partition(referenceIds, batchSize).forEach(batch -> {
+                entityManager.createQuery(
+                                "UPDATE Node n SET n.processed = true " +
+                                        "WHERE n.referenceId IN :referenceIds AND n.domainId = :domainId"
+                        )
+                        .setParameter("referenceIds", batch)
+                        .setParameter("domainId", domainId)
+                        .executeUpdate();
+            });
+
+            log.info("Marked {} nodes as processed (by referenceId) for domainId={}", referenceIds.size(), domainId);
+            meterRegistry.counter("node_mark_processed_total").increment(referenceIds.size());
+        } catch (Exception e) {
+            log.error("Failed to mark {} nodes as processed by referenceId for domainId={}", referenceIds.size(), domainId, e);
+            meterRegistry.counter("node_mark_processed_errors").increment();
+            throw new InternalServerErrorException("Failed to mark nodes as processed");
+        } finally {
+            sample.stop(meterRegistry.timer("node_mark_processed_duration"));
+        }
+    }
+
+
+    @Override
     @SuppressWarnings("unchecked")
-    public CompletableFuture<List<Node>> findByGroupIdAsync(String groupId) {
+    public CompletableFuture<List<Node>> findByGroupIdAsync(UUID groupId) {
         Timer.Sample sample = Timer.start(meterRegistry);
         return executeAsyncQuery(
                 "SELECT n FROM Node n JOIN FETCH n.metaData WHERE n.groupId = :groupId AND n.processed = false",
                 query -> query.setParameter("groupId", groupId),
                 "fetch nodes by groupId=" + groupId,
-                Tags.of("groupId", groupId)
+                Tags.of("groupId", groupId.toString())
         ).thenApply(result -> (List<Node>) (List<?>) result)
                 .whenComplete((result, throwable) ->
-                        sample.stop(meterRegistry.timer("node_fetch_by_group_duration", Tags.of("groupId", groupId)))
+                        sample.stop(meterRegistry.timer("node_fetch_by_group_duration", Tags.of("groupId", groupId.toString())))
                 );
     }
 
 
     @Override
     @SuppressWarnings("unchecked")
-    public CompletableFuture<List<Node>> findFilteredByGroupIdAfterAsync(String groupId, LocalDateTime createdAfter) {
+    public CompletableFuture<List<Node>> findFilteredByGroupIdAfterAsync(UUID groupId, LocalDateTime createdAfter) {
         Timer.Sample sample = Timer.start(meterRegistry);
         return executeAsyncQuery(
                 "SELECT n FROM Node n JOIN FETCH n.metaData WHERE n.groupId = :groupId AND n.createdAt >= :createdAfter AND n.processed = false",
@@ -165,27 +193,27 @@ public class NodeRepositoryCustomImpl implements NodeRepositoryCustom {
                     query.setParameter("createdAfter", createdAfter);
                 },
                 "fetch filtered nodes by groupId=" + groupId,
-                Tags.of("groupId", groupId)
+                Tags.of("groupId", groupId.toString())
         ).thenApply(result -> (List<Node>) (List<?>) result)
                 .whenComplete((result, throwable) ->
-                sample.stop(meterRegistry.timer("node_fetch_filtered_duration", Tags.of("groupId", groupId))));
+                sample.stop(meterRegistry.timer("node_fetch_filtered_duration", Tags.of("groupId", groupId.toString()))));
     }
 
     @Override
-    public CompletableFuture<Set<String>> findDistinctMetadataKeysByGroupIdAsync(String groupId) {
+    public CompletableFuture<Set<String>> findDistinctMetadataKeysByGroupIdAsync(UUID groupId) {
         Timer.Sample sample = Timer.start(meterRegistry);
         return executeAsyncQuery(
                 "SELECT DISTINCT KEY(m) FROM Node n JOIN n.metaData m WHERE n.groupId = :groupId AND n.processed = false",
                 query -> query.setParameter("groupId", groupId),
                 "fetch metadata keys by groupId=" + groupId,
-                Tags.of("groupId", groupId),
+                Tags.of("groupId", groupId.toString()),
                 String.class
         ).thenApply(list -> (Set<String>) new HashSet<>(list))
                 .whenComplete((result, throwable) -> {
                     if (throwable == null) {
-                        meterRegistry.counter("node_fetch_metadata_keys_total", Tags.of("groupId", groupId)).increment(result.size());
+                        meterRegistry.counter("node_fetch_metadata_keys_total", Tags.of("groupId", groupId.toString())).increment(result.size());
                     }
-                    sample.stop(meterRegistry.timer("node_fetch_metadata_keys_duration", Tags.of("groupId", groupId)));
+                    sample.stop(meterRegistry.timer("node_fetch_metadata_keys_duration", Tags.of("groupId", groupId.toString())));
                 });
     }
 
@@ -232,6 +260,7 @@ public class NodeRepositoryCustomImpl implements NodeRepositoryCustom {
         query.setMaxResults(pageable.getPageSize());
     }
 
+    @SuppressWarnings("unchecked")
     private <T> CompletableFuture<List<T>> executeAsyncQuery(
             String jpql, Consumer<TypedQuery<T>> paramSetter, String operation, Tags tags
     ) {
@@ -263,10 +292,5 @@ public class NodeRepositoryCustomImpl implements NodeRepositoryCustom {
         return IntStream.range(0, (list.size() + size - 1) / size)
                 .mapToObj(i -> list.subList(i * size, Math.min((i + 1) * size, list.size())))
                 .toList();
-    }
-
-    public interface KeysetPageable extends Pageable {
-        UUID getLastId();
-        LocalDateTime getLastCreatedAt();
     }
 }

@@ -9,6 +9,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
@@ -18,7 +19,7 @@ public class PerfectMatchesServiceImpl implements PerfectMatchesService {
     private final PerfectMatchRepository perfectMatchRepository;
 
     @Override
-    public List<PerfectMatchEntity> fetchPerfectMatches(String groupId, int page, int size) {
+    public List<PerfectMatchEntity> fetchPerfectMatches(UUID groupId, int page, int size) {
         Pageable pageable = PageRequest.of(page, size);
         return perfectMatchRepository.findByGroupId(groupId, pageable).getContent();
     }

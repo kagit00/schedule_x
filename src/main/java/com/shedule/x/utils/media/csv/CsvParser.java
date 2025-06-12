@@ -7,6 +7,7 @@ import com.shedule.x.exceptions.BadRequestException;
 import com.shedule.x.exceptions.InternalServerErrorException;
 import com.shedule.x.dto.enums.NodeType;
 import com.shedule.x.config.factory.ResponseFactory;
+import lombok.experimental.UtilityClass;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
@@ -19,14 +20,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
 
+@UtilityClass
 @Slf4j
 public final class CsvParser {
 
     private static final int BATCH_SIZE = 50000;
-
-    private CsvParser() {
-        throw new UnsupportedOperationException("Unsupported");
-    }
 
     public static <T> void parseInBatches(InputStream inputStream, ResponseFactory<T> responseFactory, Consumer<List<T>> batchConsumer) {
         try (InputStreamReader reader = new InputStreamReader(inputStream);

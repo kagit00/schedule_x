@@ -4,23 +4,35 @@ import com.shedule.x.config.QueueConfig;
 import com.shedule.x.config.QueueManagerConfig;
 import com.shedule.x.dto.*;
 import com.shedule.x.dto.enums.JobStatus;
+import com.shedule.x.dto.enums.MatchType;
 import com.shedule.x.dto.enums.NodeType;
 import com.shedule.x.models.*;
 import com.shedule.x.service.GraphRecords;
+import com.shedule.x.service.GroupConfigService;
 import com.shedule.x.utils.basic.DefaultValuesPopulator;
 import com.shedule.x.utils.media.csv.ValueSanitizer;
+import lombok.experimental.UtilityClass;
 import lombok.extern.slf4j.Slf4j;
 import java.util.*;
 
 
 @Slf4j
+@UtilityClass
 public final class GraphRequestFactory {
 
-    private GraphRequestFactory() {
-        throw new UnsupportedOperationException("unsupported");
+    public static MatchingContext buildMatchingContext(UUID groupId, UUID domainId, int nodeCount, MatchType matchType, boolean isCostBased, String industry, MatchingRequest request) {
+        return MatchingContext.builder()
+                .domainId(domainId)
+                .sizeOfNodes(nodeCount)
+                .isRealTime(request.isRealTime())
+                .isCostBased(isCostBased)
+                .isSchedulingBased(true)
+                .industry(industry)
+                .matchType(matchType)
+                .build();
     }
 
-    public static NodesImportJob createNodesImportJob(String groupId, UUID domainId, JobStatus status, int processed, int total) {
+    public static NodesImportJob createNodesImportJob(UUID groupId, UUID domainId, JobStatus status, int processed, int total) {
         return NodesImportJob.builder()
                 .groupId(groupId)
                 .processedNodes(processed).domainId(domainId)
@@ -39,18 +51,7 @@ public final class GraphRequestFactory {
                 .build();
     }
 
-    public static PotentialMatchEntity convertToPotentialMatch(GraphRecords.PotentialMatch edge, String groupId, UUID domainId) {
-        return PotentialMatchEntity.builder()
-                .matchedAt(DefaultValuesPopulator.getCurrentTimestamp())
-                .matchedReferenceId(edge.getReferenceId())
-                .referenceId(edge.getReferenceId())
-                .compatibilityScore(edge.getCompatibilityScore())
-                .groupId(groupId)
-                .domainId(domainId)
-                .build();
-    }
-
-    public static PotentialMatchEntity convertToPotentialMatch(Edge edge, String groupId, UUID domainId, String pid) {
+    public static PotentialMatchEntity convertToPotentialMatch(Edge edge, UUID groupId, UUID domainId, String pid) {
         return PotentialMatchEntity.builder()
                 .matchedAt(DefaultValuesPopulator.getCurrentTimestamp())
                 .matchedReferenceId(edge.getToNode().getReferenceId())
@@ -69,7 +70,7 @@ public final class GraphRequestFactory {
     }
 
 
-    public static List<Node> convertResponsesToNodes(List<NodeResponse> responses, NodeExchange message) {
+    public static List<Node> convertResponsesToNodes(List<NodeResponse> responses, NodeExchange message, GroupConfigService groupConfigService) {
         long startTime = System.nanoTime();
         List<Node> result = new ArrayList<>(responses.size());
         String messageGroupId = message.getGroupId();
@@ -80,10 +81,11 @@ public final class GraphRequestFactory {
 
             boolean isValidReference = referenceId != null && !referenceId.isEmpty();
             boolean isSameGroup = messageGroupId.equals(res.getGroupId());
+            MatchingGroup group = groupConfigService.getGroupConfig(messageGroupId, domainId);
 
             if (isValidReference && isSameGroup) {
                 Node node = Node.builder()
-                        .groupId(messageGroupId)
+                        .groupId(group.getId())
                         .domainId(domainId)
                         .referenceId(referenceId)
                         .type(res.getType() != null ? res.getType().name() : NodeType.USER.name())
@@ -122,7 +124,7 @@ public final class GraphRequestFactory {
         return sanitized;
     }
 
-    public static List<Node> createNodesFromReferences(List<String> referenceIds, String groupId, NodeType type, UUID domainId) {
+    public static List<Node> createNodesFromReferences(List<String> referenceIds, UUID groupId, NodeType type, UUID domainId) {
         List<Node> nodes = new ArrayList<>();
         for (String refId : referenceIds) {
             if (refId != null && !refId.isEmpty()) {
@@ -152,32 +154,6 @@ public final class GraphRequestFactory {
 
     public static FileSystemMultipartFile fromPayload(NodeExchange payload) {
         return new FileSystemMultipartFile(payload.getFilePath(), payload.getFileName(), payload.getContentType());
-    }
-
-
-    public static PotentialMatchEntity convertEdgeToEntity(Edge edge, String groupId, UUID domainId, String processingCycleId) {
-        return PotentialMatchEntity.builder()
-                .id(UUID.randomUUID())
-                .groupId(groupId)
-                .domainId(domainId)
-                .processingCycleId(processingCycleId)
-                .referenceId(edge.getFromNode().getReferenceId())
-                .matchedReferenceId(edge.getToNode().getReferenceId())
-                .compatibilityScore(edge.getWeight())
-                .matchedAt(DefaultValuesPopulator.getCurrentTimestamp())
-                .build();
-    }
-
-
-
-    public static PerfectMatchEntity convertToPerfectMatch(MatchResult result, String key, String groupId, UUID domainId) {
-        return PerfectMatchEntity.builder()
-                .groupId(groupId)
-                .domainId(domainId)
-                .matchedReferenceId(result.getPartnerId())
-                .compatibilityScore(result.getScore())
-                .referenceId(key)
-                .build();
     }
 
     public static PotentialMatchEntity convertToPotentialMatch(GraphRecords.PotentialMatch match) {
@@ -217,7 +193,7 @@ public final class GraphRequestFactory {
                 .build();
     }
 
-    public static QueueConfig getQueueConfig(String groupId, UUID domainId, String processingCycleId, QueueManagerConfig queueManagerConfig) {
+    public static QueueConfig getQueueConfig(UUID groupId, UUID domainId, String processingCycleId, QueueManagerConfig queueManagerConfig) {
         return QueueConfig.builder()
                 .groupId(groupId).processingCycleId(processingCycleId)
                 .capacity(queueManagerConfig.getCapacity()).boostBatchFactor(queueManagerConfig.getBoostBatchFactor())

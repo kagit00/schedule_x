@@ -1,20 +1,17 @@
 package com.shedule.x.utils.db;
 
+import lombok.experimental.UtilityClass;
 import lombok.extern.slf4j.Slf4j;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+
+@UtilityClass
 @Slf4j
 public final class BatchUtils {
-
-    private BatchUtils() {
-
-    }
-
     public static <T> void processInBatches(List<T> items, int batchSize, Consumer<List<T>> consumer) {
         for (int i = 0; i < items.size(); i += batchSize) {
             int end = Math.min(i + batchSize, items.size());

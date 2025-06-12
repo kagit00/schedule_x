@@ -5,7 +5,10 @@ import com.shedule.x.dto.MatchTransfer;
 
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.Supplier;
+import java.util.stream.Stream;
 
 public interface ExportService {
-    ExportedFile exportMatchesAsCsv(List<MatchTransfer> matches, String groupId, UUID domainId);
+    CompletableFuture<ExportedFile> exportMatches(Supplier<Stream<MatchTransfer>> matchesSupplier, String groupId, UUID domainId);
 }

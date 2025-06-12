@@ -80,8 +80,8 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
     @CircuitBreaker(name = "bipartiteBuild", fallbackMethod = "buildFallback")
     @Override
     public CompletableFuture<GraphRecords.GraphResult> build(List<Node> leftPartition, List<Node> rightPartition, MatchingRequest request) {
-        String groupId = request.getGroupId();
-        if (groupId == null || groupId.isBlank()) {
+        UUID groupId = request.getGroupId();
+        if (groupId == null) {
             log.error("Invalid groupId in MatchingRequest");
             throw new IllegalArgumentException("groupId must not be null or empty");
         }
@@ -98,7 +98,7 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
         processChunks(leftChunks, rightChunks, request, groupId, domainId, numberOfNodes, resultFuture);
 
         return resultFuture.whenComplete((result, throwable) -> {
-            buildTimer.stop(meterRegistry.timer("bipartite_build_total", "groupId", groupId, "numberOfNodes", String.valueOf(numberOfNodes)));
+            buildTimer.stop(meterRegistry.timer("bipartite_build_total", "groupId", groupId.toString(), "numberOfNodes", String.valueOf(numberOfNodes)));
             if (throwable != null) {
                 log.error("Graph build failed for groupId={}, numberOfNodes={}", groupId, numberOfNodes, throwable);
             }
@@ -107,7 +107,7 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
 
     public CompletableFuture<GraphRecords.GraphResult> buildFallback(List<Node> leftPartition, List<Node> rightPartition, MatchingRequest request, Throwable t) {
         log.warn("Build fallback for groupId={}", request.getGroupId(), t);
-        meterRegistry.counter("bipartite_build_fallbacks", "groupId", request.getGroupId()).increment();
+        meterRegistry.counter("bipartite_build_fallbacks", "groupId", request.getGroupId().toString()).increment();
         return CompletableFuture.completedFuture(new GraphRecords.GraphResult(
                 GraphFactory.createBipartiteGraph(leftPartition, rightPartition), List.of()));
     }
@@ -116,7 +116,7 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
             List<List<Node>> leftChunks,
             List<List<Node>> rightChunks,
             MatchingRequest request,
-            String groupId,
+            UUID groupId,
             UUID domainId,
             int numberOfNodes,
             CompletableFuture<GraphRecords.GraphResult> resultFuture
@@ -140,7 +140,6 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
                     submitChunk(completionService, leftIter.next(), rightIter.next(), request, chunkIndex.getAndIncrement(), computeSemaphore);
                 }
 
-                // Process chunks
                 List<GraphRecords.PotentialMatch> finalMatches = Collections.synchronizedList(new ArrayList<>());
                 for (int processed = 0; processed < totalChunks; processed++) {
                     if (Thread.interrupted()) {
@@ -150,7 +149,7 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
 
                     GraphRecords.ChunkResult result = completionService.poll(300, TimeUnit.SECONDS).get();
 
-                    meterRegistry.timer("bipartite_chunk_compute", "groupId", groupId, "numberOfNodes", String.valueOf(numberOfNodes))
+                    meterRegistry.timer("bipartite_chunk_compute", "groupId", groupId.toString(), "numberOfNodes", String.valueOf(numberOfNodes))
                             .record(Duration.between(result.getStartTime(), Instant.now()));
 
                     if (leftIter.hasNext() && rightIter.hasNext()) {
@@ -167,12 +166,11 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
                             .orTimeout(CHUNK_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                             .exceptionally(e -> {
                                 log.error("Persist failed for groupId={}, chunkIndex={}", groupId, result.getChunkIndex(), e);
-                                meterRegistry.counter("bipartite_persist_errors", "groupId", groupId).increment();
+                                meterRegistry.counter("bipartite_persist_errors", "groupId", groupId.toString()).increment();
                                 return null;
                             });
                 }
 
-                // Finalize graph
                 Graph graph = GraphFactory.createBipartiteGraph(
                         leftChunks.stream().flatMap(List::stream).collect(Collectors.toList()),
                         rightChunks.stream().flatMap(List::stream).collect(Collectors.toList())
@@ -187,7 +185,7 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
 
                 graphStore.cleanEdges(groupId);
 
-                meterRegistry.counter("matches_generated_total", "groupId", groupId, "numberOfNodes", String.valueOf(numberOfNodes), "mode", "bipartite")
+                meterRegistry.counter("matches_generated_total", "groupId", groupId.toString(), "numberOfNodes", String.valueOf(numberOfNodes), "mode", "bipartite")
                         .increment(finalMatches.size());
 
                 resultFuture.complete(new GraphRecords.GraphResult(graph, finalMatches));
@@ -202,7 +200,7 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
         });
     }
 
-    private GraphRecords.PotentialMatch convertToPotentialMatch(Edge edge, String groupId, UUID domainId) {
+    private GraphRecords.PotentialMatch convertToPotentialMatch(Edge edge, UUID groupId, UUID domainId) {
         return new GraphRecords.PotentialMatch(
                 edge.getFromNode().getReferenceId(),
                 edge.getToNode().getReferenceId(),
@@ -235,7 +233,7 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
                 computeSemaphore.release();
             }
         });
-        meterRegistry.counter("bipartite_futures_pending", "groupId", request.getGroupId()).increment();
+        meterRegistry.counter("bipartite_futures_pending", "groupId", request.getGroupId().toString()).increment();
     }
 
     private CompletableFuture<GraphRecords.ChunkResult> processBipartiteChunk(
@@ -246,7 +244,7 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
     ) {
         Instant start = Instant.now();
         List<GraphRecords.PotentialMatch> matches = new ArrayList<>();
-        String groupId = request.getGroupId();
+        UUID groupId = request.getGroupId();
 
         String weightFunctionKey = request.getWeightFunctionKey();
         if ("flat".equalsIgnoreCase(weightFunctionKey)) {
@@ -254,24 +252,24 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
                     .flatMap(left -> rightBatch.stream()
                             .map(right -> new GraphRecords.PotentialMatch(
                                     left.getReferenceId(), right.getReferenceId(), 1.0, groupId, request.getDomainId())))
-                    .collect(Collectors.toList()));
+                    .toList());
         } else {
             Map<String, Object> context = Map.of("executor", computeExecutor);
             bipartiteEdgeBuilder.processBatch(leftBatch, rightBatch, matches, ConcurrentHashMap.newKeySet(), groupId, request.getDomainId(), context);
         }
 
-        meterRegistry.counter("bipartite_matches_generated", "groupId", groupId).increment(matches.size());
+        meterRegistry.counter("bipartite_matches_generated", "groupId", groupId.toString()).increment(matches.size());
         return CompletableFuture.completedFuture(new GraphRecords.ChunkResult(Set.of(), matches, chunkIndex, start));
     }
 
-    private void handleProcessingError(String groupId, int numberOfNodes, CompletableFuture<GraphRecords.GraphResult> resultFuture, Throwable e) {
+    private void handleProcessingError(UUID groupId, int numberOfNodes, CompletableFuture<GraphRecords.GraphResult> resultFuture, Throwable e) {
         log.error("Graph processing failed for groupId={}, numberOfNodes={}", groupId, numberOfNodes, e);
-        meterRegistry.counter("bipartite_build_errors", "groupId", groupId, "numberOfNodes", String.valueOf(numberOfNodes)).increment();
+        meterRegistry.counter("bipartite_build_errors", "groupId", groupId.toString(), "numberOfNodes", String.valueOf(numberOfNodes)).increment();
         cleanup(groupId);
         resultFuture.completeExceptionally(new InternalServerErrorException("Graph build failed for groupId=" + groupId));
     }
 
-    private void cleanup(String groupId) {
+    private void cleanup(UUID groupId) {
         try {
             graphStore.cleanEdges(groupId);
             matchSaver.deleteByGroupId(groupId).exceptionally(ex -> {

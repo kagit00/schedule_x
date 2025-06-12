@@ -1,6 +1,6 @@
 package com.shedule.x.processors;
 
-import com.shedule.x.matcher.ConfigurableMetadataWeightFunction;
+import com.shedule.x.processors.matcher.ConfigurableMetadataWeightFunction;
 import com.shedule.x.repo.NodeRepository;
 import com.shedule.x.utils.graph.WeightFunctionRegistry;
 import lombok.RequiredArgsConstructor;
@@ -17,7 +17,7 @@ public class WeightFunctionResolver {
 
     private final NodeRepository nodeRepository;
 
-    public String resolveWeightFunctionKey(String groupId) {
+    public String resolveWeightFunctionKey(UUID groupId) {
         Set<String> headers = nodeRepository.findDistinctMetadataKeysByGroupId(groupId);
         if (headers == null || headers.isEmpty()) {
             log.warn("No metadata keys found for groupId={}. Defaulting to 'flat'", groupId);

@@ -17,5 +17,6 @@ public enum NodeType {
     COUPLE_CANDIDATE,
 
     ADMIN,
-    BOT
+    BOT,
+    UNKNOWN
 }

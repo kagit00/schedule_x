@@ -60,8 +60,11 @@ public class CacheConfig {
             @Override
             public Validity validateSubClassName(MapperConfig<?> config, JavaType baseType, String subClassName)
                     throws JsonMappingException {
-                if (subClassName.startsWith("com.schedule.x.models") ||
-                        subClassName.startsWith("com.schedule.x.dto")) {
+                if (subClassName.startsWith("com.shedule.x.models") ||
+                        subClassName.startsWith("com.shedule.x.dto")
+                        || subClassName.equals("java.util.ArrayList")
+                        || subClassName.equals("java.util.HashMap")
+                        || subClassName.equals("java.util.LinkedHashMap")) {
                     return Validity.ALLOWED;
                 }
                 return Validity.DENIED;
@@ -71,8 +74,8 @@ public class CacheConfig {
             public Validity validateSubType(MapperConfig<?> config, JavaType baseType, JavaType subType)
                     throws JsonMappingException {
                 String className = subType.getRawClass().getName();
-                if (className.startsWith("com.schedule.x.models") ||
-                        className.startsWith("com.schedule.x.dto")) {
+                if (className.startsWith("com.shedule.x.models") ||
+                        className.startsWith("com.shedule.x.dto")) {
                     return Validity.ALLOWED;
                 }
                 return Validity.DENIED;

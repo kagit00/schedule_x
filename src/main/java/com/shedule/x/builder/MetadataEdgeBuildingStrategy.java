@@ -55,7 +55,7 @@ public class MetadataEdgeBuildingStrategy implements SymmetricEdgeBuildingStrate
     @Override
     public void processBatch(List<Node> batch, Graph graph, Collection<GraphRecords.PotentialMatch> matches,
                              Set<Edge> edges, MatchingRequest request, Map<String, Object> context) {
-        String groupId = request.getGroupId();
+        UUID groupId = request.getGroupId();
         log.info("Processing batch of {} nodes for groupId={}", batch.size(), groupId);
 
         boolean acquired = false;

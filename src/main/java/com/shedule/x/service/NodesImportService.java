@@ -7,6 +7,7 @@ import com.shedule.x.dto.NodeResponse;
 import com.shedule.x.dto.enums.JobStatus;
 import com.shedule.x.dto.enums.NodeType;
 import com.shedule.x.exceptions.InternalServerErrorException;
+import com.shedule.x.models.MatchingGroup;
 import com.shedule.x.models.Node;
 import com.shedule.x.processors.NodesImportProcessor;
 import com.shedule.x.processors.NodesImportStatusUpdater;
@@ -44,6 +45,7 @@ public class NodesImportService {
     @Value("${import.max-parallel-futures:4}")
     private int maxParallelFutures;
 
+    private final GroupConfigService groupConfigService;
     private final NodesImportStatusUpdater statusUpdater;
     private final NodesImportProcessor nodesImportProcessor;
     private final ResponseFactory<NodeResponse> nodeResponseFactory;
@@ -54,20 +56,22 @@ public class NodesImportService {
                               NodesImportProcessor nodesImportProcessor,
                               ResponseFactory<NodeResponse> nodeResponseFactory,
                               MeterRegistry meterRegistry,
+                              GroupConfigService groupConfigService,
                               @Qualifier("nodesImportExecutor") ThreadPoolTaskExecutor executor) {
         this.statusUpdater = statusUpdater;
         this.nodesImportProcessor = nodesImportProcessor;
         this.nodeResponseFactory = nodeResponseFactory;
         this.meterRegistry = meterRegistry;
         this.executor = executor;
+        this.groupConfigService = groupConfigService;
     }
 
     public CompletableFuture<Void> processNodesImport(UUID jobId, MultipartFile file, NodeExchange message) {
-        String groupId = message.getGroupId();
         UUID domainId = message.getDomainId();
+        MatchingGroup group = groupConfigService.getGroupConfig(message.getGroupId(), domainId);
 
         return CompletableFuture.supplyAsync(() -> {
-            logImportStart(jobId, groupId, domainId, file);
+            logImportStart(jobId, group.getId().toString(), domainId, file);
             statusUpdater.updateJobStatus(jobId, JobStatus.PROCESSING);
 
             long startTime = System.nanoTime();
@@ -78,16 +82,16 @@ public class NodesImportService {
             try (InputStream gzipStream = new GZIPInputStream(file.getInputStream())) {
                 processBatchesFromStream(jobId, message, gzipStream, totalParsed, success, failed, startTime);
             } catch (IOException e) {
-                handleImportFailure(jobId, domainId, groupId, e);
+                handleImportFailure(jobId, domainId, group.getGroupId(), e);
                 return null;
             }
 
-            finalizeJob(jobId, groupId, domainId, success, failed, totalParsed.get(), startTime);
+            finalizeJob(jobId, group.getGroupId(), domainId, success, failed, totalParsed.get(), startTime);
             return null;
         }, executor).handle((result, throwable) -> {
             if (throwable != null) {
                 log.error("Failed to process nodes import for jobId={}: {}", jobId, throwable.getMessage(), throwable);
-                statusUpdater.handleUnexpectedFailure(jobId, domainId, groupId, throwable);
+                statusUpdater.handleUnexpectedFailure(jobId, domainId, group.getGroupId(), throwable);
             }
             return null;
         });
@@ -162,7 +166,7 @@ public class NodesImportService {
 
         if (total != success.size() + failed.size()) {
             log.error("Job {}: Discrepancy detected: parsed={}, success={}, failed={}", jobId, total, success.size(), failed.size());
-            meterRegistry.counter("node_import_discrepancies", Constant.DOMAIN_ID, domainId.toString(), Constant.GROUP_ID, groupId).increment();
+            meterRegistry.counter("node_import_discrepancies", Constant.DOMAIN_ID, domainId.toString(), Constant.GROUP_ID, groupId.toString()).increment();
         }
 
         if (total == 0) {
@@ -188,6 +192,8 @@ public class NodesImportService {
     }
 
     public CompletableFuture<Void> processNodesImport(UUID jobId, List<String> referenceIds, String groupId, int batchSize, UUID domainId) {
+        MatchingGroup group = groupConfigService.getGroupConfig(groupId, domainId);
+
         return CompletableFuture.supplyAsync(() -> {
             log.info("Job {} started for groupId={}, domainId={}, referenceIds count={}", jobId, groupId, domainId, referenceIds.size());
             statusUpdater.updateJobStatus(jobId, JobStatus.PROCESSING);
@@ -199,7 +205,7 @@ public class NodesImportService {
 
             statusUpdater.updateTotalNodes(jobId, referenceIds.size());
 
-            List<Node> nodes = GraphRequestFactory.createNodesFromReferences(referenceIds, groupId, NodeType.USER, domainId);
+            List<Node> nodes = GraphRequestFactory.createNodesFromReferences(referenceIds, group.getId(), NodeType.USER, domainId);
             log.info("Job {}: Created {} nodes from referenceIds", jobId, nodes.size());
 
             List<CompletableFuture<Void>> futures = Collections.synchronizedList(new ArrayList<>());

@@ -1,6 +1,5 @@
 package com.shedule.x.utils.basic;
 
-import com.shedule.x.builder.MetadataEdgeBuildingStrategy;
 import com.shedule.x.dto.Snapshot;
 import com.shedule.x.dto.enums.State;
 import com.shedule.x.exceptions.InternalServerErrorException;
@@ -93,7 +92,7 @@ public final class IndexUtils {
     }
 
 
-    public static boolean ensurePrepared(String groupId, int attempt, int maxRetries) {
+    public static boolean ensurePrepared(UUID groupId, int attempt, int maxRetries) {
         // Placeholder for preparation state check
         return true;
     }

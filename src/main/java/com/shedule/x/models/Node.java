@@ -36,7 +36,7 @@ public class Node {
     @Column(name = "meta_value")
     private Map<String, String> metaData = new HashMap<>();
     @Column(name = "group_id", nullable = false)
-    private String groupId;
+    private UUID groupId;
     private LocalDateTime createdAt;
     @Column(nullable = false)
     private UUID domainId;

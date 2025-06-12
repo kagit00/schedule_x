@@ -61,17 +61,6 @@ public final class FieldsExtractor {
                 new CsvExporter.FieldExtractor<>() {
                     @Override
                     public String header() {
-                        return "type";
-                    }
-
-                    @Override
-                    public String extract(MatchTransfer matchTransfer) {
-                        return BasicUtility.safeExtract(matchTransfer.getType());
-                    }
-                },
-                new CsvExporter.FieldExtractor<>() {
-                    @Override
-                    public String header() {
                         return "match_suggestion_type";
                     }
 

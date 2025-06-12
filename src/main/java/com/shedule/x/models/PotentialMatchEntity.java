@@ -26,7 +26,7 @@ public class PotentialMatchEntity {
     private UUID id;
 
     @Column(nullable = false)
-    private String groupId;
+    private UUID groupId;
 
     @Column(nullable = false, name = "reference_id")
     private String referenceId;

@@ -28,7 +28,7 @@ public final class ResponseMakerUtility {
 
     public static MatchTransfer buildMatchTransfer(PerfectMatchEntity p) {
         return MatchTransfer.builder()
-                .groupId(p.getGroupId())
+                .groupId(p.getGroupId().toString())
                 .referenceId(p.getReferenceId())
                 .matchedReferenceId(p.getMatchedReferenceId())
                 .compatibilityScore(p.getCompatibilityScore())
@@ -38,7 +38,7 @@ public final class ResponseMakerUtility {
 
     public static MatchTransfer buildMatchTransfer(PotentialMatchEntity p) {
         return MatchTransfer.builder()
-                .groupId(p.getGroupId())
+                .groupId(p.getGroupId().toString())
                 .referenceId(p.getReferenceId())
                 .matchedReferenceId(p.getMatchedReferenceId())
                 .compatibilityScore(p.getCompatibilityScore())

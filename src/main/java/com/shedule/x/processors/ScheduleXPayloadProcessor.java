@@ -3,10 +3,13 @@ package com.shedule.x.processors;
 import com.shedule.x.dto.NodesTransferJobExchange;
 import com.shedule.x.dto.NodeExchange;
 import com.shedule.x.service.ImportJobService;
+import com.shedule.x.service.PerfectMatchCreationService;
 import com.shedule.x.utils.basic.BasicUtility;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 
@@ -15,6 +18,7 @@ import java.util.concurrent.CompletableFuture;
 @RequiredArgsConstructor
 public class ScheduleXPayloadProcessor {
     private final ImportJobService importJobService;
+    private final PerfectMatchCreationService perfectMatchCreationService;
 
     public CompletableFuture<Void> processImportedNodesPayload(String payload) {
         if (payload == null || payload.isBlank()) {

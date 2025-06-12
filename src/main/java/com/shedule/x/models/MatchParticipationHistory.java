@@ -24,7 +24,7 @@ public class MatchParticipationHistory {
     private UUID nodeId;
 
     @Column(name = "group_id", nullable = false)
-    private String groupId;
+    private UUID groupId;
 
     @Column(name = "domain_id", nullable = false)
     private UUID domainId;

@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicReference;
 @Slf4j
 @Component
 public final class EdgeProcessor {
-    public List<GraphRecords.PotentialMatch> processBatchSync(List<Node> batch, String groupId, UUID domainId,
+    public List<GraphRecords.PotentialMatch> processBatchSync(List<Node> batch, UUID groupId, UUID domainId,
                                                               LSHIndex lshIndex, CompatibilityCalculator compatibilityCalculator,
                                                               MetadataEncoder metadataEncoder, AtomicReference<Snapshot> currentSnapshot,
                                                               EdgeBuildingConfig config, Semaphore chunkSemaphore,
@@ -107,7 +107,7 @@ public final class EdgeProcessor {
     }
 
     public List<GraphRecords.PotentialMatch> processChunkCandidates(List<Node> chunk, Map<UUID, Set<UUID>> bulkCandidates,
-                                                                            String groupId, UUID domainId, Snapshot snap,
+                                                                            UUID groupId, UUID domainId, Snapshot snap,
                                                                             CompatibilityCalculator compatibilityCalculator,
                                                                             double similarityThreshold, int candidateLimit,
                                                                             ThreadLocal<List<GraphRecords.PotentialMatch>> chunkMatchesBuffer) {

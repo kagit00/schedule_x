@@ -1,5 +1,8 @@
 package com.shedule.x.utils.graph;
 
+import lombok.Getter;
+import lombok.experimental.UtilityClass;
+
 import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -108,7 +111,7 @@ public final class WeightFunctionRegistry {
                     String targetKey = key.substring(7);
                     weights.putIfAbsent(targetKey, Integer.parseInt(value));
                 } catch (NumberFormatException e) {
-                    // Ignore invalid weights
+                    // invalid weights
                 }
             }
         });
@@ -121,10 +124,6 @@ public final class WeightFunctionRegistry {
 
     public static BiFunction<Map<String, String>, Map<String, String>, Double> get(String key) {
         return registry.getOrDefault(key, registry.get("flat"));
-    }
-
-    public static void register(String key, BiFunction<Map<String, String>, Map<String, String>, Double> function) {
-        registry.put(key, function);
     }
 
     public static void registerIfAbsent(String key, BiFunction<Map<String, String>, Map<String, String>, Double> function) {

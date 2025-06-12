@@ -6,9 +6,11 @@ import com.shedule.x.dto.NodeExchange;
 import com.shedule.x.dto.NodesTransferJobExchange;
 import com.shedule.x.dto.enums.JobStatus;
 import com.shedule.x.models.Domain;
+import com.shedule.x.models.MatchingGroup;
 import com.shedule.x.models.NodesImportJob;
 import com.shedule.x.repo.NodesImportJobRepository;
 import com.shedule.x.service.DomainService;
+import com.shedule.x.service.GroupConfigService;
 import com.shedule.x.utils.basic.BasicUtility;
 import com.shedule.x.utils.basic.Constant;
 import com.shedule.x.utils.basic.StringConcatUtil;
@@ -28,6 +30,7 @@ import java.util.UUID;
 public class NodesImportStatusUpdater {
     private static final String USERS_TRANSFER_JOB_STATUS_TOPIC = "users-transfer-job-status-retrieval";
 
+    private final GroupConfigService groupConfigService;
     private final NodesImportJobRepository nodesImportJobRepository;
     private final MeterRegistry meterRegistry;
     private final ScheduleXProducer scheduleXProducer;
@@ -36,8 +39,9 @@ public class NodesImportStatusUpdater {
 
     @Transactional
     public UUID initiateNodesImport(NodeExchange message) {
+        MatchingGroup group = groupConfigService.getGroupConfig(message.getGroupId(), message.getDomainId());
         NodesImportJob job = GraphRequestFactory.createNodesImportJob(
-                message.getGroupId(),
+                group.getId(),
                 message.getDomainId(),
                 JobStatus.PENDING,
                 0,

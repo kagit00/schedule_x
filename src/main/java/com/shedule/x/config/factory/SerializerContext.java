@@ -33,4 +33,8 @@ public class SerializerContext {
     public static void remove() {
         kryoThreadLocal.remove();
     }
+
+    public static void release() {
+        kryoThreadLocal.remove();
+    }
 }

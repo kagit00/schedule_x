@@ -26,12 +26,12 @@
         </createTable>
     </changeSet>
 
-    <changeSet id="create-potential-matches-table" author="grok">
+    <changeSet id="create-potential-matches-table_" author="grok">
         <createTable tableName="potential_matches">
             <column name="id" type="uuid">
                 <constraints primaryKey="true" nullable="false"/>
             </column>
-            <column name="group_id" type="varchar(255)">
+            <column name="group_id" type="uuid">
                 <constraints nullable="false"/>
             </column>
             <column name="user_id_1" type="varchar(255)">
@@ -156,6 +156,61 @@
                 )
             </where>
         </update>
+    </changeSet>
+
+    <changeSet id="20250602-01-add-new-column" author="yourname">
+        <addColumn tableName="perfect_matches">
+            <column name="processing_cycle_id" type="varchar(255)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+    </changeSet>
+
+    <changeSet id="20250602-02-add-new-column" author="yourname">
+        <addColumn tableName="potential_matches">
+            <column name="processing_cycle_id" type="varchar(255)">
+                <constraints nullable="true"/>
+            </column>
+        </addColumn>
+    </changeSet>
+
+
+    <changeSet id="create_last_run_perfect_matches_table" author="grok">
+        <createTable tableName="last_run_perfect_matches">
+            <column name="id" type="uuid">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="group_id" type="varchar(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="domain_id" type="uuid">
+                <constraints nullable="false"/>
+            </column>
+            <column name="node_count" type="bigint"/>
+            <column name="run_date" type="timestamp"/>
+            <column name="status" type="varchar(50)"/>
+        </createTable>
+    </changeSet>
+
+    <changeSet id="20250607-01-alter-perfect_matches-column" author="kaustav">
+        <modifyDataType
+                tableName="perfect_matches"
+                columnName="group_id"
+                newDataType="UUID" />
+    </changeSet>
+
+    <changeSet id="20250607-01-alter-potential_matches-column" author="kaustav">
+        <modifyDataType
+                tableName="potential_matches"
+                columnName="group_id"
+                newDataType="UUID" />
+    </changeSet>
+
+    <changeSet id="20250607-01-alter-last_run_perfect_matches-column" author="kaustav">
+        <modifyDataType
+                tableName="last_run_perfect_matches"
+                columnName="group_id"
+                newDataType="UUID" />
     </changeSet>
 
 </databaseChangeLog>

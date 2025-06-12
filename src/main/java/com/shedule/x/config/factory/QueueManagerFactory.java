@@ -1,7 +1,6 @@
 package com.shedule.x.config.factory;
 
 import com.shedule.x.config.QueueConfig;
-import com.shedule.x.config.QueueManagerConfig;
 import com.shedule.x.processors.QueueManagerImpl;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -18,7 +17,7 @@ public class QueueManagerFactory {
     private final MeterRegistry meterRegistry;
     private final ExecutorService mappingExecutor;
     private final ExecutorService flushExecutor;
-    private final QueueManagerImpl.QuadFunction<String, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback;
+    private final QueueManagerImpl.QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback;
     private final ScheduledExecutorService flushScheduler;
 
     public QueueManagerFactory(
@@ -26,7 +25,7 @@ public class QueueManagerFactory {
             @Qualifier("persistenceExecutor") ExecutorService mappingExecutor,
             @Qualifier("queueFlushExecutor") ExecutorService flushExecutor,
             @Qualifier("queueFlushScheduler") ScheduledExecutorService flushScheduler,
-            QueueManagerImpl.QuadFunction<String, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback
+            QueueManagerImpl.QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback
     ) {
         this.meterRegistry = meterRegistry;
         this.mappingExecutor = mappingExecutor;

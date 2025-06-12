@@ -26,7 +26,7 @@ public class NodesImportJob {
     private UUID domainId;
 
     @Column(name = "group_id", nullable = false)
-    private String groupId;
+    private UUID groupId;
 
     @Column(name = "status", nullable = false)
     private JobStatus status;

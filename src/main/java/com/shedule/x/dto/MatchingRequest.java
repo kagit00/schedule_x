@@ -22,7 +22,7 @@ import java.util.UUID;
 public class MatchingRequest {
     @NotBlank
     @NotNull
-    private String groupId;
+    private UUID groupId;
     private LocalDateTime createdAfter;
     private Integer limit;
     private String industry;

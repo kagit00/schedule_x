@@ -45,6 +45,31 @@ public class Beans {
         return executor;
     }
 
+
+    @Bean
+    public Executor matchTransferGroupExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(10);
+        executor.setMaxPoolSize(20);
+        executor.setQueueCapacity(100);
+        executor.setThreadNamePrefix("MatchTransferGroup-");
+        executor.setRejectedExecutionHandler((r, e) -> log.warn("Task rejected for match transfer, consider increasing pool size."));
+        executor.initialize();
+        return executor;
+    }
+
+    @Bean
+    public Executor matchTransferExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(10);
+        executor.setMaxPoolSize(20);
+        executor.setQueueCapacity(1000);
+        executor.setThreadNamePrefix("potential-match-transfer-");
+        executor.setRejectedExecutionHandler((r, e) -> log.warn("Task rejected for match transfer, consider increasing pool size"));
+        executor.initialize();
+        return executor;
+    }
+
     @Bean("persistenceExecutor")
     public ExecutorService persistenceExecutor(MeterRegistry meterRegistry) {
         ThreadFactory threadFactory = new ThreadFactoryBuilder().setNameFormat("persistence-executor-%d").build();
@@ -63,6 +88,11 @@ public class Beans {
         );
         executor.allowCoreThreadTimeOut(false);
         return executor;
+    }
+
+    @Bean(destroyMethod = "shutdown")
+    public ExecutorService cpuExecutor() {
+        return Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors(), r -> new Thread(r, "cpu-executor-thread"));
     }
 
     @Bean("ioExecutorService")
@@ -254,7 +284,7 @@ public class Beans {
             @Qualifier("queueFlushExecutor") ExecutorService flushExecutor,
             @Qualifier("queueFlushScheduler") ScheduledExecutorService flushScheduler) {
 
-        QueueManagerImpl.QuadFunction<String, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback =
+        QueueManagerImpl.QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback =
                 (groupId, domainId, batchSize, processingCycleId) -> {
                     return CompletableFuture.completedFuture(null);
                 };

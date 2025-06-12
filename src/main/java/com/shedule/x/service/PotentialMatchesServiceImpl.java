@@ -8,6 +8,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import java.util.List;
+import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
@@ -17,7 +18,7 @@ public class PotentialMatchesServiceImpl implements PotentialMatchesService {
     private final PotentialMatchRepository potentialMatchRepository;
 
     @Override
-    public List<PotentialMatchEntity> fetchPotentialMatches(String groupId, int page, int size) {
+    public List<PotentialMatchEntity> fetchPotentialMatches(UUID groupId, int page, int size) {
         Pageable pageable = PageRequest.of(page, size);
         return potentialMatchRepository.findByGroupId(groupId, pageable).getContent();
     }

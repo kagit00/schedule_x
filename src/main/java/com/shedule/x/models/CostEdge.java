@@ -11,19 +11,15 @@ import java.util.Map;
 @AllArgsConstructor
 @Builder
 public class CostEdge {
-    private String from;
-    private String to;
+    private int from;
+    private int to;
     private int cost;
-    private CostEdge reverse;
-    private int capacity;
+    private int originalCapacity;
     private int flow;
+    private int reverseEdgeIndex;
+    private boolean isOriginalProblemEdge;
 
     public int residualCapacity() {
-        return capacity - flow;
-    }
-    public int reducedCost(Map<String, Integer> potential) {
-        int piU = potential.getOrDefault(from, 0);
-        int piV = potential.getOrDefault(to, 0);
-        return cost + piU - piV;
+        return originalCapacity - flow;
     }
 }

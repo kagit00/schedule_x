@@ -55,7 +55,7 @@ public class NodeFetchService {
         this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
-    public CompletableFuture<List<UUID>> fetchNodeIdsAsync(String groupId, UUID domainId, Pageable pageable, LocalDateTime createdAfter) {
+    public CompletableFuture<List<UUID>> fetchNodeIdsAsync(UUID groupId, UUID domainId, Pageable pageable, LocalDateTime createdAfter) {
         Timer.Sample sample = Timer.start(meterRegistry);
         if (groupId == null || domainId == null || pageable == null) {
             log.error("Invalid input: groupId={}, domainId={}, pageable={}", groupId, domainId, pageable);
@@ -67,10 +67,10 @@ public class NodeFetchService {
                             try {
                                 List<UUID> result = nodeRepository.findIdsByGroupIdAndDomainId(groupId, domainId, pageable, createdAfter);
                                 log.info("Fetched {} node IDs for groupId={}", result.size(), groupId);
-                                meterRegistry.counter("node_ids_fetched_total", Tags.of("groupId", groupId)).increment(result.size());
+                                meterRegistry.counter("node_ids_fetched_total", Tags.of("groupId", groupId.toString())).increment(result.size());
                                 return result;
                             } catch (Exception e) {
-                                meterRegistry.counter("node_fetch_ids_errors", Tags.of("groupId", groupId)).increment();
+                                meterRegistry.counter("node_fetch_ids_errors", Tags.of("groupId", groupId.toString())).increment();
                                 log.error("Failed to fetch node IDs for groupId={}", groupId, e);
                                 throw e;
                             }
@@ -78,14 +78,14 @@ public class NodeFetchService {
                 .orTimeout(futureTimeoutSeconds, TimeUnit.SECONDS)
                 .exceptionally(throwable -> {
                     log.error("Async fetchNodeIds failed for groupId={}", groupId, throwable);
-                    meterRegistry.counter("node_fetch_ids_errors", Tags.of("groupId", groupId)).increment();
+                    meterRegistry.counter("node_fetch_ids_errors", Tags.of("groupId", groupId.toString())).increment();
                     return Collections.emptyList();
                 })
                 .whenComplete((result, throwable) ->
-                        sample.stop(meterRegistry.timer("node_fetch_ids_duration", Tags.of("groupId", groupId))));
+                        sample.stop(meterRegistry.timer("node_fetch_ids_duration", Tags.of("groupId", groupId.toString()))));
     }
 
-    public CompletableFuture<List<Node>> fetchNodesInBatchesAsync(List<UUID> nodeIds, String groupId, LocalDateTime createdAfter) {
+    public CompletableFuture<List<Node>> fetchNodesInBatchesAsync(List<UUID> nodeIds, UUID groupId, LocalDateTime createdAfter) {
         Timer.Sample sample = Timer.start(meterRegistry);
         if (nodeIds == null || nodeIds.isEmpty() || groupId == null) {
             log.warn("Invalid input: nodeIds={} or groupId={} is null/empty", nodeIds, groupId);
@@ -98,7 +98,7 @@ public class NodeFetchService {
                         .orTimeout(futureTimeoutSeconds, TimeUnit.SECONDS)
                         .exceptionally(throwable -> {
                             log.error("Failed to fetch batch for groupId={}, batchSize={}", groupId, batch.size(), throwable);
-                            meterRegistry.counter("node_fetch_batch_errors", Tags.of("groupId", groupId)).increment();
+                            meterRegistry.counter("node_fetch_batch_errors", Tags.of("groupId", groupId.toString())).increment();
                             return Collections.emptyList();
                         }))
                 .toList();
@@ -112,20 +112,20 @@ public class NodeFetchService {
                             .filter(n -> createdAfter == null || n.getCreatedAt() == null || !n.getCreatedAt().isBefore(createdAfter))
                             .toList();
                     log.info("Fetched {} nodes for groupId={}", all.size(), groupId);
-                    meterRegistry.counter("nodes_fetched_total", Tags.of("groupId", groupId)).increment(all.size());
+                    meterRegistry.counter("nodes_fetched_total", Tags.of("groupId", groupId.toString())).increment(all.size());
                     return all;
                 })
                 .whenComplete((result, throwable) -> {
                     if (throwable != null) {
                         log.error("Failed to fetch nodes for groupId={}", groupId, throwable);
-                        meterRegistry.counter("node_fetch_nodes_errors", Tags.of("groupId", groupId)).increment();
+                        meterRegistry.counter("node_fetch_nodes_errors", Tags.of("groupId", groupId.toString())).increment();
                     }
-                    sample.stop(meterRegistry.timer("node_fetch_by_ids_duration", Tags.of("groupId", groupId)));
+                    sample.stop(meterRegistry.timer("node_fetch_by_ids_duration", Tags.of("groupId", groupId.toString())));
                 });
     }
 
     @Transactional
-    public void markNodesAsProcessed(List<UUID> nodeIds, String groupId) {
+    public void markNodesAsProcessed(List<UUID> nodeIds, UUID groupId) {
         if (nodeIds == null || nodeIds.isEmpty() || groupId == null) {
             return;
         }
@@ -134,13 +134,13 @@ public class NodeFetchService {
         try {
             nodeRepository.markAsProcessed(nodeIds);
             log.info("Marked {} nodes as processed for groupId={}", nodeIds.size(), groupId);
-            meterRegistry.counter("node_mark_processed_total", Tags.of("groupId", groupId)).increment(nodeIds.size());
+            meterRegistry.counter("node_mark_processed_total", Tags.of("groupId", groupId.toString())).increment(nodeIds.size());
         } catch (Exception e) {
             log.error("Failed to mark nodes as processed for groupId={}", nodeIds.size(), e);
-            meterRegistry.counter("node_mark_processed_errors", Tags.of("groupId", groupId)).increment();
+            meterRegistry.counter("node_mark_processed_errors", Tags.of("groupId", groupId.toString())).increment();
             throw e;
         } finally {
-            sample.stop(meterRegistry.timer("node_mark_processed_duration", Tags.of("groupId", groupId)));
+            sample.stop(meterRegistry.timer("node_mark_processed_duration", Tags.of("groupId", groupId.toString())));
         }
     }
 }

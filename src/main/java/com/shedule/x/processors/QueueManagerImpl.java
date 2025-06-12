@@ -20,7 +20,7 @@ import java.util.concurrent.locks.ReentrantLock;
 @Slf4j
 @Getter
 public class QueueManagerImpl {
-    private static final ConcurrentHashMap<String, WeakReference<QueueManagerImpl>> INSTANCES = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<UUID, WeakReference<QueueManagerImpl>> INSTANCES = new ConcurrentHashMap<>();
     private static final int REDUCED_MAX_FINAL_BATCH_SIZE = 10_000;
     private static final long TTL_SECONDS = 86_400;
     private static final int DEBOUNCE_WINDOW_MS = 1_000;
@@ -33,7 +33,7 @@ public class QueueManagerImpl {
     private final ScheduledExecutorService flushScheduler;
     private final ExecutorService mappingExecutor;
     private final ExecutorService flushExecutor;
-    private final QuadFunction<String, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback;
+    private final QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback;
     private final MeterRegistry meterRegistry;
     private final AtomicInteger flushIntervalSeconds;
     private volatile ScheduledFuture<?> flushTask;
@@ -54,7 +54,7 @@ public class QueueManagerImpl {
 
     private QueueManagerImpl(QueueConfig config, MeterRegistry meterRegistry, ExecutorService mappingExecutor,
                              ExecutorService flushExecutor, ScheduledExecutorService flushScheduler,
-                             QuadFunction<String, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback) {
+                             QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback) {
         this.config = config;
         this.queue = new LinkedBlockingQueue<>(config.getCapacity());
         this.meterRegistry = Objects.requireNonNull(meterRegistry, "meterRegistry must not be null");
@@ -156,7 +156,7 @@ public class QueueManagerImpl {
         }, flushIntervalSeconds.get() / 2, flushIntervalSeconds.get(), TimeUnit.SECONDS);
     }
 
-    public static void flushQueueBlocking(String groupId, QuadFunction<String, UUID, Integer, String, CompletableFuture<Void>> flushCallback) {
+    public static void flushQueueBlocking(UUID groupId, QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushCallback) {
         WeakReference<QueueManagerImpl> ref = INSTANCES.get(groupId);
         QueueManagerImpl manager = ref != null ? ref.get() : null;
         if (manager == null || manager.getQueue().isEmpty()) {
@@ -166,7 +166,7 @@ public class QueueManagerImpl {
                 Math.min(manager.getQueue().size(), manager.config.getMaxFinalBatchSize()), manager.config.getProcessingCycleId());
     }
 
-    public static void flushAllQueuesBlocking(QuadFunction<String, UUID, Integer, String, CompletableFuture<Void>> flushCallback) {
+    public static void flushAllQueuesBlocking(QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushCallback) {
         INSTANCES.forEach((groupId, ref) -> {
             try {
                 CompletableFuture.runAsync(() -> flushQueueBlocking(groupId, flushCallback))
@@ -198,7 +198,7 @@ public class QueueManagerImpl {
         if (fillRatio > config.getDrainWarningThreshold() && boostedDrainInProgress.compareAndSet(false, true)) {
             log.warn("Queue for groupId={} at {}% capacity (size={}/{}), triggering boosted drain",
                     config.getGroupId(), String.format("%.1f", fillRatio * 100), queue.size(), config.getCapacity());
-            meterRegistry.counter("queue_drain_warnings_total", "groupId", config.getGroupId()).increment();
+            meterRegistry.counter("queue_drain_warnings_total", "groupId", config.getGroupId().toString()).increment();
             int boostedBatchSize = Math.min(queue.size(), REDUCED_MAX_FINAL_BATCH_SIZE * config.getBoostBatchFactor());
             FlushUtils.executeBoostedFlush(boostedFlushSemaphore, flushExecutor, flushSignalCallback,
                     config.getGroupId(), config.getDomainId(), boostedBatchSize, config.getProcessingCycleId(),
@@ -216,7 +216,7 @@ public class QueueManagerImpl {
             ExecutorService mappingExecutor,
             ExecutorService flushExecutor,
             ScheduledExecutorService flushScheduler,
-            QuadFunction<String, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback
+            QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback
     ) {
         synchronized (INSTANCES) {
             return INSTANCES.compute(config.getGroupId(), (key, ref) -> {
@@ -253,7 +253,7 @@ public class QueueManagerImpl {
         }
     }
 
-    public static void remove(String groupId) {
+    public static void remove(UUID groupId) {
         synchronized (INSTANCES) {
             WeakReference<QueueManagerImpl> ref = INSTANCES.remove(groupId);
             if (ref != null && ref.get() != null) {

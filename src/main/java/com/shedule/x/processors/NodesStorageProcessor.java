@@ -3,6 +3,7 @@ package com.shedule.x.processors;
 import com.shedule.x.exceptions.InternalServerErrorException;
 import com.shedule.x.models.Node;
 import com.shedule.x.utils.basic.Constant;
+import com.shedule.x.utils.db.QueryUtils;
 import com.shedule.x.utils.media.csv.HeaderNormalizer;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
@@ -34,24 +35,6 @@ import java.util.stream.Collectors;
 @Slf4j
 @Component
 public class NodesStorageProcessor {
-    private static final String COPY_TEMP_SQL =
-            "CREATE TEMP TABLE temp_nodes (\n" +
-                    "id UUID, \n" +
-                    "reference_id TEXT, \n" +
-                    "group_id TEXT, \n" +
-                    "type TEXT, \n" +
-                    "domain_id UUID, \n" +
-                    "created_at TIMESTAMP) \n" +
-                    "ON COMMIT DROP";
-
-    private static final String UPSERT_NODES_SQL =
-            "INSERT INTO public.nodes (id, reference_id, group_id, type, domain_id, created_at) \n" +
-                    "SELECT id, reference_id, group_id, type, domain_id, created_at FROM temp_nodes \n" +
-                    "ON CONFLICT (reference_id, group_id) DO UPDATE SET \n" +
-                    "type = EXCLUDED.type, domain_id = EXCLUDED.domain_id, created_at = EXCLUDED.created_at \n" +
-                    "RETURNING id, reference_id, group_id";
-
-
     private final JdbcTemplate jdbcTemplate;
     private final NodeMetadataBatchWriter metadataBatchWriter;
     private final MeterRegistry meterRegistry;
@@ -172,7 +155,7 @@ public class NodesStorageProcessor {
             try {
                 connection.setAutoCommit(false); // Ensure transaction control
                 try (Statement stmt = connection.createStatement()) {
-                    stmt.execute(COPY_TEMP_SQL);
+                    stmt.execute(QueryUtils.getNodesTempTableSQL());
                 }
 
                 try (InputStream inputStream = new ByteArrayInputStream(csvData.getBytes(StandardCharsets.UTF_8))) {
@@ -184,7 +167,7 @@ public class NodesStorageProcessor {
                 }
 
                 List<Map<String, Object>> results = new ArrayList<>();
-                try (PreparedStatement ps = connection.prepareStatement(UPSERT_NODES_SQL);
+                try (PreparedStatement ps = connection.prepareStatement(QueryUtils.getNodesUpsertSQL());
                      ResultSet rs = ps.executeQuery()) {
                     ResultSetMetaData metaData = rs.getMetaData();
                     int columnCount = metaData.getColumnCount();
