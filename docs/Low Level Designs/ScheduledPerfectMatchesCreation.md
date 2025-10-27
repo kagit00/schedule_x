@@ -10,23 +10,24 @@
 ```mermaid
 flowchart TD
     S[PerfectMatchesCreationScheduler (cron 03:00)] -->|tasks| CS[PerfectMatchCreationService]
-    CS -->|domain‑/‑group semaphores| JE[PerfectMatchCreationJobExecutor]
+    CS -->|domain/group semaphores| JE[PerfectMatchCreationJobExecutor]
     JE -->|processGroup| PS[PerfectMatchServiceImpl]
     PS -->|stream potential matches| PSS[PerfectMatchStreamingService]
     PS -->|select strategy| MS[MatchingStrategySelector]
     MS -->|strategy| A[AuctionApproximate] 
-    MS -->|strategy| H[Hopcroft‑Karp] 
+    MS -->|strategy| H[Hopcroft-Karp] 
     MS -->|strategy| HU[Hungarian] 
-    MS -->|strategy| TG[Top‑K Weighted Greedy]
-    A & H & HU & TG -->|run on in‑memory adjacency| PS
-    PS -->|buffer edges| QM[QueueManager (same impl as potential‑matches)]
+    MS -->|strategy| TG[Top-K Weighted Greedy]
+    A & H & HU & TG -->|run on in-memory adjacency| PS
+    PS -->|buffer edges| QM[QueueManager (same impl as potential-matches)]
     QM -->|periodic/boosted flush| GS[GraphStore (MapDB)]
     PS -->|final stream from MapDB| GS
-    GS -->|top‑K extraction| PS
+    GS -->|top-K extraction| PS
     PS -->|persist final matches| PMS[PerfectMatchSaver]
-    PMS -->|COPY‑UPSERT| PMST[PerfectMatchStorageProcessor → PostgreSQL]
+    PMS -->|COPY/UPSERT| PMST[PerfectMatchStorageProcessor -> PostgreSQL]
     PMST -->|metrics & cleanup| FM[MatchesCreationFinalizer]
-    FM -->|clean LSH, queues, GC| LSH[LSHIndex (shared)]
+    FM -->|clean LSH, queues, GC| LSH[LSHIndex]
+
 ```
 
 *The **strategy selector** decides which of the four algorithms to run **per group** based on the group’s configuration (cost‑based flag, symmetric flag, node‑count). The rest of the pipeline is identical for every strategy.*
@@ -268,19 +269,20 @@ The current implementation is **single‑process** (only one pod runs the cron).
 flowchart TD
     A[Start group] --> B{Acquire semaphores}
     B -->|OK| C[Stream potential matches]
-    C -->|SQL error| D[Retry (max 3) → back‑off]
+    C -->|SQL error| D[Retry (max 3) -> back-off]
     D -->|exhausted| E[Mark LastRun FAILED, abort]
-    C -->|Success| F[Chunk → build adjacency]
+    C -->|Success| F[Chunk -> build adjacency]
     F -->|OOM / algorithm error| G[Abort, mark FAILED]
-    F -->|All chunks OK| H[Flush Queue → MapDB]
+    F -->|All chunks OK| H[Flush Queue -> MapDB]
     H --> I[Stream edges from MapDB]
-    I --> J[Apply final top‑K (if needed)]
-    J --> K[Copy‑UPSERT to PostgreSQL]
-    K -->|SQL error| L[Retry (max 3) → back‑off]
+    I --> J[Apply final top-K (if needed)]
+    J --> K[Copy/UPSERT to PostgreSQL]
+    K -->|SQL error| L[Retry (max 3) -> back-off]
     L -->|exhausted| E
     K --> M[Mark LastRun COMPLETED]
     M --> N[Finalizer (clean LSH, queues, GC)]
     N --> O[Group finished]
+
 ```
 
 *Every branch that ends in **E** increments `perfect_matches_creation_errors_total` and updates `LastRun.status = FAILED`. The finalizer always runs (even on failure) to avoid resource leaks.*
