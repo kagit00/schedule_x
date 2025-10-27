@@ -38,21 +38,21 @@ The module follows a **pipeline architecture**:
 ### 2.2 System Diagram
 ```mermaid
 graph TD
-    A[Scheduled Job (3 AM IST)] --> B[PerfectMatchesCreationScheduler]
-    B --> C[PerfectMatchCreationService - Task Queuing and Semaphores]
-    C --> D[PerfectMatchCreationJobExecutor - Retries and Semaphores]
-    D --> E[PerfectMatchService - Graph Build and Strategy Select]
-    E --> F[PotentialMatchStreamingService - JDBC Streaming]
-    F --> G[MatchingStrategy - Dynamic: TopK, Auction, etc.]
-    G --> H[PerfectMatchSaver and StorageProcessor - Async Bulk Save]
-    H --> I[MatchesCreationFinalizer - Cleanup and GC]
-    C -.-> J[NodeRepositoryCustom - Async Queries]
-    E -.-> K[MatchingStrategySelector - Config Based]
+    A["Scheduled Job (3 AM IST)"] --> B["PerfectMatchesCreationScheduler"]
+    B --> C["PerfectMatchCreationService - Task Queuing and Semaphores"]
+    C --> D["PerfectMatchCreationJobExecutor - Retries and Semaphores"]
+    D --> E["PerfectMatchService - Graph Build and Strategy Select"]
+    E --> F["PotentialMatchStreamingService - JDBC Streaming"]
+    F --> G["MatchingStrategy - Dynamic: TopK, Auction, etc."]
+    G --> H["PerfectMatchSaver and StorageProcessor - Async Bulk Save"]
+    H --> I["MatchesCreationFinalizer - Cleanup and GC"]
+    C -.-> J["NodeRepositoryCustom - Async Queries"]
+    E -.-> K["MatchingStrategySelector - Config Based"]
 
     subgraph Concurrency_Controls
-        L[Domain Semaphore (Max 2)]
-        M[Group Semaphore (Max 1)]
-        N[CPU Semaphore (Processors x2)]
+        L["Domain Semaphore (Max 2)"]
+        M["Group Semaphore (Max 1)"]
+        N["CPU Semaphore (Processors x2)"]
     end
 
     C -.-> L
@@ -61,7 +61,6 @@ graph TD
 
     style A fill:#f9f,stroke:#333
     style I fill:#f9f,stroke:#333
-
 ```
 
 ### 2.3 Data Flow
