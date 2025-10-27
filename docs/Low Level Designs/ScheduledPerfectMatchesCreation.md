@@ -14,9 +14,9 @@ flowchart TD
     JE -->|processGroup| PS[PerfectMatchServiceImpl]
     PS -->|stream potential matches| PSS[PerfectMatchStreamingService]
     PS -->|select strategy| MS[MatchingStrategySelector]
-    MS -->|strategy| A[AuctionApproximate] 
-    MS -->|strategy| H[Hopcroft-Karp] 
-    MS -->|strategy| HU[Hungarian] 
+    MS -->|strategy| A[AuctionApproximate]
+    MS -->|strategy| H[Hopcroft-Karp]
+    MS -->|strategy| HU[Hungarian]
     MS -->|strategy| TG[Top-K Weighted Greedy]
     A & H & HU & TG -->|run on in-memory adjacency| PS
     PS -->|buffer edges| QM[QueueManager (same impl as potential-matches)]
@@ -27,6 +27,7 @@ flowchart TD
     PMS -->|COPY/UPSERT| PMST[PerfectMatchStorageProcessor -> PostgreSQL]
     PMST -->|metrics & cleanup| FM[MatchesCreationFinalizer]
     FM -->|clean LSH, queues, GC| LSH[LSHIndex]
+
 
 ```
 
