@@ -9,22 +9,21 @@
 
 ```mermaid
 graph TD
-    S[PerfectMatchesCreationScheduler (cron 03:00 IST)] -->|tasks| SC[PerfectMatchCreationService]
-    SC -->|domain/group semaphores| PEX[PerfectMatchCreationJobExecutor]
-    PEX -->|processGroup| PMS[PerfectMatchServiceImpl]
-    PMS -->|stream potential matches| PSS[PerfectMatchStreamingService]
-    PSS -->|batch -> Consumer| PMS
-    PMS -->|select strategy| MSS[MatchingStrategySelector]
-    MSS -->|strategy| MS[MatchingStrategy (Greedy, Hungarian, etc)]
-    MS -->|graph -> top-K| PMR[PerfectMatchResultBuilder]
-    PMR -->|buffer| QM[QueueManager (reused from potential-matches)]
-    QM -->|periodic flush| GS[GraphStore (MapDB temporary edge store)]
-    GS -->|final stream| PMS2[PerfectMatchServiceImpl (final-stage)]
-    PMS2 -->|save final top-K| PMSV[PerfectMatchSaver]
-    PMSV -->|COPY/UPSERT| PMST[PerfectMatchStorageProcessor -> PostgreSQL]
-    PMST -->|metrics / cleanup| FM[MatchesCreationFinalizer]
-    FM -->|clean LSH, queues, GC| LSH[LSHIndex (shared with potential-matches)]
-
+    S[Perfect Matches Creation Scheduler - cron 03:00 IST] -->|tasks| SC[Perfect Match Creation Service]
+    SC -->|domain and group semaphores| PEX[Perfect Match Creation Job Executor]
+    PEX -->|process group| PMS[Perfect Match Service Impl]
+    PMS -->|stream potential matches| PSS[Perfect Match Streaming Service]
+    PSS -->|batch to Consumer| PMS
+    PMS -->|select strategy| MSS[Matching Strategy Selector]
+    MSS -->|strategy| MS[Matching Strategy - Greedy, Hungarian, etc]
+    MS -->|graph to top K| PMR[Perfect Match Result Builder]
+    PMR -->|buffer| QM[Queue Manager - reused from potential matches]
+    QM -->|periodic flush| GS[Graph Store - MapDB temporary edge store]
+    GS -->|final stream| PMS2[Perfect Match Service Impl - final stage]
+    PMS2 -->|save final top K| PMSV[Perfect Match Saver]
+    PMSV -->|COPY UPSERT| PMST[Perfect Match Storage Processor - PostgreSQL]
+    PMST -->|metrics and cleanup| FM[Matches Creation Finalizer]
+    FM -->|clean LSH, queues, GC| LSH[LSH Index - shared with potential matches]
 ```
 
 > **Note**: The **perfect‑matches** pipeline runs **once per day** (cron) and **only on the leader** (see §9). All components (queues, LSH, MapDB) are **re‑used** from the potential‑matches module for DRYness.
