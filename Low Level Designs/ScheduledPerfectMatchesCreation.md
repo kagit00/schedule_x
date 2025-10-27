@@ -71,30 +71,37 @@ graph TD
 ```mermaid
 graph TB
     subgraph Executors
-        E1[matchCreationExecutorService<br>Orchestration, Callbacks]
-        E2[ioExecutorService<br>JDBC Streaming, DB Writes]
-        E3[cpuExecutor<br>Strategy Execution]
+        E1["matchCreationExecutorService<br/>Orchestration, Callbacks"]
+        E2["ioExecutorService<br/>JDBC Streaming, DB Writes"]
+        E3["cpuExecutor<br/>Strategy Execution"]
     end
 
     subgraph Semaphores
-        S1[domainSemaphore]
-        S2[groupSemaphore (Service)]
-        S3[groupSemaphores (JobExecutor Map)]
-        S4[cpuTaskSemaphore]
+        S1["domainSemaphore"]
+        S2["groupSemaphore (Service)"]
+        S3["groupSemaphores (JobExecutor Map)"]
+        S4["cpuTaskSemaphore"]
     end
-
-    Scheduler --> E1
-    E1 -- delegates to --> E2 & E3
-
-    E1 -- constrained by --> S1 & S2 & S3
-    E3 -- constrained by --> S4
 
     subgraph Backpressure
-        B1[JDBC Fetch Size]
-        B2[Dynamic Sub-Batch Sizing<br>(Memory-based)]
+        B1["JDBC Fetch Size"]
+        B2["Dynamic Sub-Batch Sizing<br/>Memory-based"]
     end
+
+    Scheduler["Scheduler"]
+
+    Scheduler --> E1
+    E1 -- delegates to --> E2
+    E1 -- delegates to --> E3
+
+    E1 -- constrained by --> S1
+    E1 -- constrained by --> S2
+    E1 -- constrained by --> S3
+    E3 -- constrained by --> S4
+
     E2 -- uses --> B1
     E3 -- uses --> B2
+
 ```
 
 - **Executors**:
@@ -270,20 +277,21 @@ ON perfect_matches (group_id, domain_id, processing_cycle_id);
 ### Main Orchestration Flow
 ```mermaid
 flowchart TD
-    A[Scheduler @ 3 AM] --> B{Get Tasks to Process}
+    A["Scheduler\n@ 3 AM"] --> B{Get Tasks to Process}
     B --> C{For Each Group}
     C --> D[Update LastRun to PENDING]
     D --> E[Acquire Domain & Group Semaphores]
     E --> F[Execute Job w/ Retries]
     F --> G[Stream Potential Matches]
-    G --> H[Process in Sub-Batches (CPU-bound)]
+    G --> H[Process in Sub-Batches\n(CPU-bound)]
     H --> I[Apply Matching Strategy]
-    I --> J[Save Perfect Matches (I/O-bound)]
+    I --> J[Save Perfect Matches\n(I/O-bound)]
     J --> K[Update LastRun to COMPLETED]
     K --> L[Release Semaphores]
-    
-    F -- On Failure --> M[Update LastRun to FAILED]
+
+    F --|On Failure|--> M[Update LastRun to FAILED]
     M --> L
+
 ```
 
 ### In-Memory Batch Processing
