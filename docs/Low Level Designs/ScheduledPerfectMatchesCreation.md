@@ -1,58 +1,66 @@
 # Perfect‑Matches Creation Module – Low‑Level Design (LLD)
 
-> **Goal** – Produce a *deterministic, high‑quality* set of **perfect matches** (the “gold‑standard” matches) for every active `groupId` / `domainId` pair every night.  
-> The flow is similar to the “potential‑matches” pipeline but adds **strict top‑K per node**, **strategy‑driven graph processing**, and a **stream‑save** pattern that works on *already‑persisted* potential‑match data.
+> **Goal** – Every night (03:00 IST) produce a *deterministic* set of **perfect matches** for every active `(domainId, groupId)` pair.  
+> The pipeline re‑uses most of the “potential‑matches” infrastructure (queues, MapDB, LSH) but adds a **dynamic, cost‑aware matching strategy** that can switch between four algorithms at run‑time.
 
 ---
 
-## High‑Level Overview
+##  High‑Level Flow (Cron → Final DB)
 
 ```mermaid
-graph TD
-    S[Perfect Matches Creation Scheduler - cron 03:00 IST] -->|tasks| SC[Perfect Match Creation Service]
-    SC -->|domain and group semaphores| PEX[Perfect Match Creation Job Executor]
-    PEX -->|process group| PMS[Perfect Match Service Impl]
-    PMS -->|stream potential matches| PSS[Perfect Match Streaming Service]
-    PSS -->|batch to Consumer| PMS
-    PMS -->|select strategy| MSS[Matching Strategy Selector]
-    MSS -->|strategy| MS[Matching Strategy - Greedy, Hungarian, etc]
-    MS -->|graph to top K| PMR[Perfect Match Result Builder]
-    PMR -->|buffer| QM[Queue Manager - reused from potential matches]
-    QM -->|periodic flush| GS[Graph Store - MapDB temporary edge store]
-    GS -->|final stream| PMS2[Perfect Match Service Impl - final stage]
-    PMS2 -->|save final top K| PMSV[Perfect Match Saver]
-    PMSV -->|COPY UPSERT| PMST[Perfect Match Storage Processor - PostgreSQL]
-    PMST -->|metrics and cleanup| FM[Matches Creation Finalizer]
-    FM -->|clean LSH, queues, GC| LSH[LSH Index - shared with potential matches]
+flowchart TD
+    S[PerfectMatchesCreationScheduler (cron 03:00)] -->|tasks| CS[PerfectMatchCreationService]
+    CS -->|domain‑/‑group semaphores| JE[PerfectMatchCreationJobExecutor]
+    JE -->|processGroup| PS[PerfectMatchServiceImpl]
+    PS -->|stream potential matches| PSS[PerfectMatchStreamingService]
+    PS -->|select strategy| MS[MatchingStrategySelector]
+    MS -->|strategy| A[AuctionApproximate] 
+    MS -->|strategy| H[Hopcroft‑Karp] 
+    MS -->|strategy| HU[Hungarian] 
+    MS -->|strategy| TG[Top‑K Weighted Greedy]
+    A & H & HU & TG -->|run on in‑memory adjacency| PS
+    PS -->|buffer edges| QM[QueueManager (same impl as potential‑matches)]
+    QM -->|periodic/boosted flush| GS[GraphStore (MapDB)]
+    PS -->|final stream from MapDB| GS
+    GS -->|top‑K extraction| PS
+    PS -->|persist final matches| PMS[PerfectMatchSaver]
+    PMS -->|COPY‑UPSERT| PMST[PerfectMatchStorageProcessor → PostgreSQL]
+    PMST -->|metrics & cleanup| FM[MatchesCreationFinalizer]
+    FM -->|clean LSH, queues, GC| LSH[LSHIndex (shared)]
 ```
 
-> **Note**: The **perfect‑matches** pipeline runs **once per day** (cron) and **only on the leader** (see §9). All components (queues, LSH, MapDB) are **re‑used** from the potential‑matches module for DRYness.
+*The **strategy selector** decides which of the four algorithms to run **per group** based on the group’s configuration (cost‑based flag, symmetric flag, node‑count). The rest of the pipeline is identical for every strategy.*
 
 ---
 
-## 2️⃣ Component‑by‑Component Deep Dive
+## Core Components & Responsibilities
 
-| Component | Primary Responsibility | Key Methods | Concurrency Controls | Important Config |
-|-----------|------------------------|-------------|----------------------|------------------|
-| **PerfectMatchesCreationScheduler** | Top‑level cron driver (`@Scheduled(cron="0 0 3 * * *", zone="Asia/Kolkata")`). Builds `(domain, groupId)` tasks via `PerfectMatchCreationService.getTasksToProcess()`. | `createPerfectMatches()`, `generatePerfectMatchesCreationGroup()` (retry + circuit‑breaker) | None – fires job | `perfect_matches_creation` timer, error counters |
-| **PerfectMatchCreationService** | Orchestrates **domain‑ and group‑level throttling**. Creates `cycleId`, launches `CompletableFuture` per group. Persists `LastRunPerfectMatches`. | `getTasksToProcess()`, `processAllDomains()`, `processGroupTask()` | `domainSemaphore` (default: 2)<br>`groupSemaphore` (default: 1) | `match.max-concurrent-domains`, `match.max-concurrent-groups` |
-| **PerfectMatchCreationJobExecutor** | Acquires per‑group semaphore and delegates to `PerfectMatchService.processAndSaveMatches()`. Handles retries. | `processGroup()`, `processGroupWithRetriesAsync()` | `groupSemaphores` (per group, max: 1) | `match.max-retries`, `match.retry-delay-millis` |
-| **PerfectMatchServiceImpl** | Core **graph‑building + top‑K extraction**. Streams potential matches → chunks → builds adjacency → applies strategy → persists edges → final top‑K → save. | `processAndSaveMatches()`, `processMatchesWithCursor()`, `processPageMatches()` | `cpuTaskSemaphore`<br>`memoryExceeded` flag | `matching.topk.count` (100), `matching.max.memory.mb` (1024) |
-| **PerfectMatchStreamingService** | **Streaming SELECT** of potential matches using JDBC cursor (`TYPE_FORWARD_ONLY`). | `streamAllMatches(groupId, domainId, batchConsumer, batchSize)` | Runs in `ioExecutor` | `node-fetch.batch-size`, `node-fetch.future-timeout-seconds` |
-| **MatchingStrategySelector** | Selects algorithm (`Greedy`, `Hungarian`, etc.) based on `MatchingConfiguration`. | `select(MatchingContext ctx, UUID groupId)` | Pure lookup | `matching.configuration` table |
-| **MatchingStrategy** (interface) | Pluggable algorithms. Receives `List<PotentialMatch>`, returns `Map<nodeId, List<MatchResult>>` (top‑K). | `match(allPMs, groupId, domainId)` | Stateless, runs in `cpuExecutor` | `matching.topk.count` |
-| **PerfectMatchSaver** | Forwards batch to `PerfectMatchStorageProcessor`. Bounds concurrent DB‑COPY. | `saveMatchesAsync(...)` | `saveSemaphore` (2 permits) | `import.batch-size` |
-| **PerfectMatchStorageProcessor** | **Bulk‑load** via `COPY → temp → UPSERT`. Retries on failure. | `savePerfectMatches(...)` | `ioExecutor` | `import.batch-size`, `SAVE_OPERATION_TIMEOUT_MS` |
-| **MatchesCreationFinalizer** | Cleans LSH, queues, forces GC. | `finalize(cycleCompleted)` | Post‑completion | – |
-| **QueueManager / Factory** | Buffers matches before MapDB flush. | `enqueue()`, `flushQueueBlocking()` | `periodic, boostedFlushSemaphore` | `match.queue.capacity`, `match.flush.interval-seconds` |
-| **GraphStore** | MapDB‑based temporary edge store. | `persistEdgesAsync()`, `streamEdges()`, `cleanEdges()` | `mapdbExecutor`, `commitExecutor` | `mapdb.batch-size`, `mapdb.commit-threads` |
+| Component | Main Duties | Important Methods | Concurrency Controls |
+|-----------|--------------|-------------------|----------------------|
+| **PerfectMatchesCreationScheduler** | Cron entry (`@Scheduled(cron="0 0 3 * * *", zone="Asia/Kolkata")`). Builds a list of `(Domain, groupId)` tasks via `PerfectMatchCreationService.getTasksToProcess()`. Wraps each call in a Spring `@Retry` + `@CircuitBreaker`. | `createPerfectMatches()`, `generatePerfectMatchesCreationGroup()` (fallback) | None – just fires the job. |
+| **PerfectMatchCreationService** | Orchestrates **domain‑ and group‑level throttling** (`domainSemaphore`, `groupSemaphore`). Persists `LastRunPerfectMatches` (run‑date, node‑count, status). | `getTasksToProcess()`, `processAllDomains()`, `processGroupTask()` | `domainSemaphore` (max‑concurrent‑domains, default 2) <br> `groupSemaphore` (max‑concurrent‑groups, default 1) |
+| **PerfectMatchCreationJobExecutor** | Thin wrapper that **acquires a per‑group semaphore** (`groupSemaphores`) and delegates to `PerfectMatchService.processAndSaveMatches()`. Handles its own retry loop (`maxRetries`, exponential back‑off). | `processGroup()`, `processGroupWithRetriesAsync()` | `groupSemaphores` (max‑concurrent‑groups, default 1) |
+| **PerfectMatchServiceImpl** | **Core engine** – streams potential matches, builds an adjacency map, runs the **selected strategy**, buffers intermediate edges, flushes to MapDB, finally streams back, extracts top‑K (if required) and writes final rows. | `processAndSaveMatches()`, `processMatchesWithCursor()`, `processPageMatches()` | `cpuTaskSemaphore` (≈ 2 × availableProcessors) limits parallel adjacency‑map building. |
+| **PerfectMatchStreamingService** | JDBC **forward‑only cursor** (`ResultSet.TYPE_FORWARD_ONLY`) that yields batches of `PotentialMatchEntity`. Retries up to 3 times. | `streamAllMatches(UUID groupId, UUID domainId, Consumer<List<PotentialMatchEntity>> batchConsumer, int batchSize)` | Runs on `ioExecutor` (single‑threaded or small pool). |
+| **MatchingStrategySelector** | Reads `MatchingConfiguration` (JPA) for the group and decides **which algorithm** to use. The decision matrix is: <br>• `isCostBased && isSymmetric` → **Top‑K Weighted Greedy** <br>• `isCostBased && !isSymmetric && nodeCount ≤ 10 000` → **Hungarian** <br>• `isCostBased && !isSymmetric && nodeCount > 10 000` → **Hopcroft‑Karp** <br>• otherwise → **Auction Approximate** | `select(MatchingContext ctx, UUID groupId)` | Stateless – just a map lookup (`strategyMap`). |
+| **MatchingStrategy** (interface) | Four concrete implementations (see below). Each receives a **flat list of `PotentialMatch`** (already filtered by group/domain) and returns `Map<nodeId, List<MatchResult>>`. | `match(List<PotentialMatch> allPMs, UUID groupId, UUID domainId)` | Implementations are **stateless**; they run inside the `cpuExecutor`. |
+| **AuctionApproximateMatchingStrategy** | Auction‑style greedy algorithm with price‑updates. Works for any graph size. | `match(...)` | No extra concurrency – runs in the caller’s thread. |
+| **HopcroftKarpMatchingStrategy** | Maximum‑cardinality bipartite matching (O(E·√V)). Uses `BipartiteGraphBuilderService` to materialise the graph first. | `match(...)` | Calls `bipartiteGraphBuilderService.build(...)` (async) → waits on the future. |
+| **HungarianMatchingStrategy** | Optimal assignment (O(N³)) – used only when the bipartite graph is **small** (≤ 10 k nodes). | `match(...)` | Same as Hopcroft‑Karp but with a cost matrix. |
+| **TopKWeightedGreedyMatchingStrategy** | Fast “keep‑top‑K per node” greedy algorithm. Memory‑aware, does **not** guarantee a global top‑K when the node count is huge. | `match(...)` | Uses its own `computeSemaphore` to bound parallel sub‑batches. |
+| **QueueManager / QueueManagerFactory** | Same implementation as the potential‑matches module – a bounded `LinkedBlockingQueue<PotentialMatch>` per group, with periodic & boosted flushes. | `enqueue()`, `flushQueueBlocking()` | `periodicFlushSemaphore`, `boostedFlushSemaphore`. |
+| **GraphStore** | MapDB‑backed edge store (temporary). `persistEdgesAsync()` writes batches, `streamEdges()` reads them back for the final top‑K extraction. | `persistEdgesAsync()`, `streamEdges()`, `cleanEdges()` | `mapdbExecutor` + `commitExecutor`. |
+| **PerfectMatchSaver** | Thin façade that forwards a batch of `PerfectMatchEntity` to the storage processor. Guarded by a **semaphore (2 permits)** to avoid too many concurrent COPY jobs. | `saveMatchesAsync(...)` | `saveSemaphore`. |
+| **PerfectMatchStorageProcessor** | **COPY → temp table → UPSERT** into `perfect_matches`. Retries on `SQLException`/`TimeoutException` (3 attempts, exponential back‑off). | `savePerfectMatches(...)`, `saveBatch(...)` | Runs on `ioExecutor`. |
+| **MatchesCreationFinalizer** | After the whole batch finishes: `QueueManager.removeAll()`, `LSHIndex.clean()`, optional `System.gc()`. Also logs heap usage before/after. | `finalize(boolean cycleCompleted)` | None. |
+| **LSHIndex** | Shared with the potential‑matches pipeline – kept alive for the whole day, cleaned at the end of the perfect‑match run. | `clean()` | None (single‑process). |
 
 ---
 
-## 3️⃣ Data Model Snapshot
+## 3️⃣  Data Model (simplified)
 
 ```sql
--- Potential matches (input)
+-- Potential matches (produced by the “potential” job)
 CREATE TABLE potential_matches (
     id UUID PRIMARY KEY,
     group_id UUID NOT NULL,
@@ -65,7 +73,7 @@ CREATE TABLE potential_matches (
     UNIQUE (group_id, reference_id, matched_reference_id)
 );
 
--- Perfect matches (output)
+-- Perfect matches (final output)
 CREATE TABLE perfect_matches (
     id UUID PRIMARY KEY,
     group_id UUID NOT NULL,
@@ -78,204 +86,219 @@ CREATE TABLE perfect_matches (
     UNIQUE (group_id, reference_id, matched_reference_id)
 );
 
--- Bookkeeping
+-- Book‑keeping for the scheduler
 CREATE TABLE last_run_perfect_matches (
     id UUID PRIMARY KEY,
     group_id UUID NOT NULL,
     domain_id UUID NOT NULL,
     run_date TIMESTAMP,
     node_count BIGINT,
-    status VARCHAR(20)  -- PENDING, COMPLETED, FAILED
+    status VARCHAR(20)   -- PENDING, COMPLETED, FAILED
 );
 ```
 
-> `perfect_matches` is **append‑only**; `UPSERT` ensures idempotence.
+*All IDs are `UUID`. The `perfect_matches` table is **append‑only**; the `UPSERT` in the storage processor guarantees idempotence.*
 
 ---
 
-## 4️⃣ End‑to‑End Sequence (per group)
+## Dynamic Strategy Selection
+
+```mermaid
+flowchart TD
+    A[MatchingConfiguration] --> B{isCostBased?}
+    B -->|false| C[AuctionApproximateMatchingStrategy]
+    B -->|true| D{isSymmetric?}
+    D -->|true| E[TopKWeightedGreedyMatchingStrategy]
+    D -->|false| F{nodeCount ≤ 10 000?}
+    F -->|yes| G[HungarianMatchingStrategy]
+    F -->|no| H[HopcroftKarpMatchingStrategy]
+```
+
+*The selector (`MatchingStrategySelector.select`) reads the `MatchingConfiguration` row for the group, extracts:*
+
+| Flag | Meaning |
+|------|---------|
+| `isCostBased` | The business wants a **cost‑optimised** solution (i.e. top‑K per node). |
+| `isSymmetric` | Graph is symmetric (same node set on both sides). |
+| `nodeCount` | Number of distinct nodes in the **potential‑match** stream (computed on‑the‑fly). |
+
+*If the configuration does not request cost‑based matching, we fall back to the **Auction Approximate** algorithm – a fast, price‑adjusting greedy method that works for any size.*
+
+---
+
+## Detailed Sequence – One Group (Happy Path)
 
 ```mermaid
 sequenceDiagram
-    participant Sched as Scheduler
-    participant Svc as CreationService
-    participant Exec as JobExecutor
-    participant PM as PerfectMatchService
-    participant Stream as StreamingService
-    participant Sel as StrategySelector
-    participant Strat as MatchingStrategy
-    participant QMgr as QueueManager
-    participant GS as GraphStore
+    participant Sched as PerfectMatchesCreationScheduler
+    participant Svc as PerfectMatchCreationService
+    participant Exec as PerfectMatchCreationJobExecutor
+    participant PM as PerfectMatchServiceImpl
+    participant Stream as PerfectMatchStreamingService
+    participant Sel as MatchingStrategySelector
+    participant Strat as MatchingStrategy (dynamic)
+    participant QM as QueueManager
+    participant GS as GraphStore (MapDB)
     participant Saver as PerfectMatchSaver
-    participant Store as StorageProcessor
-    participant Final as Finalizer
+    participant Store as PerfectMatchStorageProcessor
+    participant Final as MatchesCreationFinalizer
 
     Sched->>Svc: getTasksToProcess()
-    loop for each (domain, group)
+    loop for each (domain,group)
         Sched->>Exec: processGroup(groupId, domainId, cycleId)
-        Exec->>PM: processAndSaveMatches()
-        PM->>Stream: streamAllMatches(batchConsumer)
-        Stream-->>PM: Batch of PotentialMatchEntity
-        PM->>Sel: selectStrategy(ctx)
-        Sel-->>PM: MatchingStrategy impl
-        PM->>Strat: match(allPMs)
+        Exec->>PM: processAndSaveMatches(request)
+        PM->>Stream: streamAllMatches(groupId, domainId, batchConsumer)
+        Stream-->>PM: batch of PotentialMatchEntity
+        PM->>Sel: select strategy (config)
+        Sel-->>PM: concrete MatchingStrategy
+        PM->>Strat: match(potentialMatches, groupId, domainId)
         Strat-->>PM: Map<nodeId, List<MatchResult>>
-        PM->>QMgr: enqueue(edges)
-        QMgr->>GS: persistEdgesAsync()
-        Note over GS: Temp edges in MapDB
+        PM->>QM: enqueue(PotentialMatch)   %% buffered
+        QM->>GS: persistEdgesAsync() (periodic)
+        Note right of GS: temporary edge store
+        PM->>PM: continue streaming next batch …
     end
-    PM->>GS: streamEdges()
-    GS-->>PM: All edges stream
-    PM->>PM: Apply global top-K
+    PM->>GS: streamEdges(domainId, groupId)   %% final read
+    GS-->>PM: Edge stream (all intermediate edges)
+    PM->>PM: keep global top‑K per node (if required)
     PM->>Saver: saveMatchesAsync(finalMatches)
     Saver->>Store: COPY → temp → UPSERT
     Store-->>Saver: OK
     Saver->>Final: finalize(true)
     Final->>LSH: clean()
-    Final->>QMgr: removeAll()
-    Final-->>Sched: Job done
+    Final->>QM: removeAll()
+    Final-->>Sched: job finished
 ```
 
----
+### Failure‑Handling Points (annotated)
 
-## 5️⃣ Concurrency & Back‑Pressure Model
+| Step | What can fail? | Recovery / Fallback |
+|------|----------------|---------------------|
+| **`streamAllMatches`** | JDBC timeout / dead connection | Retry up to 3 × with back‑off; on final failure the whole group is marked **FAILED** (`LastRun.status = FAILED`). |
+| **Strategy execution** | Illegal arguments, OOM, algorithm‑specific exception | Caught in `processMatchesWithCursor`; group marked **FAILED**; `finalizer` still runs to clean resources. |
+| **Queue enqueue** | Queue full (capacity reached) | `enqueue()` times out → match is **dropped**; metric `match_drops_total{reason="queue_timeout"}` is incremented. |
+| **MapDB persist** | Disk I/O error, commit timeout | `persistEdgesAsync(...).orTimeout(100s)` → on timeout the future fails → group marked **FAILED**. |
+| **Final COPY** | PostgreSQL error, deadlock | `PerfectMatchStorageProcessor.saveBatch` is `@Retryable` (3 attempts, exponential back‑off). After retries, group fails. |
+| **Circuit‑breaker** (scheduler) | Repeated failures across groups | Spring `@CircuitBreaker` trips → `generatePerfectMatchesCreationGroupFallback` runs, persisting a **FAILED** `LastRun`. |
 
-| Resource | Guard | Max Permits | Purpose |
-|--------|-------|-------------|--------|
-| `domainSemaphore` | `Semaphore` | 2 | Limit concurrent domains |
-| `groupSemaphore` | `Semaphore` | 1 | Exactly-once per group |
-| `groupSemaphores` | `ConcurrentMap<UUID, Semaphore>` | 1 per group | Parallel groups |
-| `cpuTaskSemaphore` | `Semaphore` | `availableProcessors * 2` | CPU‑bound tasks |
-| `saveSemaphore` | `Semaphore` | 2 | Concurrent COPY |
-| `periodicFlushSemaphore` | `Semaphore` | 2 | Flush coordination |
-
-**Back‑pressure**:
-- Queue > `drainWarningThreshold` → **boosted flush**
-- `enqueue()` timeout → drop + metric
-- MapDB commit timeout → group **FAILED**
+All failures increment a **counter** (`perfect_matches_creation_errors_total`) and are logged with the full stack‑trace.
 
 ---
 
-## 6️⃣ Fault‑Tolerance & Retry
+## Concurrency & Back‑Pressure Model
 
-### Retry Summary
+| Resource | Guard | Default Permit Count | Why |
+|----------|-------|----------------------|-----|
+| **Domain semaphore** (`domainSemaphore`) | `java.util.concurrent.Semaphore` | `match.max-concurrent-domains` (2) | Prevents DB/CPU overload when many domains are active. |
+| **Group semaphore** (`groupSemaphore`) | `Semaphore` | `match.max-concurrent-groups` (1) | Guarantees **exactly‑once** processing per group. |
+| **Per‑group semaphore** (`groupSemaphores` in `JobExecutor`) | `ConcurrentMap<UUID, Semaphore>` | `match.max-concurrent-groups` (1) | Allows parallel groups if the config is raised. |
+| **CPU‑task semaphore** (`cpuTaskSemaphore`) | `Semaphore` | `2 × availableProcessors` | Limits parallel adjacency‑map building / strategy execution. |
+| **Queue flush semaphores** (`periodicFlushSemaphore`, `boostedFlushSemaphore`) | `Semaphore` | 2 / 1 | Guarantees only one flush runs at a time; boosted flush is exclusive. |
+| **Perfect‑match saver semaphore** (`saveSemaphore`) | `Semaphore(2)` | 2 | Limits concurrent COPY jobs (I/O‑heavy). |
+| **Queue capacity** | `LinkedBlockingQueue` (via `QueueManager`) | `match.queue.capacity` (default 500 000) | Back‑pressure – if the queue fills, `enqueue()` times out and the match is dropped. |
 
-| Layer | Mechanism | Max | Back-off | Fallback |
-|------|----------|-----|---------|---------|
-| Scheduler | `@Retry` + `@CircuitBreaker` | 3 | Exponential | Mark **FAILED** |
-| Executor | Manual loop | `maxRetries` | `delay * 2^n` | Bubble up |
-| Streaming | Manual retry | 3 | 1s, 2s, 3s | **FAILED** |
-| Storage | `@Retryable` | 3 | 1→2→4s | **FAILED** |
+**Back‑pressure cascade**
 
-### Failure Flow
+1. **Streaming** → batches of potential matches.
+2. **Strategy** → produces `PotentialMatch` objects.
+3. **QueueManager** buffers them.
+4. When `size / capacity > drainWarningThreshold (0.9)` → **boosted flush** (larger batch, exclusive semaphore).
+5. If `enqueue()` cannot insert within 1 s → match is dropped and counted.
+
+---
+
+## Observability (Micrometer)
+
+| Metric | Tags | Type | When emitted |
+|--------|------|------|---------------|
+| `perfect_matches_creation` | `domainId`, `groupId` | Counter | After a group finishes successfully. |
+| `perfect_matches_creation_errors_total` | `groupId` | Counter | Any uncaught exception in the group pipeline. |
+| `perfect_match_storage_duration` | `groupId` | Timer | Whole COPY‑UPSERT operation. |
+| `perfect_match_storage_batch_duration` | `groupId` | Timer | Each batch inside `saveBatch`. |
+| `perfect_match_storage_errors_total` | `groupId`, `error_type` | Counter | DB‑level failures after retries. |
+| `matching_duration` | `groupId`, `domainId`, `cycleId` | Timer | Whole `processAndSaveMatches` call. |
+| `matching_errors_total` | `groupId`, `domainId`, `cycleId` | Counter | Any exception inside `PerfectMatchServiceImpl`. |
+| `match_drops_total` | `groupId`, `reason`, `match_type` | Counter | Queue full / timeout / interrupt. |
+| `queue_drain_warnings_total` | `groupId` | Counter | Queue > `drainWarningThreshold`. |
+| `heap_usage_before_cleanup` / `heap_usage_after_cleanup` | – | Gauge | Logged by `MatchesCreationFinalizer`. |
+| `system_cpu_usage` | – | Gauge | Added by `PerfectMatchStorageProcessor`. |
+| `strategy_used` | `groupId`, `strategy` | Counter | Incremented once per group after the selector decides. |
+
+All timers are **sampled per group** so you can drill down to the slowest groups in Grafana.
+
+---
+
+##  Scaling & Distributed Coordination (Optional)
+
+The current implementation is **single‑process** (only one pod runs the cron). To run on a cluster:
+
+| Concern | Distributed Solution |
+|---------|----------------------|
+| **Leader election** (only one scheduler) | Kubernetes `Lease` (`spring-cloud-kubernetes-leader`) or Redis Redlock. |
+| **Domain / Group semaphores** | Redis `SETNX` with TTL (key `sem:domain:{id}` or `sem:group:{id}`). |
+| **QueueManager** | Replace the in‑process `LinkedBlockingQueue` with **Redis Streams** (one stream per `groupId`). |
+| **MapDB** | Use a **distributed KV store** (RocksDB with shared storage, or Ignite) or keep MapDB **local** and shard groups (`groupId % N`). |
+| **Final DB writes** | No change – PostgreSQL handles concurrent COPY jobs (each job uses its own temp table). |
+| **Metrics aggregation** | Prometheus scrapes each pod; use `groupId` tag to aggregate across pods. |
+
+**Sharding by group** (simpler) – each node processes only groups where `hash(groupId) % NUM_NODES == nodeIndex`. No distributed locks are needed; the scheduler still runs on every node but each node’s `getTasksToProcess()` filters out groups that belong to other shards.
+
+---
+
+##  Memory‑vs‑Throughput Sizing Guide
+
+| Parameter | Recommended Starting Value | How to tune |
+|-----------|---------------------------|-------------|
+| `matching.topk.count` | 100 | Increase only if business needs more per‑node matches; watch `maxMatchesPerNode` memory (≈ 16 B per edge). |
+| `matching.max.memory.mb` | 1024 MiB | Raise on machines with > 4 GiB heap. The service aborts if usage > 80 % of this value. |
+| `matching.max.distinct.nodes` | 10 000 | Upper bound for the **Top‑K Greedy** strategy; larger graphs will be routed to Hopcroft‑Karp. |
+| `node-fetch.batch-size` | 500 | Larger batches reduce round‑trips but increase per‑batch memory. |
+| `match.max-concurrent-domains` | 2 | Raise if DB can handle more parallel domains. |
+| `match.max-concurrent-groups` | 1 (default) | Raise to 2‑3 on a 16‑core box if you have many groups. |
+| `match.flush.interval-seconds` | 5 | Lower (2 s) if the queue fills fast; higher (10 s) if DB can absorb larger batches. |
+| `match.drain-warning-threshold` | 0.9 | Keep at 0.9; if you see many warnings, increase `maxConcurrentBatches` or `queue.capacity`. |
+
+**Rule of thumb** – keep **CPU utilisation** ≤ 70 % and **memory** ≤ 80 % of the configured limits. Adjust the semaphores accordingly.
+
+---
+
+## Fault‑Tolerance Lifecycle Diagram (Retry / Fallback)
 
 ```mermaid
 flowchart TD
-    A[Start] --> B{Acquire Semaphores}
-    B -->|OK| C[Stream Matches]
-    C -->|Error| D[Retry 3x]
-    D -->|Fail| E[Mark FAILED]
-    C -->|OK| F[Process Chunks]
-    F -->|OOM| G[Cancel Futures] --> E
-    F -->|Exception| E
-    F -->|OK| H[Flush to MapDB]
-    H --> I[Stream Edges]
-    I --> J[Final Top-K]
-    J --> K[Save Matches]
-    K -->|Error| L[Retry 3x]
-    L -->|Fail| E
-    K --> M[Mark COMPLETED]
-    M --> N[Finalizer: Clean]
-    N --> O[Done]
+    A[Start group] --> B{Acquire semaphores}
+    B -->|OK| C[Stream potential matches]
+    C -->|SQL error| D[Retry (max 3) → back‑off]
+    D -->|exhausted| E[Mark LastRun FAILED, abort]
+    C -->|Success| F[Chunk → build adjacency]
+    F -->|OOM / algorithm error| G[Abort, mark FAILED]
+    F -->|All chunks OK| H[Flush Queue → MapDB]
+    H --> I[Stream edges from MapDB]
+    I --> J[Apply final top‑K (if needed)]
+    J --> K[Copy‑UPSERT to PostgreSQL]
+    K -->|SQL error| L[Retry (max 3) → back‑off]
+    L -->|exhausted| E
+    K --> M[Mark LastRun COMPLETED]
+    M --> N[Finalizer (clean LSH, queues, GC)]
+    N --> O[Group finished]
 ```
 
----
-
-## 7️⃣ Observability (Micrometer)
-
-| Metric | Tags | Type | Emitted |
-|-------|------|------|--------|
-| `perfect_matches_creation` | `groupId` | Counter | Success |
-| `perfect_matches_creation_errors_total` | `groupId` | Counter | Failure |
-| `matching_duration` | `groupId`, `cycleId` | Timer | Full run |
-| `perfect_match_storage_duration` | `groupId` | Timer | COPY+UPSERT |
-| `match_drops_total` | `reason` | Counter | Queue overflow |
-| `queue_drain_warnings_total` | `groupId` | Counter | Boosted flush |
-| `heap_usage_before/after_cleanup` | – | Gauge | Finalizer |
+*Every branch that ends in **E** increments `perfect_matches_creation_errors_total` and updates `LastRun.status = FAILED`. The finalizer always runs (even on failure) to avoid resource leaks.*
 
 ---
 
-## 8️⃣ Throughput vs Latency – Sizing
+##  Quick‑Start Checklist (what to verify before go‑live)
 
-| Param | Default | Tuning Tip |
-|------|--------|-----------|
-| `matching.topk.count` | 100 | ↑ only if needed |
-| `matching.max.memory.mb` | 1024 | < 80% JVM heap |
-| `node-fetch.batch-size` | 500 | Balance memory vs round-trips |
-| `import.batch-size` | 1000 | ↑ for throughput |
-| `match.max-concurrent-groups` | 1 | ↑ to 2–3 on 16‑core |
-| `match.flush.interval-seconds` | 5 | ↓ if queue grows fast |
-
----
-
-## 9️⃣ Horizontal Scaling
-
-| Concern | Solution |
-|--------|----------|
-| **Leader** | K8s Lease / Redis Redlock |
-| **Group Locks** | Redis `SETNX` + TTL |
-| **QueueManager** | Replace with **Redis Streams** |
-| **MapDB** | Local + **sharding** (`groupId % N`) |
-| **DB** | Concurrent COPY → same PostgreSQL |
-
-**Simple Sharding**: Each node processes `groupId % NUM_NODES == nodeIndex`
-
----
-
-## 🔧 Chunk Processing Flow
-
-```mermaid
-flowchart TD
-    subgraph Chunk
-        A[Receive Batch] --> B[Group by nodeId]
-        B --> C[PriorityQueue per node]
-        C --> D[Trim to maxMatchesPerNode]
-        D --> E[Run MatchingStrategy]
-        E --> F[Convert to PerfectMatchEntity]
-        F --> G[Buffer]
-        G --> H{Buffer >= batchSize?}
-        H -->|Yes| I[Save Matches Async]
-        H -->|No| J[Next Batch]
-        I --> K[Clear Buffer]
-    end
-
-```
-
-> Runs in `cpuExecutor`, bounded by `cpuTaskSemaphore`
-
----
-
-## 📦 Supporting Classes
-
-| Class | Role |
-|------|------|
-| `MatchingContext` | Config context |
-| `MatchResult` | DTO: `partnerId`, `score` |
-| `PerfectMatchEntity` | JPA entity |
-| `PerfectMatchSerializer` | `COPY` serializer |
-| `BinaryCopyInputStream` | List → InputStream |
-| `QueryUtils` | SQL strings |
-| `LastRunPerfectMatchesRepository` | JPA repo |
-
----
-
-## 🛡️ Cleanup
-
-| When | Action |
-|------|--------|
-| After group | Release semaphores, `finalize(true)` |
-| Shutdown | `@PreDestroy` → shutdown executors |
-| OOM | Cancel futures, mark **FAILED**, clean |
-| Batch fail | Log, continue other groups |
+| Item | How to confirm |
+|------|-----------------|
+| **Scheduler runs only once** | Verify only one pod holds the Kubernetes `Lease` (or Redis lock). |
+| **Domain / Group semaphores respect limits** | `domainSemaphore.availablePermits()` never goes negative; logs show “acquired … permits left”. |
+| **Strategy selection works** | Insert a few rows in `matching_configuration` with different flags; check `strategy_used` counter in Prometheus. |
+| **Queue never overflows** | `match_drops_total{reason="queue_timeout"}` stays at 0; `queue_drain_warnings_total` < 5 per day. |
+| **MapDB writes < 200 ms per batch** | Look at `mapdb_persist_latency` 95th‑pctile. |
+| **COPY‑UPSERT finishes < 5 min per group** | `perfect_match_storage_duration` metric. |
+| **Final heap < 80 %** | `heap_usage_after_cleanup` gauge. |
+| **Graceful shutdown** | `@PreDestroy` methods close executors, DB pools, and clear queues within 30 s. |
+| **Metrics & alerts** | Grafana dashboards show all counters; alerts fire on `perfect_matches_creation_errors_total > 0` or `queue_drain_warnings_total > 0`. |
 
 ---
