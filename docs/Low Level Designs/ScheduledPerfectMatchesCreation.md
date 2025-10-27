@@ -69,30 +69,35 @@ graph TD
 ```mermaid
 graph TB
     subgraph Executors
-        E1[matchCreationExecutorService<br>Orchestration, Callbacks]
-        E2[ioExecutorService<br>JDBC Streaming, DB Writes]
-        E3[cpuExecutor<br>Strategy Execution]
+        E1[matchCreationExecutorService\nOrchestration, Callbacks]
+        E2[ioExecutorService\nJDBC Streaming, DB Writes]
+        E3[cpuExecutor\nStrategy Execution]
     end
 
     subgraph Semaphores
         S1[domainSemaphore]
-        S2[groupSemaphore (Service)]
-        S3[groupSemaphores (JobExecutor Map)]
+        S2[groupSemaphore Service]
+        S3[groupSemaphores JobExecutor Map]
         S4[cpuTaskSemaphore]
     end
 
     Scheduler --> E1
-    E1 -- delegates to --> E2 & E3
+    E1 --> E2
+    E1 --> E3
 
-    E1 -- constrained by --> S1 & S2 & S3
-    E3 -- constrained by --> S4
+    E1 --> S1
+    E1 --> S2
+    E1 --> S3
+    E3 --> S4
 
     subgraph Backpressure
         B1[JDBC Fetch Size]
-        B2[Dynamic Sub-Batch Sizing<br>(Memory-based)]
+        B2[Dynamic Sub-Batch Sizing\nMemory-based]
     end
-    E2 -- uses --> B1
-    E3 -- uses --> B2
+
+    E2 --> B1
+    E3 --> B2
+
 ```
 
 - **Executors**:
