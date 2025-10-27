@@ -38,26 +38,30 @@ The module follows a **pipeline architecture**:
 ### 2.2 System Diagram
 ```mermaid
 graph TD
-    A[Scheduled Job<br/>(3 AM IST)] --> B[PerfectMatchesCreationScheduler]
-    B --> C[PerfectMatchCreationService<br/>(Task Queuing + Semaphores)]
-    C --> D[PerfectMatchCreationJobExecutor<br/>(Retries + Semaphores)]
-    D --> E[PerfectMatchService<br/>(Graph Build + Strategy Select)]
-    E --> F[PotentialMatchStreamingService<br/>(JDBC Streaming)]
-    F --> G[MatchingStrategy<br/>(Dynamic: TopK, Auction, etc.)]
-    G --> H[PerfectMatchSaver + StorageProcessor<br/>(Async Bulk Save)]
-    H --> I[MatchesCreationFinalizer<br/>(Cleanup + GC)]
-    C -.-> J[NodeRepositoryCustom<br/>(Async Queries)]
-    E -.-> K[MatchingStrategySelector<br/>(Config-Based)]
-    subgraph "Concurrency Controls"
-        L[Domain Semaphore (Max:2)]
-        M[Group Semaphore (Max:1)]
-        N[CPU Semaphore (Processors*2)]
+    A[Scheduled Job (3 AM IST)] --> B[PerfectMatchesCreationScheduler]
+    B --> C[PerfectMatchCreationService - Task Queuing and Semaphores]
+    C --> D[PerfectMatchCreationJobExecutor - Retries and Semaphores]
+    D --> E[PerfectMatchService - Graph Build and Strategy Select]
+    E --> F[PotentialMatchStreamingService - JDBC Streaming]
+    F --> G[MatchingStrategy - Dynamic: TopK, Auction, etc.]
+    G --> H[PerfectMatchSaver and StorageProcessor - Async Bulk Save]
+    H --> I[MatchesCreationFinalizer - Cleanup and GC]
+    C -.-> J[NodeRepositoryCustom - Async Queries]
+    E -.-> K[MatchingStrategySelector - Config Based]
+
+    subgraph Concurrency_Controls
+        L[Domain Semaphore (Max 2)]
+        M[Group Semaphore (Max 1)]
+        N[CPU Semaphore (Processors x2)]
     end
+
     C -.-> L
     C -.-> M
     E -.-> N
+
     style A fill:#f9f,stroke:#333
     style I fill:#f9f,stroke:#333
+
 ```
 
 ### 2.3 Data Flow
@@ -206,7 +210,7 @@ sequenceDiagram
 #### 2.4.3 Flowchart: Strategy Selection & Matching
 ```mermaid
 flowchart TD
-    A[Start: Load MatchingConfiguration] --> B{Is Symmetric & Cost-Based?}
+    A[Start: Load MatchingConfiguration] --> B{Is Symmetric and Cost-Based?}
     B -->|Yes| C[Select TopKWeightedGreedy]
     B -->|No| D{Is Bipartite?}
     D -->|Yes| E{Node Count < 100?}
@@ -215,20 +219,21 @@ flowchart TD
     G -->|Yes| H[Select HopcroftKarp]
     G -->|No| I[Select AuctionApproximate]
     D -->|No| I
-    C --> J[Build Adjacency Map<br/>(Top-K PriorityQueue)]
-    F --> K[Build Cost Matrix<br/>(Negated Scores)]
-    H --> L[Build BipartiteGraph<br/>(Edges from Potentials)]
-    I --> M[Build Left→Rights Map<br/>(Sorted by Score)]
+    C --> J[Build Adjacency Map - TopK PriorityQueue]
+    F --> K[Build Cost Matrix - Negated Scores]
+    H --> L[Build BipartiteGraph - Edges from Potentials]
+    I --> M[Build Left to Rights Map - Sorted by Score]
     J --> N[Greedy Select Top-K per Node]
-    K --> O[Hungarian Algorithm<br/>(Augmenting Paths)]
-    L --> P[Hopcroft-Karp<br/>(BFS + DFS Levels)]
-    M --> Q[Auction Bidding Loop<br/>(Profit = Score - Price)]
+    K --> O[Hungarian Algorithm - Augmenting Paths]
+    L --> P[Hopcroft-Karp - BFS and DFS Levels]
+    M --> Q[Auction Bidding Loop - Profit = Score minus Price]
     N --> R[Buffer PerfectMatchEntity]
     O --> R
     P --> R
     Q --> R
-    R --> S[Async Bulk Save<br/>(COPY + UPSERT)]
+    R --> S[Async Bulk Save - COPY and UPSERT]
     S --> T[End: Update LastRun Status]
+
 ```
 
 #### 2.4.4 Sequence Diagram: Error Handling in Executor
