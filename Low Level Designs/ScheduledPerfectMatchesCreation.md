@@ -277,20 +277,21 @@ ON perfect_matches (group_id, domain_id, processing_cycle_id);
 ### Main Orchestration Flow
 ```mermaid
 flowchart TD
-    A["Scheduler\n@ 3 AM"] --> B{Get Tasks to Process}
-    B --> C{For Each Group}
-    C --> D[Update LastRun to PENDING]
-    D --> E[Acquire Domain & Group Semaphores]
-    E --> F[Execute Job w/ Retries]
-    F --> G[Stream Potential Matches]
-    G --> H[Process in Sub-Batches\n(CPU-bound)]
-    H --> I[Apply Matching Strategy]
-    I --> J[Save Perfect Matches\n(I/O-bound)]
-    J --> K[Update LastRun to COMPLETED]
-    K --> L[Release Semaphores]
+    A["Scheduler\n@ 3 AM"] --> B{"Get Tasks to Process"}
+    B --> C{"For Each Group"}
+    C --> D["Update LastRun to PENDING"]
+    D --> E["Acquire Domain & Group Semaphores"]
+    E --> F["Execute Job w/ Retries"]
+    F --> G["Stream Potential Matches"]
+    G --> H["Process in Sub-Batches\nCPU-bound"]
+    H --> I["Apply Matching Strategy"]
+    I --> J["Save Perfect Matches\nI/O-bound"]
+    J --> K["Update LastRun to COMPLETED"]
+    K --> L["Release Semaphores"]
 
-    F --|On Failure|--> M[Update LastRun to FAILED]
+    F --|On Failure|--> M["Update LastRun to FAILED"]
     M --> L
+
 
 ```
 
@@ -332,14 +333,15 @@ flowchart TD
 ### Error Handling Decision Flow
 ```mermaid
 graph TD
-    A[Operation Fails] --> B{Is it a<br>Transient Error?<br>(e.g., SQLException)}
-    B -- Yes --> C{Retries Left?}
-    C -- Yes --> D[Wait Exponential Backoff]
-    D --> E[Retry Operation]
-    C -- No --> F[Log Exhaustion & Abort]
-    B -- No --> G{Is it a<br>Fatal Error?<br>(e.g., Memory Exceeded)}
-    G -- Yes --> H[Cancel All Tasks &<br>Update Status to FAILED]
-    G -- No --> I[Log as Unhandled & Abort]
+    A["Operation Fails"] --> B{"Is it a Transient Error?\n(e.g. SQL Exception)"}
+    B -- Yes --> C{"Retries Left?"}
+    C -- Yes --> D["Wait Exponential Backoff"]
+    D --> E["Retry Operation"]
+    C -- No --> F["Log Exhaustion & Abort"]
+    B -- No --> G{"Is it a Fatal Error?\n(e.g. Memory Exceeded)"}
+    G -- Yes --> H["Cancel All Tasks & Update Status to FAILED"]
+    G -- No --> I["Log as Unhandled & Abort"]
+
 ```
 
 - **Scheduler/Service**: `@Retry` and `@CircuitBreaker` per group; fallback updates `LastRun` to `FAILED`.
