@@ -7,18 +7,19 @@
 ### **Purpose Diagram**
 ```mermaid
 graph TD
-    A[Purpose] --> B[Compute Perfect Matches]
-    A --> C[Daily Batch Execution]
-    A --> D[Consume Potential Matches]
+  A["Purpose"] --> B["Compute Perfect Matches"]
+  A --> C["Daily Batch Execution"]
+  A --> D["Consume Potential Matches"]
 
-    B --> E[Apply Configured Algorithm]
-    B --> F[Persist to PostgreSQL]
+  B --> E["Apply Configured Algorithm"]
+  B --> F["Persist to PostgreSQL"]
 
-    C --> G[Cron-triggered (3 AM)]
-    C --> H[Avoids Real-Time Complexity]
+  C --> G["Cron-triggered (3 AM)"]
+  C --> H["Avoids Real-Time Complexity"]
 
-    D --> I[Stream from DB]
-    D --> J[Track Last Run Status]
+  D --> I["Stream from DB"]
+  D --> J["Track Last Run Status"]
+
 ```
 
 ### **Scope**
@@ -40,11 +41,12 @@ graph TD
 ### **Trigger Flow Diagram**
 ```mermaid
 flowchart TD
-    A[Scheduler @ 3 AM] --> B[Trigger createPerfectMatches()]
-    B --> C{Get Tasks to Process}
-    C --> D{Reprocess if needed?}
-    D -- Yes --> E[Execute Group Job]
-    D -- No --> F[Skip]
+    A["Scheduler @ 3 AM"] --> B["Trigger createPerfectMatches()"]
+    B --> C{"Get Tasks to Process"}
+    C --> D{"Reprocess if needed?"}
+    D -- Yes --> E["Execute Group Job"]
+    D -- No --> F["Skip"]
+
 ```
 
 - **Scheduler**: `PerfectMatchesCreationScheduler.createPerfectMatches`

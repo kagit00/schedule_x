@@ -7,14 +7,15 @@
 ### **System Purpose Diagram**
 ```mermaid
 graph TD
-    A[Nodes Import Module] --> B[Ingest & Validate]
-    A --> C[Persist Node Data]
-    A --> D[Support Dual Ingestion Patterns]
+  A["Nodes Import Module"] --> B["Ingest & Validate"]
+  A --> C["Persist Node Data"]
+  A --> D["Support Dual Ingestion Patterns"]
 
-    B --> E[From Kafka Topics]
-    C --> F[To PostgreSQL]
-    D --> G[Cost-Based (CSV Files)]
-    D --> H[Non-Cost-Based (Reference IDs)]
+  B --> E["From Kafka Topics"]
+  C --> F["To PostgreSQL"]
+  D --> G["Cost-Based (CSV Files)"]
+  D --> H["Non-Cost-Based (Reference IDs)"]
+
 ```
 
 The Nodes Import Module is a robust, asynchronous system designed to ingest, validate, and persist node data from Kafka topics into a PostgreSQL database. It supports both large-scale, file-based imports and lightweight, ID-based imports, leveraging parallel batch processing, dead-letter queues (DLQ), and real-time metrics for high performance and fault tolerance.
@@ -69,20 +70,21 @@ graph TD
 ### **End-to-End Data Flow Diagram**
 ```mermaid
 flowchart TD
-    A[Kafka Message] --> B[Kafka Consumer]
-    B --> C{Validation & Parsing}
-    C -- Valid --> D{Routing}
-    C -- Invalid --> E[Dead-Letter Queue (DLQ)]
+  A["Kafka Message"] --> B["Kafka Consumer"]
+  B --> C["Validation & Parsing"]
+  C -- "Valid" --> D["Routing"]
+  C -- "Invalid" --> E["Dead-Letter Queue (DLQ)"]
 
-    D -- Cost-Based --> F[Stream CSV Batches]
-    D -- Non-Cost-Based --> G[Partition Reference IDs]
+  D -- "Cost-Based" --> F["Stream CSV Batches"]
+  D -- "Non-Cost-Based" --> G["Partition Reference IDs"]
 
-    F --> H[Process Batch in Parallel]
-    G --> H
+  F --> H["Process Batch in Parallel"]
+  G --> H
 
-    H --> I[Upsert to PostgreSQL via COPY]
-    I --> J[Insert Metadata]
-    J --> K[Update Job Status & Metrics]
+  H --> I["Upsert to PostgreSQL via COPY"]
+  I --> J["Insert Metadata"]
+  J --> K["Update Job Status & Metrics"]
+
 ```
 
 ### **Data Flow Stages**
@@ -109,15 +111,16 @@ flowchart TD
 ### **Resilience Mechanisms Diagram**
 ```mermaid
 graph TD
-    A[Fault Tolerance] --> B[Dead-Letter Queue (DLQ)]
-    A --> C[Retries with Backoff]
-    A --> D[Timeouts]
-    A --> E[Consistency Checks]
+  A["Fault Tolerance"] --> B["Dead-Letter Queue (DLQ)"]
+  A --> C["Retries with Backoff"]
+  A --> D["Timeouts"]
+  A --> E["Consistency Checks"]
 
-    B --> F[Invalid Messages]
-    C --> G[Transient Failures]
-    D --> H[Stalled Operations]
-    E --> I[Data Discrepancies]
+  B --> F["Invalid Messages"]
+  C --> G["Transient Failures"]
+  D --> H["Stalled Operations"]
+  E --> I["Data Discrepancies"]
+
 ```
 
 - **Dead-Letter Queue (DLQ)**: Invalid messages are routed to `users-import-dlq` for reprocessing or auditing.
@@ -132,16 +135,17 @@ graph TD
 ### **Scalability Architecture Diagram**
 ```mermaid
 graph TD
-    A[Scalability] --> B[Concurrency]
-    A --> C[Batch Optimization]
-    A --> D[Resource Isolation]
+  A["Scalability"] --> B["Concurrency"]
+  A --> C["Batch Optimization"]
+  A --> D["Resource Isolation"]
 
-    B --> E[Kafka Consumer Parallelism (concurrency=4)]
-    B --> F[Dynamic Thread Pooling (max-parallel-futures=4)]
+  B --> E["Kafka Consumer Parallelism (concurrency=4)"]
+  B --> F["Dynamic Thread Pooling (max-parallel-futures=4)"]
 
-    C --> G[Adjustable Batch Size (default: 1000)]
+  C --> G["Adjustable Batch Size (default: 1000)"]
 
-    D --> H[Dedicated Executors (nodesImportExecutor)]
+  D --> H["Dedicated Executors (nodesImportExecutor)"]
+
 ```
 
 - **Concurrency**:

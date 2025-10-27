@@ -7,14 +7,15 @@
 ### **Purpose Diagram**
 ```mermaid
 graph TD
-    A[Match Transfer Module] --> B[Export Matches]
-    A --> C[Notify Downstream]
+    A["Match Transfer Module"] --> B["Export Matches"]
+    A --> C["Notify Downstream"]
 
-    B --> D[Potential & Perfect Matches]
-    B --> E[Client-Consumable Artifact (File)]
+    B --> D["Potential & Perfect Matches"]
+    B --> E["Client-Consumable Artifact (File)"]
 
-    C --> F[Publish File Reference]
-    C --> G[To Messaging Topic]
+    C --> F["Publish File Reference"]
+    C --> G["To Messaging Topic"]
+
 ```
 
 ### **Scope**
@@ -36,10 +37,11 @@ graph TD
 ### **Trigger Flow Diagram**
 ```mermaid
 flowchart TD
-    A[Scheduler @ Cron] --> B[Trigger scheduledMatchesTransferJob()]
-    B --> C{Enumerate Active Domains/Groups}
-    C --> D[Submit Per-Group Tasks]
-    D --> E[Group-Level Executor]
+    A["Scheduler\n@ Cron"] --> B["Trigger scheduledMatchesTransferJob()"]
+    B --> C{"Enumerate Active\nDomains / Groups"}
+    C --> D["Submit Per-Group Tasks"]
+    D --> E["Group-Level Executor"]
+
 ```
 
 - **Scheduler**: `MatchesTransferScheduler.scheduledMatchesTransferJob`
@@ -168,26 +170,27 @@ classDiagram
 ### **Data Flow Diagram**
 ```mermaid
 graph TD
-    subgraph Input
-        A[PotentialMatchEntity Stream]
-        B[PerfectMatchEntity Stream]
-    end
+  subgraph Input
+    A["PotentialMatchEntity\nStream"]
+    B["PerfectMatchEntity\nStream"]
+  end
 
-    subgraph Transformation
-        C[Map to MatchTransfer DTO]
-        D[Merge Streams via Queue]
-    end
+  subgraph Transformation
+    C["Map to MatchTransfer DTO"]
+    D["Merge Streams via Queue"]
+  end
 
-    subgraph Output
-        E[ExportedFile]
-        F[MatchSuggestionsExchange (Kafka)]
-    end
+  subgraph Output
+    E["ExportedFile"]
+    F["MatchSuggestionsExchange\n(Kafka)"]
+  end
 
-    A --> C
-    B --> C
-    C --> D
-    D --> E
-    E --> F
+  A --> C
+  B --> C
+  C --> D
+  D --> E
+  E --> F
+
 ```
 
 - **Inputs**: Streams of `PotentialMatchEntity` and `PerfectMatchEntity`.
@@ -201,22 +204,23 @@ graph TD
 ### **Concurrency Model Diagram**
 ```mermaid
 graph TD
-    subgraph Executors
-        E1[matchTransferGroupExecutor]
-        E2[matchTransferExecutor]
-    end
+  subgraph Executors
+    E1["matchTransferGroupExecutor"]
+    E2["matchTransferExecutor"]
+  end
 
-    subgraph Backpressure
-        B1[Bounded Queue (capacity=100)]
-        B2[queue.put() (blocks if full)]
-        B3[queue.poll() (non-blocking)]
-    end
+  subgraph Backpressure
+    B1["Bounded Queue (capacity=100)"]
+    B2["queue.put() (blocks if full)"]
+    B3["queue.poll() (non-blocking)"]
+  end
 
-    subgraph Memory
-        M1[Batch Size (100k)]
-        M2[Queue Capacity (100)]
-        M3[Worst-Case Memory: 100 * 100k DTOs]
-    end
+  subgraph Memory
+    M1["Batch Size\n(100k)"]
+    M2["Queue Capacity\n(100)"]
+    M3["Worst-Case Memory\n100 × 100k DTOs"]
+  end
+
 ```
 
 - **Executors**: Separate pools for group scheduling and producer/consumer tasks.
@@ -231,18 +235,19 @@ graph TD
 ### **Resilience Mechanisms**
 ```mermaid
 graph TD
-    A[Resilience] --> B[Circuit Breaker]
-    A --> C[Retries with Backoff]
-    A --> D[Error Metrics]
-    A --> E[Defensive Checks]
+    A["Resilience"] --> B["Circuit Breaker"]
+    A --> C["Retries with Backoff"]
+    A --> D["Error Metrics"]
+    A --> E["Defensive Checks"]
 
-    B --> F[on processMatchTransfer()]
-    C --> G[Streaming (SQL)]
-    C --> H[Export (Connect/Timeout)]
-    D --> I[group_process_failed]
-    D --> J[match_process_failed]
-    E --> K[Null field filtering]
-    E --> L[Interruption handling]
+    B --> F["on processMatchTransfer()"]
+    C --> G["Streaming (SQL)"]
+    C --> H["Export (Connect/Timeout)"]
+    D --> I["group_process_failed"]
+    D --> J["match_process_failed"]
+    E --> K["Null field filtering"]
+    E --> L["Interruption handling"]
+
 ```
 
 - **Circuit Breaker**: Wraps `processMatchTransfer` to prevent cascading failures.

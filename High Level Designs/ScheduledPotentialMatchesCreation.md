@@ -37,30 +37,31 @@ graph TD
 ```mermaid
 graph TD
     subgraph Orchestration
-        A[Scheduler] --> B[JobExecutor]
+        A["Scheduler"] --> B["JobExecutor"]
     end
 
     subgraph MatchingPipeline
-        B --> C[PotentialMatchService]
-        C --> D[NodeFetchService]
-        C --> E[WeightFunctionResolver]
-        C --> F[GraphPreProcessor]
-        F --> G[SymmetricGraphBuilder]
-        F --> H[BipartiteGraphBuilder]
+        B --> C["PotentialMatchService"]
+        C --> D["NodeFetchService"]
+        C --> E["WeightFunctionResolver"]
+        C --> F["GraphPreProcessor"]
+        F --> G["SymmetricGraphBuilder"]
+        F --> H["BipartiteGraphBuilder"]
     end
 
     subgraph PersistencePipeline
-        G --> I[PotentialMatchComputationProcessor]
+        G --> I["PotentialMatchComputationProcessor"]
         H --> I
-        I --> J[QueueManager]
-        J --> K[GraphStore (MapDB)]
-        J --> L[PotentialMatchSaver]
-        L --> M[PostgreSQL]
+        I --> J["QueueManager"]
+        J --> K["GraphStore - MapDB"]
+        J --> L["PotentialMatchSaver"]
+        L --> M["PostgreSQL"]
     end
 
     subgraph Finalization
-        I --> N[MatchesCreationFinalizer]
+        I --> N["MatchesCreationFinalizer"]
     end
+
 ```
 
 ### **Key Components**
