@@ -1,604 +1,237 @@
-# **GraphMatch Engine**
-### *A Scalable, Fault-Tolerant Matchmaking System for High-Volume Node Similarity & Pairing*
 
 ---
+# **The Graph Matching Platform (Detailed Technical Overview)**
 
-## **Overview**
-**GraphMatch Engine** is a **distributed, batch-oriented matchmaking platform** that processes millions of user nodes across domains and generates **high-quality potential and perfect matches** using **Locality-Sensitive Hashing (LSH)**, **metadata scoring**, and **optimal pairing algorithms**.
 
-The system is **resilient**, **observable**, and **scalable**, delivering matches to clients via **file exports** and **Kafka streams**.
+## **1. System Architecture: A Multi-Stage Pipeline**
 
----
-
-# **Detailed UML & Architecture Diagrams**
-
----
-
-## **1. High-Level System Architecture**
+The platform operates as a sequential pipeline where data is progressively refined at each stage. Each module is an independently deployable microservice or a distinct logical component within a monolith, designed with clear boundaries and contracts.
 
 ```mermaid
 graph TD
-    subgraph "Ingestion"
-        A[Kafka Topics<br>users-*.json] --> B[Nodes Import Module]
+    subgraph Ingestion [Module 1: Data Ingestion]
+        A[Kafka Topics: `.*-users`] --> B[Nodes Import Module]
     end
 
-    subgraph "Matching Pipeline"
-        B --> C[Potential Matches Creation]
-        C --> D[Perfect Matches Creation]
-        D --> E[Match Transfer to Client]
+    subgraph Persistence [Primary Datastore]
+        C[(PostgreSQL Database)]
     end
 
-    subgraph "Storage"
-        F[(PostgreSQL)]
-        G[(MapDB - Staging)]
+    subgraph Computation [Module 2 & 3: The Matching Engine]
+        D[Potential Matches Module]
+        E[Perfect Matches Module]
     end
 
-    subgraph "Delivery"
-        H[Client File System]
-        I[Kafka: match-suggestions-*]
+    subgraph Distribution [Module 4: Client Delivery]
+        F[Match Transfer Module]
+        G[Exported Files (S3/NFS)]
+        H[Kafka Topics: `*-suggestions`]
     end
 
-    B --> F
-    C --> G
-    C --> F
-    D --> F
-    E --> H
-    E --> I
-
-    style A fill:#e3f2fd,stroke:#1565c0
-    style B fill:#fff3e0,stroke:#ef6c00
-    style C fill:#e8f5e9,stroke:#2e7d32
-    style D fill:#f3e5f5,stroke:#6a1b9a
-    style E fill:#ffebee,stroke:#c62828
-    style F fill:#f5f5f5,stroke:#424242
-    style G fill:#fff8e1,stroke:#ff8f00
+    B -- 1. Idempotent Bulk Upsert<br>(via Staged COPY Command) --► C
+    C -- 2. JDBC Streaming of Nodes --► D
+    D -- 3. Writes Candidate Matches<br>(via Two-Tier Storage) --► C
+    C -- 4. JDBC Streaming of Candidates --► E
+    E -- 5. Writes Final Matches<br>(Graph Algorithms) --► C
+    C -- 6. Dual-Producer Streaming --► F
+    F -- 7. Exports & Publishes Notification --► G & H
 ```
 
 ---
 
-## **2. Module Interaction Sequence**
+## **2. Module 1: Nodes Import Module**
+
+**Core Responsibility**: To consume node data from Kafka at scale and persist it idempotently into PostgreSQL, providing a reliable foundation for all downstream processing.
+
+### **2.1. Architectural Deep Dive**
+
+The module is architected around a staged, asynchronous processing model to decouple Kafka consumption from database I/O, allowing each to operate at its own optimal pace under a unified backpressure system.
 
 ```mermaid
-sequenceDiagram
-    participant Client
-    participant Kafka
-    participant Import as Nodes Import
-    participant Potential as Potential Matches
-    participant Perfect as Perfect Matches
-    participant Transfer as Match Transfer
-    participant DB as PostgreSQL
-    participant FS as File System
-
-    Client->>Kafka: Upload CSV / Ref IDs
-    Kafka->>Import: Consume Message
-    Import->>DB: Batch Upsert Nodes
-    Note over Import,Potential: @Scheduled (Hourly)
-    Import->>Potential: Trigger Batch Job
-    Potential->>DB: Stream Nodes
-    Potential->>Potential: LSH + Scoring
-    Potential-->>DB: Save Candidates
-    Note over Potential,Perfect: @Scheduled (3 AM IST)
-    Potential->>Perfect: Trigger Optimization
-    Perfect->>DB: Stream Candidates
-    Perfect->>Perfect: Top-K / Hungarian / Auction
-    Perfect-->>DB: Save Perfect Matches
-    Perfect->>Transfer: Trigger Export
-    Transfer->>DB: Stream Both Match Types
-    Transfer->>FS: Export CSV/JSON
-    Transfer->>Kafka: Publish MatchSuggestionsExchange
-    Kafka-->>Client: Consume Suggestions
-```
-
----
-
-## **3. Class Diagram – Core Entities & Relationships**
-
-```mermaid
-classDiagram
-    direction TB
-
-    class Node {
-        <<entity>>
-        +UUID id
-        +String referenceId
-        +String groupId
-        +UUID domainId
-        +String type
-        +Map~String,String~ metadata
-        +LocalDateTime createdAt
-    }
-
-    class PotentialMatchEntity {
-        <<entity>>
-        +UUID id
-        +String referenceId
-        +String matchedReferenceId
-        +Double compatibilityScore
-        +UUID groupId
-        +UUID domainId
-        +String cycleId
-        +LocalDateTime matchedAt
-    }
-
-    class PerfectMatchEntity {
-        <<entity>>
-        +UUID id
-        +String referenceId
-        +String matchedReferenceId
-        +Double compatibilityScore
-        +UUID groupId
-        +UUID domainId
-        +String cycleId
-        +LocalDateTime matchedAt
-    }
-
-    class JobStatus {
-        <<entity>>
-        +UUID id
-        +String groupId
-        +UUID domainId
-        +String status
-        +Integer totalNodes
-        +Integer successCount
-        +Integer failedCount
-        +LocalDateTime createdAt
-        +LocalDateTime updatedAt
-    }
-
-    class MatchingConfiguration {
-        <<entity>>
-        +UUID groupId
-        +MatchingAlgorithm algorithm
-        +Integer nodeCountMin
-        +Integer priority
-        +Boolean isCostBased
-        +Boolean isSymmetric
-    }
-
-    class MatchTransfer {
-        <<dto>>
-        +String senderId
-        +String receiverId
-        +Double score
-        +String type
-        +UUID groupId
-        +UUID domainId
-    }
-
-    Node "1" --> "0..*" PotentialMatchEntity : generates
-    Node "1" --> "0..*" PerfectMatchEntity : generates
-    PotentialMatchEntity "1..*" --> "0..1" PerfectMatchEntity : optimized into
-    JobStatus "1" --> "1" Node : tracks import
-    MatchingConfiguration --> Node : applies to
-
-    PotentialMatchEntity --> MatchTransfer : maps to
-    PerfectMatchEntity --> MatchTransfer : maps to
-```
-
----
-
-## **4. Nodes Import Module – Detailed Class Diagram**
-
-```mermaid
-classDiagram
-    class ScheduleXConsumer {
-        +consume(record)
-        +handleDLQ()
-    }
-
-    class ScheduleXPayloadProcessor {
-        +processImportedNodesPayload(payload)
-        +validateAndParse()
-    }
-
-    class ImportJobService {
-        +startNodesImport(payload)
-        +initiateNodesImport()
-    }
-
-    class NodesImportService {
-        +processNodesImport(jobId, file|refIds)
-        +processBatchesFromStream()
-    }
-
-    class NodesStorageProcessor {
-        +processBatchAsync(batch)
-        +executeCopy(csvData)
-        +buildCsvRows()
-    }
-
-    class NodesImportStatusUpdater {
-        +initiateNodesImport()
-        +updateJobStatus()
-        +completeJob()
-    }
-
-    class RetryTemplate {
-        +execute(retryCallback)
-    }
-
-    ScheduleXConsumer --> ScheduleXPayloadProcessor
-    ScheduleXPayloadProcessor --> ImportJobService
-    ImportJobService --> NodesImportService
-    NodesImportService --> NodesStorageProcessor
-    NodesImportService --> NodesImportStatusUpdater
-    NodesStorageProcessor --> RetryTemplate
-    NodesImportStatusUpdater --> JobStatus
-```
-
----
-
-## **5. Potential Matches – Class Diagram with LSH & Graph Builders**
-
-```mermaid
-classDiagram
-    class PotentialMatchesCreationScheduler {
-        +processAllDomainsScheduled()
-    }
-
-    class PotentialMatchesCreationJobExecutor {
-        +processGroup(groupId, domainId, cycleId)
-    }
-
-    class PotentialMatchService {
-        +matchByGroup()
-        +processGraphAndMatchesAsync()
-    }
-
-    class GraphPreProcessor {
-        +build(nodes, request)
-    }
-
-    class SymmetricGraphBuilder {
-        +build()
-        +processChunk()
-    }
-
-    class BipartiteGraphBuilder {
-        +build(left, right)
-        +processBipartiteChunk()
-    }
-
-    class LSHIndex {
-        +prepareAsync(nodes)
-        +queryAsyncAll(chunk)
-    }
-
-    class MetadataCompatibilityCalculator {
-        +calculate(pair)
-    }
-
-    class EdgeProcessor {
-        +processBatchSync()
-    }
-
-    class QueueManager {
-        +enqueue(matches)
-        +flushQueueBlocking()
-    }
-
-    class GraphStore {
-        +persistEdgesAsync()
-        +streamEdges()
-    }
-
-    class PotentialMatchStorageProcessor {
-        +savePotentialMatches()
-    }
-
-    PotentialMatchesCreationScheduler --> PotentialMatchesCreationJobExecutor
-    PotentialMatchesCreationJobExecutor --> PotentialMatchService
-    PotentialMatchService --> GraphPreProcessor
-    GraphPreProcessor --> SymmetricGraphBuilder
-    GraphPreProcessor --> BipartiteGraphBuilder
-    SymmetricGraphBuilder --> LSHIndex
-    SymmetricGraphBuilder --> EdgeProcessor
-    EdgeProcessor --> MetadataCompatibilityCalculator
-    SymmetricGraphBuilder --> QueueManager
-    QueueManager --> GraphStore
-    GraphStore --> PotentialMatchStorageProcessor
-```
-
----
-
-## **6. Perfect Matches – Strategy Pattern Class Diagram**
-
-```mermaid
-classDiagram
-    class MatchingStrategy {
-        <<interface>>
-        +match(potentials, groupId, domainId) Map
-    }
-
-    class TopKWeightedGreedyStrategy {
-        +match()
-    }
-
-    class AuctionApproximateStrategy {
-        +match()
-    }
-
-    class HungarianStrategy {
-        +match()
-    }
-
-    class HopcroftKarpStrategy {
-        +match()
-    }
-
-    class MatchingStrategySelector {
-        +select(context, groupId) MatchingStrategy
-    }
-
-    class PerfectMatchService {
-        +processAndSaveMatches()
-    }
-
-    class PotentialMatchStreamingService {
-        +streamAllMatches(consumer, batchSize)
-    }
-
-    class PerfectMatchStorageProcessor {
-        +saveBatch()
-    }
-
-    MatchingStrategy <|.. TopKWeightedGreedyStrategy
-    MatchingStrategy <|.. AuctionApproximateStrategy
-    MatchingStrategy <|.. HungarianStrategy
-    MatchingStrategy <|.. HopcroftKarpStrategy
-
-    MatchingStrategySelector --> MatchingStrategy
-    PerfectMatchService --> MatchingStrategySelector
-    PerfectMatchService --> PotentialMatchStreamingService
-    PerfectMatchService --> PerfectMatchStorageProcessor
-```
-
----
-
-## **7. Match Transfer – Producer-Consumer Class Diagram**
-
-```mermaid
-classDiagram
-    class MatchesTransferScheduler {
-        +scheduledMatchesTransferJob()
-    }
-
-    class MatchTransferService {
-        +processGroup(groupId, domain)
-    }
-
-    class MatchTransferProcessor {
-        +processMatchTransfer()
-        +startProducers()
-        +startConsumer()
-    }
-
-    class PotentialMatchStreamingService {
-        +streamAllMatches(batchConsumer)
-    }
-
-    class PerfectMatchStreamingService {
-        +streamAllMatches(batchConsumer)
-    }
-
-    class ExportService {
-        +exportMatches(supplier)
-    }
-
-    class ScheduleXProducer {
-        +sendMessage(topic, payload)
-    }
-
-    class BlockingQueue~MatchTransfer~ {
-        +put()
-        +poll(timeout)
-    }
-
-    MatchesTransferScheduler --> MatchTransferService
-    MatchTransferService --> MatchTransferProcessor
-    MatchTransferProcessor --> PotentialMatchStreamingService
-    MatchTransferProcessor --> PerfectMatchStreamingService
-    MatchTransferProcessor --> BlockingQueue
-    MatchTransferProcessor --> ExportService
-    ExportService --> ScheduleXProducer
-```
-
----
-
-## **8. Sequence Diagram – Cost-Based Node Import (Streaming CSV)**
-
-```mermaid
-sequenceDiagram
-    participant Kafka
-    participant Consumer
-    participant Processor
-    participant Orchestrator
-    participant BatchEngine
-    participant Storage
-    participant DB
-
-    Kafka->>Consumer: Record (GZIP CSV)
-    Consumer->>Processor: processPayload()
-    Processor->>Orchestrator: startNodesImport(file)
-    Orchestrator->>Orchestrator: initiateJob(PENDING)
-    Orchestrator->>BatchEngine: processNodesImport(jobId, file)
-    BatchEngine->>BatchEngine: streamFromGZIP()
-    loop Every 500 rows
-        BatchEngine->>Storage: processBatchAsync(batch)
-        Storage->>Storage: buildCSV()
-        Storage->>DB: COPY temp_table
-        DB-->>Storage: success
-        Storage-->>BatchEngine: nodeIds
-        BatchEngine->>Orchestrator: updateProgress()
+graph TD
+    A[Kafka Consumer Threads<br>Concurrency: 4] --> B[Payload Processor]
+    B --> C[Import Orchestration Service]
+    C -- 1. Creates Job Record<br>(Status: PENDING) --► F[DB: `job_status` Table]
+    C -- 2. Routes to appropriate<br>workflow (Cost vs. Non-Cost) --► D{Batch Processing Engine}
+    D -- 3. Submits Batches to Executor --► G[nodesImportExecutor<br>Queue Capacity: 100]
+    G --► E[Storage Layer]
+    subgraph "High-Throughput Persistence"
+        E -- 4. Builds In-Memory CSV --► H[PostgreSQL `COPY` Command]
+        H -- 5. `INSERT ... ON CONFLICT DO UPDATE` --► I[DB: `nodes` Table]
     end
-    BatchEngine->>Orchestrator: finalizeJob()
-    Orchestrator->>DB: UPDATE status=COMPLETED
+    I -- Returns Upserted IDs --► E
+    E -- Reports Progress --► D
+    D -- 6. Atomically Updates Job Stats --► F
 ```
+
+### **2.2. Granular Discussion & Key Design Decisions**
+
+#### **High-Throughput Persistence: The `COPY` Command**
+Instead of using standard JDBC batch inserts (`PreparedStatement.addBatch()`), which can be inefficient for very large datasets, we leverage PostgreSQL's native `COPY` command. This is a significant performance optimization.
+
+**The Exact Mechanism:**
+1.  A temporary table is created within a transaction: `CREATE TEMP TABLE temp_nodes_import (...) ON COMMIT DROP`.
+2.  The application processes a batch of nodes and constructs a CSV-formatted string or byte stream *in memory*.
+3.  The `CopyManager` API is used to stream this in-memory CSV directly into the temporary table. This is far faster than row-by-row insertion.
+4.  A single SQL statement is executed to upsert from the temp table into the final `nodes` table: `INSERT INTO nodes (...) SELECT ... FROM temp_nodes_import ON CONFLICT (reference_id, group_id) DO UPDATE SET ...`.
+5.  The transaction is committed, atomically applying all changes and dropping the temp table.
+
+**Rationale**: This approach minimizes network round-trips, reduces transaction overhead, and leverages PostgreSQL's highly optimized bulk-loading pathway.
+
+#### **Concurrency and Backpressure**
+The system is designed to be self-regulating under load.
+-   **Kafka Concurrency (`4`)** is matched by the `corePoolSize` of the `nodesImportExecutor`. This establishes a baseline processing capacity.
+-   **Backpressure**: The `queueCapacity` of `100` on the executor is the critical backpressure mechanism. If the database is slow and batches are not processed quickly enough, this queue will fill up. When full, any new `submit()` call will throw a `TaskRejectedException`.
+    -   **Handling Rejection**: This exception is caught, the import job is immediately marked as `FAILED` with a "System Overloaded" message, and metrics are fired. This prevents a cascading failure and provides a clear signal for operational monitoring.
+
+#### **Fault Tolerance and Idempotency**
+-   **Database Retries**: All database operations within the `Storage Layer` are wrapped in a `RetryTemplate` configured for **3 attempts** with **exponential backoff** (1s, 2s, 4s). This robustly handles transient issues like network blips, deadlocks, or temporary database unavailability.
+-   **Idempotency**: The `ON CONFLICT` clause in the upsert query guarantees that re-processing the same message or file will not create duplicate nodes. It will simply update existing ones, making the entire import pipeline idempotent—a crucial property for resilient distributed systems.
+-   **DLQ (Dead-Letter Queue)**: If a Kafka message is fundamentally invalid (e.g., malformed JSON) and fails parsing even after retries, it is sent to a dedicated DLQ. This keeps the main processing pipeline clean and allows for offline analysis and reprocessing of failed messages.
 
 ---
 
-## **9. Sequence Diagram – LSH-Based Potential Matching (Symmetric)**
+## **3. Module 2 & 3: The Matching Engine**
+
+This engine is composed of two distinct but sequential modules: Potential Matches (high-recall) and Perfect Matches (high-precision).
+
+### **3.1. Potential Matches: Architecture & Two-Tier Storage**
+
+**Core Responsibility**: To efficiently generate a large set of candidate matches, trading some precision for high recall and speed.
 
 ```mermaid
-sequenceDiagram
-    participant Scheduler
-    participant JobExecutor
-    participant GraphBuilder
-    participant LSH
-    participant EdgeProc
-    participant Queue
-    participant Saver
-
-    Scheduler->>JobExecutor: processGroup()
-    JobExecutor->>GraphBuilder: build(nodes)
-    GraphBuilder->>LSH: prepareAsync(nodes)
-    LSH-->>GraphBuilder: indexed
-    loop For each chunk
-        GraphBuilder->>EdgeProc: processBatch(chunk)
-        EdgeProc->>LSH: queryAsyncAll(node)
-        LSH-->>EdgeProc: candidates
-        EdgeProc->>EdgeProc: scorePairs()
-        EdgeProc-->>GraphBuilder: matches
-        GraphBuilder->>Queue: enqueue(matches)
+graph TD
+    A[Scheduled Job Trigger] --> B[Job Executor w/ Concurrency Controls]
+    subgraph Concurrency Gates
+        B -- Acquires Lock --► B1[Domain Semaphore (max: 2)]
+        B -- Acquires Lock --► B2[Group Semaphore (max: 1)]
     end
-    GraphBuilder->>Saver: finalize()
-    Saver->>Saver: stream from MapDB
-    Saver->>Saver: group by refId → top-K
-    Saver->>DB: UPSERT final matches
+    B --► C[NodeFetchService (JDBC Streaming)]
+    C --► D[GraphPreProcessor]
+    D -- Chooses Strategy --► E{Symmetric or Bipartite?}
+
+    subgraph "Symmetric (LSH) Path"
+        E --► F[LSHIndex: Build In-Memory Hash Buckets]
+        F --► G[EdgeProcessor: Query Buckets & Score Metadata]
+    end
+
+    subgraph "Bipartite (Pairwise) Path"
+        E --► H[BipartiteGraphBuilder: Process Left/Right Chunks]
+    end
+
+    subgraph "Two-Tier Storage Strategy"
+        G & H -- High-Volume Edges --► I[QueueManager (In-Memory Buffer)]
+        I -- Async Flush --► J[GraphStore (Disk-Backed MapDB Staging)]
+        J -- Final Stream on Completion --► K[PotentialMatchSaver (Bulk COPY to PostgreSQL)]
+    end
 ```
 
----
+### **3.2. Granular Discussion & Key Design Decisions**
 
-## **10. Sequence Diagram – Match Transfer (Producer-Consumer)**
+#### **The "Why" of Two-Tier Storage**
+Directly writing millions of potential matches to PostgreSQL during computation would create immense database pressure (write amplification, index churn, vacuum load). The two-tier strategy mitigates this:
+1.  **Tier 1 (Staging - `MapDB`)**: `MapDB` provides a high-performance, disk-backed hash map. It's used as a temporary "scratchpad" to persist the massive volume of intermediate edges quickly and off-heap, without involving the primary transactional database. This absorbs write bursts and isolates the primary DB from computational load.
+2.  **Tier 2 (Final - `PostgreSQL`)**: Only after the entire group computation is complete do we stream the edges from `MapDB`, perform a final aggregation (e.g., Top-K per node), and do a single, efficient bulk-load into PostgreSQL.
+
+#### **Locality-Sensitive Hashing (LSH) for Symmetric Matching**
+A naive all-pairs comparison (`N²`) is computationally infeasible for large `N`. LSH is an algorithmic solution to this problem.
+-   **Mechanism**: It uses a family of hash functions designed such that similar items have a higher probability of "colliding" into the same hash bucket.
+-   **Implementation**: We create multiple hash tables. For each node, we generate several hashes and place it in the corresponding buckets. To find candidates for a node, we only compare it against other nodes in the buckets it belongs to, drastically reducing the search space.
+-   **Trade-off**: This is a probabilistic algorithm. It trades guaranteed accuracy for tremendous speed, which is a perfect fit for generating a high-recall set of *potential* matches.
+
+### **3.3. Perfect Matches: Architecture & Algorithmic Selection**
+
+**Core Responsibility**: To apply rigorous graph theory algorithms to the potential matches, selecting a high-precision, non-overlapping subset of "perfect" matches.
 
 ```mermaid
-sequenceDiagram
-    participant Scheduler
-    participant Processor
-    participant PotStream
-    participant PerfStream
-    participant Queue
-    participant Export
-    participant KafkaProd
+flowchart TD
+    A[Start Job: Stream Potential Matches<br>from PostgreSQL via `setFetchSize`] --> B[Load `MatchingConfiguration` for the Group]
+    B --> C{Decision: Graph Type & Size}
 
-    Scheduler->>Processor: processMatchTransfer()
-    Processor->>PotStream: streamAllMatches(consumer)
-    Processor->>PerfStream: streamAllMatches(consumer)
-    PotStream->>Queue: put(potentialBatch)
-    PerfStream->>Queue: put(perfectBatch)
-    Processor->>Export: exportMatches(supplier)
-    Export->>Queue: poll(300ms)
-    Queue-->>Export: batch
-    Export->>Export: writeToFile()
-    Export->>KafkaProd: sendMessage(topic, payload)
-    Note over PotStream,PerfStream: Both complete → set done=true
-    Export->>Queue: poll() → null → exit
+    subgraph "Strategy Selection Logic"
+        C -- Is Symmetric? --► D[Select: `TopKWeightedGreedy`]
+        C -- Is Bipartite? --► E{Node Count < 100?}
+        E -- Yes --► F[Select: `Hungarian` (Exact, O(n³))]
+        E -- No --► G{Node Count < 10K?}
+        G -- Yes --► H[Select: `Hopcroft-Karp` (Max Cardinality, O(E√V))]
+        G -- No --► I[Select: `Auction` (Weighted Approx.)]
+    end
+
+    subgraph "Algorithm Execution"
+        D --> J[Process nodes greedily, picking best available match from a PriorityQueue]
+        F --> K[Build a cost matrix and find a minimum weight matching]
+        H --> L[Find the maximum number of non-adjacent edges via BFS/DFS leveling]
+        I --> M[Simulate an auction where nodes bid on matches to maximize total score]
+    end
+
+    J & K & L & M --> N[Buffer `PerfectMatchEntity` Objects]
+    N --> O[Save to PostgreSQL via Staged `COPY` Command]
 ```
+
+### **3.4. Granular Discussion & Key Design Decisions**
+
+#### **Dynamic Algorithm Selection**
+There is no single "best" algorithm for graph matching; the optimal choice depends on the graph's structure and the desired outcome. This module codifies that domain knowledge.
+-   **Rationale**: By creating a `MatchingStrategySelector`, we make the system extensible and intelligent. Adding a new algorithm is as simple as implementing the `MatchingStrategy` interface and adding a rule to the selector. This avoids a one-size-fits-all approach that would be inefficient or incorrect for certain use cases.
+-   **Example**: Using the `Hungarian` algorithm on a 100,000-node graph would run for days. The selector correctly routes this to the `Auction` or `Hopcroft-Karp` algorithm, ensuring the job completes in a reasonable timeframe.
+
+#### **Memory-Aware Processing**
+Executing graph algorithms on large datasets is extremely memory-intensive.
+-   **Mechanism**: The service is configured with a maximum memory budget (e.g., `1024MB`). Before processing a large batch, it checks `Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()`.
+-   **Action**: If current usage exceeds a threshold (e.g., 80% of the budget), the service will either:
+    1.  Reduce the size of the next processing sub-batch.
+    2.  Gracefully fail the job with a clear "Memory limit exceeded" error.
+-   **Rationale**: This proactive monitoring prevents the JVM from throwing an `OutOfMemoryError`, which is an unrecoverable state. It ensures the service fails cleanly and predictably.
 
 ---
 
-## **11. State Diagram – Job Lifecycle**
+## **4. Module 4: Match Transfer to Client**
 
-```mermaid
-stateDiagram-v2
-    [*] --> PENDING
-    PENDING --> PROCESSING: startImport()
-    PROCESSING --> PROCESSING: batchProcessed()
-    PROCESSING --> COMPLETED: allBatchesDone()
-    PROCESSING --> FAILED: error / timeout
-    COMPLETED --> [*]
-    FAILED --> [*]
-    note right of FAILED: Retryable via DLQ
-```
+**Core Responsibility**: To reliably export the full set of matches (both potential and perfect) and notify the client.
 
----
+### **4.1. Architecture: The Producer-Consumer Pattern**
 
-## **12. Deployment & Runtime Topology**
+This module is a textbook implementation of the Producer-Consumer pattern, designed for high I/O throughput and decoupled processing.
 
 ```mermaid
 graph TB
-    subgraph "Kubernetes Pod"
-        S1[Scheduler<br>@Scheduled]
-        W1[Worker 1]
-        W2[Worker 2]
+    A[MatchTransferProcessor] -- Starts Job for a Group --> X
+    subgraph "Producer Threads (2 per Group)"
+        X --► P1[PotentialMatchStreamingService<br>Streams from `potential_matches` table]
+        X --► P2[PerfectMatchStreamingService<br>Streams from `perfect_matches` table]
     end
 
-    subgraph "Thread Pools"
-        TP1[nodesImportExecutor<br>core=4, max=8]
-        TP2[matchTransferExecutor<br>core=4, max=8]
-        TP3[potentialMatchExecutor<br>core=8]
+    subgraph "Bounded In-Memory Buffer"
+        B[LinkedBlockingQueue<br>Capacity: 100 Batches<br>Acts as a shock absorber]
     end
 
-    subgraph "External"
-        K[(Kafka)]
-        P[(PostgreSQL)]
-        M[(MapDB)]
-        F[File Share]
+    subgraph "Consumer Thread (1 per Group)"
+        C[Export & Publish Service]
     end
 
-    S1 --> TP1
-    W1 --> TP2
-    W2 --> TP3
-    TP1 --> P
-    TP3 --> M
-    TP3 --> P
-    TP2 --> F
-    TP2 --> K
+    P1 -- `queue.put(batch)`<br>(Blocks if full) --► B
+    P2 -- `queue.put(batch)`<br>(Blocks if full) --► B
+    C -- `queue.poll(300ms)`<br>(Waits if empty) --► B
+
+    subgraph "Output Sinks"
+        D[ExportService: Writes to File]
+        E[ScheduleXProducer: Sends Kafka Notification]
+    end
+    C -- Lazily consumes stream --► D
+    C -- After file is written --► E
 ```
 
----
+### **4.2. Granular Discussion & Key Design Decisions**
 
-## **13. Data Flow Diagram (DFD) – Level 1**
+#### **Why Producer-Consumer?**
+1.  **Decoupling**: It separates the concern of *reading* data from the database from the concern of *writing* data to a file/Kafka. The database streaming can run at full speed while the file I/O or Kafka producer handles its own latency.
+2.  **Parallelism**: It allows I/O operations (reading from DB, writing to file) to happen concurrently, maximizing throughput.
+3.  **Backpressure**: The `LinkedBlockingQueue` is the key. If the consumer (file writing) is slow, the queue fills up, and the producers (DB readers) will naturally block. This prevents the application from reading an unbounded amount of data from the database into memory.
 
-```mermaid
-flowchart LR
-    D1[Kafka Message] --> P1[Validate & Parse]
-    P1 --> D2{File or Ref IDs?}
-    D2 -->|File| P2[Stream GZIP CSV]
-    D2 -->|Ref IDs| P3[Convert to Nodes]
-    P2 --> P4[Batch Partition]
-    P3 --> P4
-    P4 --> P5[Upsert via COPY]
-    P5 --> DB[(PostgreSQL)]
-    P5 --> M1[Update Job Status]
-
-    subgraph Potential
-        DB --> S1[Stream Nodes]
-        S1 --> S2[LSH Index]
-        S2 --> S3[Candidate Gen]
-        S3 --> S4[Score & Buffer]
-        S4 --> MapDB[(MapDB)]
-    end
-
-    subgraph Perfect
-        DB --> T1[Stream Potentials]
-        T1 --> T2[Strategy Select]
-        T2 --> T3[Top-K / Auction]
-        T3 --> T4[Bulk Save]
-        T4 --> DB
-    end
-
-    subgraph Transfer
-        DB --> U1[Dual Stream]
-        U1 --> U2[Queue Buffer]
-        U2 --> U3[Export + Kafka]
-        U3 --> FS[File]
-        U3 --> K[Kafka]
-    end
-```
-
----
-
-## **Why This System Excels**
-
-| Feature | Implementation |
-|-------|----------------|
-| **Zero OOM** | Memory-aware batching, GC hooks |
-| **No Data Loss** | Idempotent upserts, DLQ |
-| **Full Traceability** | `jobId`, `cycleId` in logs & DB |
-| **Configurable Algorithms** | Strategy pattern + DB config |
-| **Production Ready** | Circuit breakers, retries, fallbacks |
-
----
-
-**GraphMatch Engine** — *Precision at Scale, Built to Last.*
+#### **Termination Logic: A Classic Concurrency Problem**
+Ensuring the consumer shuts down correctly without losing data is non-trivial.
+1.  **Producer Completion**: Both producer tasks are wrapped in `CompletableFuture`s.
+2.  **`CompletableFuture.allOf(...)`**: The main thread waits for both producers to finish.
+3.  **`done` Flag**: An `AtomicBoolean done` flag is set to `true` once `allOf` completes.
+4.  **Consumer Loop Condition**: The consumer's loop is `while (!done || !queue.isEmpty())`. This elegant condition means: "Keep running as long as the producers are not done, OR as long as there is still data in the queue to process."
+5.  **Result**: This guarantees that the consumer will process every last item placed in the queue before shutting down, ensuring zero data loss.
