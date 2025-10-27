@@ -10,20 +10,21 @@
 ```mermaid
 graph TD
     S[PerfectMatchesCreationScheduler (cron 03:00 IST)] -->|tasks| SC[PerfectMatchCreationService]
-    SC -->|domain‑/‑group semaphores| PEX[PerfectMatchCreationJobExecutor]
+    SC -->|domain/group semaphores| PEX[PerfectMatchCreationJobExecutor]
     PEX -->|processGroup| PMS[PerfectMatchServiceImpl]
     PMS -->|stream potential matches| PSS[PerfectMatchStreamingService]
-    PSS -->|batch → Consumer| PMS
+    PSS -->|batch -> Consumer| PMS
     PMS -->|select strategy| MSS[MatchingStrategySelector]
-    MSS -->|strategy| MS[MatchingStrategy (Greedy, Hungarian, …)]
-    MS -->|graph → top‑K| PMR[PerfectMatchResultBuilder]
-    PMR -->|buffer| QM[QueueManager (same impl as potential‑matches)]
-    QM -->|periodic flush| GS[GraphStore (MapDB) – temporary edge store]
-    GS -->|final stream| PMS2[PerfectMatchServiceImpl (final‑stage)]
-    PMS2 -->|save final top‑K| PMSV[PerfectMatchSaver]
-    PMSV -->|COPY‑UPSERT| PMST[PerfectMatchStorageProcessor → PostgreSQL]
+    MSS -->|strategy| MS[MatchingStrategy (Greedy, Hungarian, etc)]
+    MS -->|graph -> top-K| PMR[PerfectMatchResultBuilder]
+    PMR -->|buffer| QM[QueueManager (same impl as potential-matches)]
+    QM -->|periodic flush| GS[GraphStore (MapDB temporary edge store)]
+    GS -->|final stream| PMS2[PerfectMatchServiceImpl (final-stage)]
+    PMS2 -->|save final top-K| PMSV[PerfectMatchSaver]
+    PMSV -->|COPY/UPSERT| PMST[PerfectMatchStorageProcessor -> PostgreSQL]
     PMST -->|metrics / cleanup| FM[MatchesCreationFinalizer]
-    FM -->|clean LSH, queues, GC| LSH[LSHIndex (shared with potential‑matches)]
+    FM -->|clean LSH, queues, GC| LSH[LSHIndex (shared with potential-matches)]
+
 ```
 
 *The **perfect‑matches** pipeline runs **once per day** (cron) and **only on the leader** (see § 9). All other components (queues, LSH, MapDB) are **re‑used** from the potential‑matches module, keeping the code‑base DRY.*
@@ -194,17 +195,18 @@ flowchart TD
     C -->|Success| F[Chunk processing]
     F -->|Memory > limit| G[Cancel all futures]
     G --> E
-    F -->|Algorithm exception| H[Log + mark FAILED]
+    F -->|Algorithm exception| H[Log and mark FAILED]
     H --> E
-    F -->|All chunks OK| I[Flush Queue → MapDB]
+    F -->|All chunks OK| I[Flush Queue -> MapDB]
     I --> J[Stream edges from MapDB]
-    J --> K[Apply final top‑K]
+    J --> K[Apply final top-K]
     K --> L[Save final matches (COPY)]
     L -->|SQL error| M[Retry up to 3]
     M -->|Exhausted| E
     L --> N[Mark LastRun COMPLETED]
-    N --> O[Finalizer (clean LSH, queues, GC)]
+    N --> O[Finalizer clean LSH, queues, GC]
     O --> P[Group finished]
+
 ```
 
 *Every branch that ends in **E** increments `perfect_matches_creation_errors_total` and updates `LastRunPerfectMatches.status = FAILED`.*
@@ -277,17 +279,18 @@ The **perfect‑matches** job is *stateful* (it writes to a shared MapDB file an
 ```mermaid
 flowchart TD
     subgraph ChunkProcessing
-        A[Receive sub‑batch of PotentialMatchEntity] --> B[Group by nodeId (Map<String, PriorityQueue>)];
+        A[Receive sub-batch of PotentialMatchEntity] --> B[Group by nodeId (Map String, PriorityQueue)];
         B --> C[Trim each PQ to maxMatchesPerNode];
         C --> D[Select MatchingStrategy];
-        D --> E[Run algorithm (e.g., Greedy) → Map<nodeId, List<MatchResult>>];
-        E --> F[Convert MatchResult → PerfectMatchEntity];
+        D --> E[Run algorithm (e.g., Greedy) to Map nodeId -> List MatchResult];
+        E --> F[Convert MatchResult to PerfectMatchEntity];
         F --> G[Add to buffer];
         G --> H{buffer size >= batchSize?}
         H -->|yes| I[saveMatchesAsync(buffer)];
         H -->|no| J[continue];
         I --> K[clear buffer];
     end
+
 ```
 
 *All steps run inside `cpuExecutor`. The `cpuTaskSemaphore` guarantees that at most `availableProcessors * 2` such pipelines are active simultaneously.*
