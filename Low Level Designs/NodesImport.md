@@ -1,593 +1,822 @@
----
 
-# Low-Level Design (LLD): Nodes Import Module
 
----
+# Nodes Import Module — Low‑Level Design (LLD) with Diagrams
 
-### **1. Kafka Consumer (`ScheduleXConsumer`)**
-
-**Configuration**:
-
-```java
-@Bean
-public KafkaListenerConfig nodesImportConfig() {
-    KafkaListenerConfig config = new KafkaListenerConfig();
-    config.setTopicPattern(".*-users"); // Matches all topics ending with "-users"
-    config.setGroupId("nodes-import-group");
-    config.setConcurrency(4); // 4 consumer threads
-    config.setDlqTopic("users-import-dlq");
-    config.setPayloadProcessor(payloadProcessor::processImportedNodesPayload); // Delegates to processor
-    return config;
-}
-```
-
-**Message Consumption**:
-
-```java
-@KafkaListener(
-    topicPattern = "#{@nodesImportConfig.topicPattern}",
-    groupId = "#{@nodesImportConfig.groupId}",
-    concurrency = "#{@nodesImportConfig.concurrency}",
-    containerFactory = "kafkaListenerContainerFactory"
-)
-public void consumeNodesImport(ConsumerRecord<String, String> consumerRecord) {
-    consume(consumerRecord, getListenerConfigs().get(0)); // Uses DLQ on failure
-}
-```
-
-**DLQ Handling**:
-
-* Failed messages are routed to `users-import-dlq` with original headers and a `__TypeId__` header for traceability.
-* Retry logic is handled at the `RetryTemplate` level (see Section 7).
+## Table of Contents
+- [1. Modules and Relationships](#1-modules-and-relationships)
+- [2. Runtime Topology (Threads, Queues, Semaphores)](#2-runtime-topology-threads-queues-semaphores)
+- [3. Detailed Component Specs](#3-detailed-component-specs)
+- [4. Data Model](#4-data-model)
+- [5. Key Algorithms and Pseudocode](#5-key-algorithms-and-pseudocode)
+- [6. Error Handling, Timeouts, Retries](#6-error-handling-timeouts-retries)
+- [7. Metrics and Logging](#7-metrics-and-logging)
+- [8. Configuration Matrix](#8-configuration-matrix)
+- [9. Sequences](#9-sequences)
+- [10. External Contracts and Assumptions](#10-external-contracts-and-assumptions)
+- [11. Known Risks and Recommendations](#11-known-risks-and-recommendations)
+- [12. Testing Strategy (Pointers)](#12-testing-strategy-pointers)
 
 ---
 
-### **2. Payload Processing (`ScheduleXPayloadProcessor`)**
+## 1. Modules and Relationships
 
-**Validation & Parsing**:
-
-```java
-public CompletableFuture<Void> processImportedNodesPayload(String payload) {
-    if (payload == null || payload.isBlank()) {
-        log.warn("Skipping processing: Blank payload");
-        return CompletableFuture.completedFuture(null);
-    }
-
-    NodeExchange parsedPayload = BasicUtility.safeParse(payload, NodeExchange.class);
-    if (parsedPayload == null) {
-        log.warn("Failed to parse payload: {}", payload);
-        return CompletableFuture.completedFuture(null);
-    }
-
-    return importJobService.startNodesImport(parsedPayload)
-            .exceptionally(ex -> { // Async error handling
-                log.error("Error processing parsed payload for groupId={}", parsedPayload.getGroupId(), ex);
-                return null;
-            });
-}
+### Module Relationship Diagram
+```mermaid
+graph TD
+    A[Kafka Consumer] --> B[Payload Processor]
+    B --> C[Import Orchestration]
+    C --> D[Batch Processing Engine]
+    D --> E[Storage Layer]
+    D --> F[Status Tracker]
+    E --> G[PostgreSQL]
+    F --> G
+    H[Retry Template] --> E
+    H --> D
+    I[Metric Registry] --> A
+    I --> D
+    I --> E
+    I --> F
 ```
 
-**NodeExchange Structure**:
-
-```java
-public class NodeExchange {
-    private String groupId;
-    private UUID domainId;
-    private MultipartFile file; // For cost-based
-    private List<String> referenceIds; // For non-cost-based
-    // Getters, setters, and validation logic
-}
-```
+### Key Relationships:
+- **Kafka Consumer** → **Payload Processor**: Consumes messages and delegates processing
+- **Payload Processor** → **Import Orchestration**: Validates payloads and initiates import jobs
+- **Import Orchestration** → **Batch Processing Engine**: Manages cost-based vs non-cost-based workflows
+- **Batch Processing Engine** → **Storage Layer**: Processes nodes in batches and persists to DB
+- **Batch Processing Engine** → **Status Tracker**: Updates job status throughout processing
+- **Storage Layer** → **PostgreSQL**: Executes batch upserts using COPY command
+- **Retry Template** → **Storage Layer/Batch Engine**: Provides fault tolerance for database operations
+- **Metric Registry** → All components: Collects observability metrics
 
 ---
 
-### **3. Import Orchestration (`ImportJobServiceImpl`)**
+## 2. Runtime Topology (Threads, Queues, Semaphores)
 
-**Payload Validation**:
-
-```java
-public boolean isValidPayloadForCostBasedNodes(NodeExchange payload) {
-    return payload.getFile() != null && !payload.getFile().isEmpty() &&
-           payload.getReferenceIds() == null; // Ensure only one input type
-}
-
-public boolean isValidPayloadForNonCostBasedNodes(NodeExchange payload) {
-    return payload.getFile() == null &&
-           payload.getReferenceIds() != null && !payload.getReferenceIds().isEmpty();
-}
+### Runtime Topology Diagram
+```mermaid
+graph TB
+    subgraph Kafka Layer
+        K1[Kafka Consumer Threads]
+        K2[DLQ Handler]
+    end
+    
+    subgraph Processing Layer
+        P1[Payload Processor]
+        P2[Import Orchestration]
+        P3[Batch Processing Engine]
+    end
+    
+    subgraph Execution Layer
+        E1[nodesImportExecutor]
+        E2[threadPoolTaskExecutor]
+    end
+    
+    subgraph Storage Layer
+        S1[Storage Processor]
+        S2[PostgreSQL]
+    end
+    
+    subgraph Monitoring
+        M1[Micrometer Metrics]
+        M2[Log Correlation]
+    end
+    
+    K1 --> P1
+    P1 --> P2
+    P2 --> P3
+    P3 --> E1
+    E1 --> S1
+    S1 --> S2
+    E1 --> M1
+    P3 --> M1
+    P2 --> M1
+    K1 --> M1
+    P3 --> F1[Status Tracker]
+    F1 --> S2
+    M1 --> M2
 ```
 
-**Job Initialization**:
-
-```java
-@Override
-public CompletableFuture<Void> startNodesImport(NodeExchange payload) {
-    UUID jobId = statusUpdater.initiateNodesImport(payload); // Generates job ID and updates DB
-
-    if (isValidPayloadForCostBasedNodes(payload)) {
-        MultipartFile file = payload.getFile();
-        FileValidationUtility.validateInput(file, payload.getGroupId()); // Checks file size, format
-        return nodesImportService.processNodesImport(jobId, file, payload);
-
-    } else if (isValidPayloadForNonCostBasedNodes(payload)) {
-        return nodesImportService.processNodesImport(jobId, payload.getReferenceIds(),
-                payload.getGroupId(), batchSize, payload.getDomainId());
-
-    } else {
-        log.warn("Invalid payload for groupId={}: {}", payload.getGroupId(), payload);
-        return CompletableFuture.completedFuture(null);
-    }
-}
+### Thread Pool Configuration:
+```mermaid
+flowchart LR
+    subgraph ThreadPools
+        TP1[nodesImportExecutor\nCore: 4, Max: 8, Queue: 100]
+        TP2[threadPoolTaskExecutor\nCore: 4, Max: 8, Queue: 100]
+    end
+    
+    TP1 -->|Processes| BatchProcessing
+    TP2 -->|Handles| KafkaMessages
+    
+    BatchProcessing -->|Submits| StorageOperations
+    StorageOperations -->|Uses| TP1
 ```
+
+### Resource Management:
+- **Backpressure**: Executor queue capacity (100) limits concurrent batch processing
+- **Throttling**: `maxParallelFutures` limits parallel batch processing within a single import job
+- **Timeout Control**: Per-batch timeouts (500ms) and global job timeouts
 
 ---
 
-### **4. Batch Processing Engine (`NodesImportService`)**
+## 3. Detailed Component Specs
 
-**Cost-Based Processing**:
+### 3.1 Kafka Consumer (`ScheduleXConsumer`)
+- **Configuration**:
+    - Topic pattern: `.*-users` (matches all user-related topics)
+    - Group ID: `nodes-import-group`
+    - Concurrency: 4 consumer threads
+    - DLQ: `users-import-dlq` for failed messages
+- **Message Flow**:
+    - Consumes messages from Kafka topics
+    - Delegates to `payloadProcessor.processImportedNodesPayload()`
+    - Routes failed messages to DLQ with original headers
+- **Error Handling**:
+    - Uses Spring Retry via `RetryTemplate`
+    - DLQ messages include `__TypeId__` header for traceability
+- **Metrics**:
+    - `kafka_consumer_messages_received`
+    - `kafka_consumer_messages_processed`
+    - `kafka_consumer_errors`
 
-```java
-public CompletableFuture<Void> processNodesImport(UUID jobId, MultipartFile file, NodeExchange message) {
-    UUID domainId = message.getDomainId();
-    MatchingGroup group = groupConfigService.getGroupConfig(message.getGroupId(), domainId);
+### 3.2 Payload Processing (`ScheduleXPayloadProcessor`)
+- **Validation & Parsing**:
+    - Checks for null/blank payloads
+    - Parses JSON into `NodeExchange` objects
+    - Handles parsing errors gracefully
+- **Delegation**:
+    - Forwards validated payloads to `importJobService.startNodesImport()`
+    - Async error handling with `exceptionally()`
+- **Key Structures**:
+  ```mermaid
+  classDiagram
+      class NodeExchange {
+          +String groupId
+          +UUID domainId
+          +MultipartFile file
+          +List<String> referenceIds
+          +boolean isValidForCostBased()
+          +boolean isValidForNonCostBased()
+      }
+      
+      class MultipartFile {
+          +String getOriginalFilename()
+          +InputStream getInputStream()
+          +boolean isEmpty()
+      }
+  ```
 
-    return CompletableFuture.supplyAsync(() -> { // Offloads to executor
-        logImportStart(jobId, group.getId().toString(), domainId, file);
-        statusUpdater.updateJobStatus(jobId, JobStatus.PROCESSING);
+### 3.3 Import Orchestration (`ImportJobServiceImpl`)
+- **Payload Validation**:
+    - `isValidPayloadForCostBasedNodes()`: Checks for file input
+    - `isValidPayloadForNonCostBasedNodes()`: Checks for reference IDs
+- **Job Initialization**:
+    - Generates unique job ID
+    - Updates job status in DB
+    - Routes to appropriate processing path
+- **Error Handling**:
+    - Global exception handling with `handle()`
+    - Updates job status on failure
+- **Metrics**:
+    - `node_import_jobs_started`
+    - `node_import_jobs_completed`
+    - `node_import_jobs_failed`
 
-        long startTime = System.nanoTime();
-        AtomicInteger totalParsed = new AtomicInteger(0);
-        List<String> success = Collections.synchronizedList(new ArrayList<>());
-        List<String> failed = Collections.synchronizedList(new ArrayList<>());
+### 3.4 Batch Processing Engine (`NodesImportService`)
+- **Cost-Based Processing**:
+    - Streams CSV data from GZIP-compressed files
+    - Processes in batches with controlled parallelism
+    - Uses `CsvParser.parseInBatches()` for streaming
+- **Non-Cost-Based Processing**:
+    - Converts reference IDs to Node objects
+    - Partitions into batches for parallel processing
+    - Uses `CompletableFuture.allOf()` for coordination
+- **Concurrency Control**:
+    - Limits parallel futures with `maxParallelFutures`
+    - Uses dedicated executor for batch processing
+- **Timeouts**:
+    - Per-batch timeout (500ms default)
+    - Global job timeout
+- **Metrics**:
+    - `node_import_batch_duration`
+    - `node_import_batches_processed`
+    - `node_import_batch_failures`
 
-        try (InputStream gzipStream = new GZIPInputStream(file.getInputStream())) {
-            processBatchesFromStream(jobId, message, gzipStream, totalParsed, success, failed, startTime);
-        } catch (IOException e) {
-            handleImportFailure(jobId, domainId, group.getGroupId(), e);
-            return null;
-        }
+### 3.5 Storage Layer (`NodesStorageProcessor`)
+- **Upsert Mechanism**:
+    - Generates UUIDs for new nodes
+    - Builds CSV data for batch processing
+    - Uses PostgreSQL `COPY` for efficient bulk operations
+- **Transaction Management**:
+    - Uses Spring's `TransactionTemplate`
+    - Manual connection management for COPY operations
+    - Automatic rollback on failure
+- **Batch Processing**:
+    - Partitions nodes into configurable batch sizes
+    - Applies retry logic for transient failures
+    - Tracks conflict rates during upserts
+- **Metrics**:
+    - `node_import_total_duration`
+    - `node_import_conflict_updates`
+    - `node_import_metadata_duration`
 
-        finalizeJob(jobId, group.getGroupId(), domainId, success, failed, totalParsed.get(), startTime);
-        return null;
-    }, executor).handle((result, throwable) -> { // Global error handling
-        if (throwable != null) {
-            log.error("Failed to process nodes import for jobId={}: {}", jobId, throwable.getMessage(), throwable);
-            statusUpdater.handleUnexpectedFailure(jobId, domainId, group.getGroupId(), throwable);
-        }
-        return null;
-    });
-}
-```
+### 3.6 Status Tracking (`NodesImportStatusUpdater`)
+- **Database Schema**:
+  ```sql
+  CREATE TABLE job_status (
+      id UUID PRIMARY KEY,
+      group_id VARCHAR(255) NOT NULL,
+      domain_id UUID NOT NULL,
+      status VARCHAR(50) NOT NULL CHECK (status IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED')),
+      total_nodes INT DEFAULT 0,
+      success_count INT DEFAULT 0,
+      failed_count INT DEFAULT 0,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+  );
+  ```
+- **Operations**:
+    - `initiateNodesImport()`: Creates new job record
+    - `updateJobStatus()`: Updates job status
+    - `updateTotalNodes()`: Sets expected node count
+    - `completeJob()`: Finalizes successful job
+    - `failJob()`: Records failure details
+- **Metrics Integration**:
+    - Emits success/failure counters with domain/group tags
 
-**Stream Batching Algorithm**:
+### 3.7 Fault Tolerance (`RetryTemplate`)
+- **Configuration**:
+    - Max attempts: 3
+    - Initial interval: 1000ms
+    - Multiplier: 2.0 (exponential backoff)
+    - Max interval: 10000ms
+- **Usage**:
+    - Applied to database operations in storage layer
+    - Handles transient database errors
+    - Prevents cascading failures
 
-```java
-private void processBatchesFromStream(UUID jobId, NodeExchange message,
-                                      InputStream gzipStream, AtomicInteger totalParsed,
-                                      List<String> success, List<String> failed, long startTime) {
-    List<CompletableFuture<Void>> futures = Collections.synchronizedList(new ArrayList<>());
-    int maxFutures = maxParallelFutures; // Configurable (default: 4)
+### 3.8 Concurrency Management
+- **Thread Pool Configuration**:
+  ```java
+  @Bean(name = "nodesImportExecutor")
+  public ThreadPoolTaskExecutor nodesImportExecutor() {
+      ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+      executor.setCorePoolSize(4); // Matches Kafka concurrency
+      executor.setMaxPoolSize(8); // Scales under load
+      executor.setQueueCapacity(100); // Backpressure: reject if queue full
+      executor.setThreadNamePrefix("nodes-import-");
+      executor.initialize();
+      return executor;
+  }
+  ```
+- **Backpressure Handling**:
+    - Rejects tasks when queue is full
+    - Updates job status to FAILED on rejection
+    - Increments error metrics
 
-    CsvParser.parseInBatches(gzipStream, nodeResponseFactory, batch -> {
-        futures.add(processBatchAsync(jobId, batch, message, success, failed, totalParsed, startTime));
-        if (futures.size() >= maxFutures) {
-            joinAndClearFutures(futures); // Throttle parallelism
-        }
-    });
-
-    joinAndClearFutures(futures); // Process remaining futures
-}
-```
-
-**Batch Processing with Timeout**:
-
-```java
-private CompletableFuture<Void> processBatchAsync(UUID jobId, List<NodeResponse> batch, NodeExchange message,
-                                                  List<String> success, List<String> failed,
-                                                  AtomicInteger totalParsed, long startTime) {
-    return CompletableFuture.runAsync(() -> {
-        try {
-            nodesImportProcessor.processBatch(jobId, batch, message, success, failed, totalParsed);
-            long durationMs = (System.nanoTime() - startTime) / 1_000_000;
-            log.info("Job {}: Completed batch of {} nodes in {} ms", jobId, batch.size(), durationMs);
-        } catch (Exception e) {
-            log.error("Job {}: Batch failed: {}", jobId, e.getMessage(), e);
-            batch.forEach(r -> failed.add(r.getReferenceId()));
-            throw new InternalServerErrorException("Batch processing failed for jobId=" + jobId + ": " + e.getMessage());
-        }
-    }, executor).whenComplete((result, throwable) -> {
-        if (throwable != null) {
-            if (throwable instanceof TimeoutException) {
-                log.error("Job {}: Batch processing timed out after {} ms", jobId, nodeTimeoutMs);
-                batch.forEach(r -> failed.add(r.getReferenceId()));
-            } else {
-                log.error("Job {}: Batch processing failed: {}", jobId, throwable.getMessage(), throwable);
-            }
-        }
-    }).orTimeout(nodeTimeoutMs, TimeUnit.MILLISECONDS); // Configurable timeout (default: 500ms)
-}
-```
-
-**Non-Cost-Based Processing**:
-
-```java
-public CompletableFuture<Void> processNodesImport(UUID jobId, List<String> referenceIds, String groupId, int batchSize, UUID domainId) {
-    MatchingGroup group = groupConfigService.getGroupConfig(groupId, domainId);
-
-    return CompletableFuture.supplyAsync(() -> {
-        log.info("Job {} started for groupId={}, domainId={}, referenceIds count={}", jobId, groupId, domainId, referenceIds.size());
-        statusUpdater.updateJobStatus(jobId, JobStatus.PROCESSING);
-
-        if (referenceIds.isEmpty()) {
-            statusUpdater.failJob(jobId, groupId, "No referenceIds provided.", List.of(), List.of(), 0, domainId);
-            return null;
-        }
-
-        statusUpdater.updateTotalNodes(jobId, referenceIds.size());
-
-        List<Node> nodes = GraphRequestFactory.createNodesFromReferences(referenceIds, group.getId(), NodeType.USER, domainId);
-        log.info("Job {}: Created {} nodes from referenceIds", jobId, nodes.size());
-
-        List<CompletableFuture<Void>> futures = Collections.synchronizedList(new ArrayList<>());
-        List<List<Node>> batches = ListUtils.partition(nodes, batchSize);
-
-        for (List<Node> batch : batches) {
-            log.info("Job {}: Submitting batch of size {}", jobId, batch.size());
-            futures.add(CompletableFuture.runAsync(() -> {
-                nodesImportProcessor.processAndPersist(jobId, groupId, batch, batchSize, referenceIds.size(), domainId);
-                log.info("Job {}: Completed batch of size {}", jobId, batch.size());
-            }, executor).orTimeout(nodeTimeoutMs, TimeUnit.MILLISECONDS));
-        }
-
-        CompletableFuture<Void> resultFuture = new CompletableFuture<>();
-        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
-                .thenAcceptAsync(v -> resultFuture.complete(null), executor)
-                .exceptionally(t -> {
-                    log.error("Failed to complete futures for jobId={}: {}", jobId, t.getMessage());
-                    resultFuture.completeExceptionally(t);
-                    return null;
-                });
-
-        try {
-            resultFuture.get(nodeTimeoutMs, TimeUnit.MILLISECONDS); // Global timeout
-        } catch (Exception e) {
-            log.error("Error waiting for futures for jobId={}: {}", jobId, e.getMessage());
-            throw new RuntimeException(e);
-        }
-        return null;
-    }, executor).handle((result, throwable) -> {
-        if (throwable != null) {
-            log.error("Failed to process nodes import for jobId={}: {}", jobId, throwable.getMessage(), throwable);
-            statusUpdater.handleUnexpectedFailure(jobId, domainId, groupId, new RuntimeException(throwable));
-            meterRegistry.counter("node_import_errors", "domainId", domainId.toString(), "groupId", groupId).increment();
-        }
-        return null;
-    });
-}
-```
+### 3.9 Observability
+- **Metrics**:
+    - Timers: `node_import_batch_duration`, `node_import_total_duration`, `node_import_metadata_duration`
+    - Counters: `node_import_success`, `node_import_failures`, `node_import_conflict_updates`
+- **Log Correlation**:
+    - All logs include `jobId` for traceability
+    - Structured logging with domain/group context
+- **Monitoring**:
+    - Real-time tracking of import progress
+    - Alerting on high failure rates or slow processing
 
 ---
 
-### **5. Storage Layer (`NodesStorageProcessor`)**
+## 4. Data Model
 
-**Upsert Mechanism**:
-
-```java
-public CompletableFuture<Void> saveNodesSafely(List<Node> nodes) {
-    if (nodes.isEmpty()) {
-        log.warn("Empty node list, skipping upsert.");
-        return CompletableFuture.completedFuture(null);
+### Data Model Diagram
+```mermaid
+erDiagram
+    JOB_STATUS ||--o{ NODE : "has"
+    NODE ||--o{ NODE_METADATA : "has"
+    
+    JOB_STATUS {
+        UUID id PK
+        VARCHAR group_id
+        UUID domain_id
+        VARCHAR status
+        INT total_nodes
+        INT success_count
+        INT failed_count
+        TIMESTAMPTZ created_at
+        TIMESTAMPTZ updated_at
     }
-
-    List<Node> processedNodes = nodes.stream()
-            .map(node -> Node.builder()
-                    .id(node.getId() != null ? node.getId() : UUID.randomUUID())
-                    .referenceId(node.getReferenceId())
-                    .groupId(node.getGroupId())
-                    .type(node.getType())
-                    .domainId(node.getDomainId())
-                    .createdAt(node.getCreatedAt())
-                    .metaData(node.getMetaData())
-                    .build())
-            .collect(Collectors.toList());
-
-    long startTime = System.nanoTime();
-    return CompletableFuture.runAsync(() -> {
-        ConcurrentHashMap<String, UUID> refIdToNodeId = upsertNodes(processedNodes);
-        insertMetadata(processedNodes, refIdToNodeId.values());
-    }, nodesImportExecutor).whenComplete((result, throwable) -> {
-        long durationMs = (System.nanoTime() - startTime) / 1_000_000;
-        if (throwable != null) {
-            log.error("Node processing failed: {}", throwable.getMessage(), throwable);
-            meterRegistry.counter("node_import_errors", Constant.OPS, Constant.NODES).increment();
-            throw new InternalServerErrorException("Node processing failed: " + throwable.getMessage());
-        }
-        log.info("Processed batch of {} nodes in {} ms", nodes.size(), durationMs);
-        meterRegistry.timer("node_import_total_duration", Constant.OPS, Constant.NODES)
-                .record(durationMs, TimeUnit.MILLISECONDS);
-    }).orTimeout(timeoutMs, TimeUnit.MILLISECONDS); // Configurable (default: 50s)
-}
+    
+    NODE {
+        UUID id PK
+        VARCHAR reference_id
+        VARCHAR group_id
+        VARCHAR type
+        UUID domain_id
+        TIMESTAMPTZ created_at
+    }
+    
+    NODE_METADATA {
+        UUID node_id PK, FK
+        JSONB metadata
+    }
 ```
 
-**Batch Upsert with PostgreSQL `COPY`**:
+### Key Entities:
+- **job_status**:
+    - Tracks import job lifecycle (PENDING → PROCESSING → COMPLETED/FAILED)
+    - Records success/failure counts for reporting
+- **nodes**:
+    - Core entity for user nodes
+    - Unique constraint on (reference_id, group_id)
+- **node_metadata**:
+    - Stores additional node properties as JSONB
+    - One-to-one relationship with nodes
 
-```java
-private ConcurrentHashMap<String, UUID> upsertNodes(List<Node> nodes) {
-    ConcurrentHashMap<String, UUID> refIdToNodeId = new ConcurrentHashMap<>();
-    List<List<Node>> batches = ListUtils.partition(nodes, batchSize); // batchSize from config
-
-    for (List<Node> batch : batches) {
-        retryTemplate.execute(context -> { // Exponential backoff
-            upsertBatch(batch, refIdToNodeId);
-            return null;
-        });
-    }
-
-    return refIdToNodeId;
-}
-
-private void upsertBatch(List<Node> batch, ConcurrentHashMap<String, UUID> refIdToNodeId) {
-    long startTime = System.nanoTime();
-    String csvData = buildCsvRows(batch); // Formats batch as TSV
-    List<Map<String, Object>> results = executeCopy(csvData); // Executes COPY command
-
-    int fetched = 0;
-    for (Map<String, Object> row : results) {
-        UUID nodeId = (UUID) row.get("id");
-        String key = row.get(HeaderNormalizer.FIELD_REFERENCE_ID) + ":" + row.get(HeaderNormalizer.FIELD_GROUP_ID);
-        refIdToNodeId.put(key, nodeId);
-        fetched++;
-    }
-
-    recordMetrics(batch.size(), fetched, startTime);
-}
-```
-
-**COPY Command Execution**:
-
-```java
-private List<Map<String, Object>> executeCopy(String csvData) {
-    return transactionTemplate.execute(status -> {
-        DataSource dataSource = jdbcTemplate.getDataSource();
-        Connection connection = DataSourceUtils.getConnection(dataSource);
-        try {
-            connection.setAutoCommit(false);
-            // 1. Create temp table
-            try (Statement stmt = connection.createStatement()) {
-                stmt.execute(QueryUtils.getNodesTempTableSQL());
-            }
-            // 2. Copy data from CSV to temp table
-            try (InputStream inputStream = new ByteArrayInputStream(csvData.getBytes(StandardCharsets.UTF_8))) {
-                CopyManager copyManager = new CopyManager(connection.unwrap(BaseConnection.class));
-                copyManager.copyIn(
-                    "COPY temp_nodes (id, reference_id, group_id, type, domain_id, created_at) FROM STDIN WITH (FORMAT CSV, DELIMITER E'\\t')",
-                    inputStream
-                );
-            }
-            // 3. Upsert into main table and return results
-            List<Map<String, Object>> results = new ArrayList<>();
-            try (PreparedStatement ps = connection.prepareStatement(QueryUtils.getNodesUpsertSQL());
-                 ResultSet rs = ps.executeQuery()) {
-                ResultSetMetaData metaData = rs.getMetaData();
-                int columnCount = metaData.getColumnCount();
-                while (rs.next()) {
-                    Map<String, Object> row = new HashMap<>();
-                    for (int i = 1; i <= columnCount; i++) {
-                        row.put(metaData.getColumnLabel(i), rs.getObject(i));
-                    }
-                    results.add(row);
-                }
-            }
-            connection.commit();
-            return results;
-        } catch (SQLException | IOException e) {
-            try {
-                connection.rollback();
-            } catch (SQLException re) {
-                log.error("Rollback failed: {}", re.getMessage(), re);
-            }
-            log.error("COPY operation failed: {}", e.getMessage(), e);
-            throw new DataAccessException("COPY operation failed", e) {};
-        } finally {
-            DataSourceUtils.releaseConnection(connection, dataSource);
-        }
-    });
-}
-```
-
-**Upsert SQL**:
-
+### Index Recommendations:
 ```sql
--- QueryUtils.getNodesUpsertSQL()
-WITH upsert AS (
-    UPDATE nodes n
-    SET
-        reference_id = EXCLUDED.reference_id,
-        group_id = EXCLUDED.group_id,
-        type = EXCLUDED.type,
-        domain_id = EXCLUDED.domain_id,
-        created_at = EXCLUDED.created_at
-    FROM temp_nodes
-    WHERE n.reference_id = temp_nodes.reference_id AND n.group_id = temp_nodes.group_id
-    RETURNING n.id, temp_nodes.reference_id, temp_nodes.group_id
-)
-INSERT INTO nodes (id, reference_id, group_id, type, domain_id, created_at)
-SELECT
-    gen_random_uuid(), -- Or use provided UUID if not null
-    reference_id,
-    group_id,
-    type,
-    domain_id,
-    created_at
-FROM temp_nodes
-WHERE NOT EXISTS (
-    SELECT 1 FROM upsert
-    WHERE upsert.reference_id = temp_nodes.reference_id
-      AND upsert.group_id = temp_nodes.group_id
-)
-RETURNING id, reference_id, group_id;
-```
-
----
-
-### **6. Status Tracking (`NodesImportStatusUpdater`)**
-
-**Database Schema (PostgreSQL)**:
-
-```sql
-CREATE TABLE job_status (
-    id UUID PRIMARY KEY,
-    group_id VARCHAR(255) NOT NULL,
-    domain_id UUID NOT NULL,
-    status VARCHAR(50) NOT NULL CHECK (status IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED')),
-    total_nodes INT DEFAULT 0,
-    success_count INT DEFAULT 0,
-    failed_count INT DEFAULT 0,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
 CREATE INDEX idx_job_status_group_domain ON job_status (group_id, domain_id);
-```
-
-**Status Update Operations**:
-
-```java
-public UUID initiateNodesImport(NodeExchange payload) {
-    UUID jobId = UUID.randomUUID();
-    String groupId = payload.getGroupId();
-    UUID domainId = payload.getDomainId();
-
-    jdbcTemplate.update(
-        "INSERT INTO job_status (id, group_id, domain_id, status, created_at, updated_at) " +
-        "VALUES (?, ?, ?, 'PENDING', NOW(), NOW())",
-        jobId, groupId, domainId
-    );
-    return jobId;
-}
-
-public void updateJobStatus(UUID jobId, JobStatus status) {
-    jdbcTemplate.update(
-        "UPDATE job_status SET status = ?, updated_at = NOW() WHERE id = ?",
-        status.name(), jobId
-    );
-}
-
-public void updateTotalNodes(UUID jobId, int totalNodes) {
-    jdbcTemplate.update(
-        "UPDATE job_status SET total_nodes = ? WHERE id = ?",
-        totalNodes, jobId
-    );
-}
-
-public void completeJob(UUID jobId, String groupId, List<String> success, int total, UUID domainId) {
-    int successCount = success.size();
-    int failedCount = total - successCount;
-
-    jdbcTemplate.update(
-        "UPDATE job_status SET status = 'COMPLETED', success_count = ?, failed_count = ?, updated_at = NOW() WHERE id = ?",
-        successCount, failedCount, jobId
-    );
-    // Emit success metric
-    meterRegistry.counter("node_import_success", "domainId", domainId.toString(), "groupId", groupId).increment(successCount);
-}
-
-public void failJob(UUID jobId, String groupId, String error, List<String> success, List<String> failed, int total, UUID domainId) {
-    int successCount = success.size();
-    int failedCount = failed.size();
-
-    jdbcTemplate.update(
-        "UPDATE job_status SET status = 'FAILED', success_count = ?, failed_count = ?, updated_at = NOW() WHERE id = ?",
-        successCount, failedCount, jobId
-    );
-    // Log error and emit failure metric
-    log.error("Job {} failed: {}. Success: {}, Failed: {}", jobId, error, successCount, failedCount);
-    meterRegistry.counter("node_import_failures", "domainId", domainId.toString(), "groupId", groupId).increment(failedCount);
-}
+CREATE UNIQUE INDEX idx_nodes_reference_group ON nodes (reference_id, group_id);
+CREATE INDEX idx_nodes_domain ON nodes (domain_id);
 ```
 
 ---
 
-### **7. Fault Tolerance**
+## 5. Key Algorithms and Pseudocode
 
-**Retry Configuration**:
-
-```java
-@Bean
-public RetryTemplate retryTemplate() {
-    RetryTemplate template = new RetryTemplate();
-    ExponentialBackOffPolicy backOffPolicy = new ExponentialBackOffPolicy();
-    backOffPolicy.setInitialInterval(1000); // 1st retry: 1s
-    backOffPolicy.setMultiplier(2.0); // 2nd retry: 2s, 3rd: 4s
-    backOffPolicy.setMaxInterval(10000); // Max 10s
-    template.setBackOffPolicy(backOffPolicy);
-
-    SimpleRetryPolicy retryPolicy = new SimpleRetryPolicy();
-    retryPolicy.setMaxAttempts(3); // Max 3 retries
-    template.setRetryPolicy(retryPolicy);
-    return template;
-}
+### 5.1 Cost-Based Import Workflow
+```mermaid
+sequenceDiagram
+    participant Kafka
+    participant PayloadProcessor
+    participant ImportOrchestrator
+    participant BatchProcessor
+    participant Storage
+    participant DB
+    
+    Kafka->>PayloadProcessor: Consume message
+    PayloadProcessor->>ImportOrchestrator: validatePayload()
+    ImportOrchestrator->>ImportOrchestrator: initiateNodesImport()
+    ImportOrchestrator->>BatchProcessor: processNodesImport(jobId, file)
+    BatchProcessor->>BatchProcessor: validateInput(file)
+    BatchProcessor->>BatchProcessor: processBatchesFromStream()
+    loop For each batch
+        BatchProcessor->>Storage: processBatchAsync()
+        Storage->>DB: upsertBatch()
+        DB-->>Storage: results
+        Storage-->>BatchProcessor: refIdToNodeId map
+    end
+    BatchProcessor->>ImportOrchestrator: finalizeJob()
+    ImportOrchestrator->>DB: completeJob()
 ```
 
-**Retry Usage in Storage Layer**:
+### 5.2 Non-Cost-Based Import Workflow
+```mermaid
+sequenceDiagram
+    participant Kafka
+    participant PayloadProcessor
+    participant ImportOrchestrator
+    participant BatchProcessor
+    participant Storage
+    participant DB
+    
+    Kafka->>PayloadProcessor: Consume message
+    PayloadProcessor->>ImportOrchestrator: validatePayload()
+    ImportOrchestrator->>ImportOrchestrator: initiateNodesImport()
+    ImportOrchestrator->>BatchProcessor: processNodesImport(jobId, referenceIds)
+    BatchProcessor->>BatchProcessor: createNodesFromReferences()
+    BatchProcessor->>BatchProcessor: partition into batches
+    loop For each batch
+        BatchProcessor->>Storage: processAndPersist()
+        Storage->>DB: saveNodesSafely()
+        DB-->>Storage: confirmation
+    end
+    BatchProcessor->>ImportOrchestrator: finalizeJob()
+    ImportOrchestrator->>DB: completeJob()
+```
 
-```java
-private void upsertBatch(List<Node> batch, ConcurrentHashMap<String, UUID> refIdToNodeId) {
-    retryTemplate.execute(context -> { // Applies retry logic
-        // ... (COPY command execution)
-        return null;
-    });
-}
+### 5.3 Batch Processing Algorithm
+```mermaid
+flowchart TD
+    A[Start Batch Processing] --> B{Is cost-based?}
+    B -->|Yes| C[Stream CSV from GZIP]
+    B -->|No| D[Convert reference IDs to Nodes]
+    C --> E[Partition into batches]
+    D --> E
+    E --> F{More batches?}
+    F -->|Yes| G[Submit batch to executor]
+    G --> H{Queue full?}
+    H -->|Yes| I[Wait for completion]
+    H -->|No| J[Continue submitting]
+    I --> K[Process completed batches]
+    K --> F
+    J --> F
+    F -->|No| L[Finalize job]
+    L --> M[Update job status]
+```
+
+### 5.4 Database Upsert Algorithm
+```mermaid
+flowchart TD
+    A[Start Upsert] --> B[Create temp table]
+    B --> C[Copy data to temp table via CSV]
+    C --> D[Execute upsert SQL]
+    D --> E{Success?}
+    E -->|Yes| F[Commit transaction]
+    E -->|No| G[Rollback transaction]
+    G --> H{Retry?}
+    H -->|Yes| B
+    H -->|No| I[Fail batch]
+    F --> J[Return node IDs]
 ```
 
 ---
 
-### **8. Concurrency and Resource Management**
+## 6. Error Handling, Timeouts, Retries
 
-**Thread Pool Configuration**:
-
-```java
-@Bean(name = "nodesImportExecutor")
-public ThreadPoolTaskExecutor nodesImportExecutor() {
-    ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-    executor.setCorePoolSize(4); // Matches Kafka concurrency
-    executor.setMaxPoolSize(8); // Scales under load
-    executor.setQueueCapacity(100); // Backpressure: reject if queue full
-    executor.setThreadNamePrefix("nodes-import-");
-    executor.initialize();
-    return executor;
-}
+### Error Handling Flow Diagram
+```mermaid
+flowchart TD
+    A[Operation] --> B{Success?}
+    B -->|Yes| C[Record Success]
+    B -->|No| D{Transient Error?}
+    D -->|Yes| E[Apply Retry Policy]
+    D -->|No| F[Mark as Failed]
+    E --> G{Max Retries Reached?}
+    G -->|No| H[Wait Exponential Backoff]
+    H --> A
+    G -->|Yes| F
+    F --> I[Update Job Status]
+    I --> J[Emit Failure Metrics]
+    J --> K[Log Detailed Error]
 ```
 
-**Backpressure Handling**:
+### Key Mechanisms:
+1. **Kafka Consumer Errors**:
+    - Failed messages routed to DLQ after retries
+    - Original headers preserved for debugging
+    - `__TypeId__` header maintains object type information
 
-* If the executor’s queue is full, `CompletableFuture.runAsync` throws `TaskRejectedException`.
-* This exception is caught in the global error handler, updating the job status to `FAILED` and incrementing the `node_import_errors` metric.
+2. **Batch Processing Errors**:
+    - Per-batch timeouts (500ms default)
+    - Failed reference IDs tracked separately
+    - Global job timeout prevents hung imports
+
+3. **Database Operation Errors**:
+    - Retry template with exponential backoff
+    - 3 max attempts with increasing delays
+    - Automatic rollback on failure
+
+4. **Backpressure Handling**:
+    - Executor queue capacity limits concurrent work
+    - Task rejection triggers job failure
+    - Prevents system overload during spikes
 
 ---
 
-### **9. Observability**
+## 7. Metrics and Logging
 
-**Micrometer Metrics**:
-
-```java
-// Track batch processing times
-meterRegistry.timer("node_import_batch_duration", Constant.OPS, Constant.NODES).record(durationMs, TimeUnit.MILLISECONDS);
-
-// Track conflict rates during upserts
-meterRegistry.counter("node_import_conflict_updates", Constant.OPS, Constant.NODES).increment(batchSize - fetched);
-
-// Track metadata insertion times
-meterRegistry.timer("node_import_metadata_duration", Constant.OPS, Constant.NODES_METADATA).record(durationMs, TimeUnit.MILLISECONDS);
+### Metrics Dashboard Structure
+```mermaid
+graph LR
+    subgraph Timers
+        T1[node_import_batch_duration]
+        T2[node_import_total_duration]
+        T3[node_import_metadata_duration]
+    end
+    
+    subgraph Counters
+        C1[node_import_success]
+        C2[node_import_failures]
+        C3[node_import_conflict_updates]
+        C4[node_import_errors]
+    end
+    
+    subgraph Gauges
+        G1[executor_queue_size]
+        G2[executor_active_threads]
+        G3[job_progress_percentage]
+    end
+    
+    T1 --> MetricsCollector
+    T2 --> MetricsCollector
+    C1 --> MetricsCollector
+    G1 --> MetricsCollector
+    MetricsCollector --> Prometheus
 ```
 
-**Log Correlation**:
+### Key Metrics:
+- **Timers**:
+    - `node_import_batch_duration`: Time to process individual batches
+    - `node_import_total_duration`: Total time per import job
+    - `node_import_metadata_duration`: Time to process metadata
+- **Counters**:
+    - `node_import_success`: Successful node imports (tagged by domain/group)
+    - `node_import_failures`: Failed node imports (tagged by domain/group)
+    - `node_import_conflict_updates`: Number of existing nodes updated
+    - `node_import_errors`: General error count
+- **Gauges**:
+    - `executor_queue_size`: Current size of processing queue
+    - `executor_active_threads`: Number of active worker threads
+    - `job_progress_percentage`: Percentage completion for active jobs
 
-* All logs include `jobId` for traceability (e.g., `log.info("Job {}: Processing batch", jobId)`).
+### Logging Standards:
+- **Structured Logging**:
+  ```json
+  {
+    "jobId": "a1b2c3d4-...",
+    "groupId": "marketing",
+    "domainId": "e5f6g7h8-...",
+    "message": "Completed batch of 100 nodes",
+    "batchSize": 100,
+    "durationMs": 42
+  }
+  ```
+- **Critical Log Points**:
+    - Job start/completion
+    - Batch processing milestones
+    - Error conditions with stack traces
+    - Retry attempts and outcomes
+- **Correlation**:
+    - All logs include `jobId` for traceability
+    - Domain and group context included in all logs
 
 ---
 
-## Notes
+## 8. Configuration Matrix
 
-This LLD provides a **granular, implementation-focused view** of the Nodes Import Module, balancing technical depth with readability for recruiters and interviewers. For interviews, be prepared to discuss trade-offs (e.g., `COPY` vs. `INSERT` for PostgreSQL, thread pool sizing) and failure scenarios.
-sStorageProcessor ..> NodeMetadataBatchWriter : batchInsertMetadata
+| Key | Default | Component | Effect |
+|-----|---------|-----------|--------|
+| `kafka.consumer.concurrency` | 4 | Kafka Consumer | Number of consumer threads |
+| `node.import.timeout.ms` | 500 | Batch Processor | Per-batch processing timeout |
+| `node.import.global.timeout.ms` | 300000 | Batch Processor | Global job timeout (5 min) |
+| `node.import.executor.core-pool-size` | 4 | Thread Pool | Core number of worker threads |
+| `node.import.executor.max-pool-size` | 8 | Thread Pool | Maximum worker threads |
+| `node.import.executor.queue-capacity` | 100 | Thread Pool | Backpressure threshold |
+| `node.import.batch.size` | 500 | Storage Layer | Database batch size |
+| `node.import.retry.max-attempts` | 3 | Retry Template | Maximum retry attempts |
+| `node.import.retry.initial-interval` | 1000 | Retry Template | First retry delay (ms) |
+| `node.import.retry.multiplier` | 2.0 | Retry Template | Exponential backoff multiplier |
+| `node.import.retry.max-interval` | 10000 | Retry Template | Maximum retry delay (ms) |
+| `node.import.max-parallel-futures` | 4 | Batch Processor | Max concurrent batches per job |
+
+---
+
+## 9. Sequences
+
+### 9.1 Complete Cost-Based Import Sequence
+```mermaid
+sequenceDiagram
+    participant Kafka as Kafka Consumer
+    participant PP as Payload Processor
+    participant IO as Import Orchestrator
+    participant BP as Batch Processor
+    participant ST as Storage
+    participant DB as PostgreSQL
+    participant SU as Status Updater
+    
+    Kafka->>PP: consumeNodesImport(record)
+    PP->>PP: validate payload
+    PP->>IO: startNodesImport(payload)
+    IO->>SU: initiateNodesImport()
+    SU->>DB: INSERT job_status (PENDING)
+    IO->>BP: processNodesImport(jobId, file)
+    BP->>BP: validateInput(file)
+    BP->>BP: logImportStart()
+    BP->>SU: updateJobStatus(PROCESSING)
+    BP->>BP: processBatchesFromStream()
+    loop Process each batch
+        BP->>BP: submitBatchAsync()
+        BP->>ST: processBatch(jobId, batch)
+        ST->>ST: buildCsvRows(batch)
+        ST->>DB: executeCopy(csvData)
+        DB-->>ST: results
+        ST-->>BP: refIdToNodeId
+        BP->>SU: update progress
+    end
+    BP->>SU: finalizeJob()
+    SU->>DB: UPDATE job_status (COMPLETED)
+    SU->>SU: emit success metrics
+    BP-->>IO: complete
+    IO-->>PP: complete
+    PP-->>Kafka: complete
+```
+
+### 9.2 Error Handling Sequence
+```mermaid
+sequenceDiagram
+    participant BP as Batch Processor
+    participant ST as Storage
+    participant DB as PostgreSQL
+    participant SU as Status Updater
+    participant RT as Retry Template
+    
+    BP->>ST: processBatch()
+    ST->>DB: executeCopy()
+    DB-->>ST: SQLException
+    ST->>RT: execute(retryCallback)
+    RT->>ST: retryCallback
+    ST->>DB: executeCopy() [Retry #1]
+    DB-->>ST: TimeoutException
+    RT->>ST: retryCallback
+    ST->>DB: executeCopy() [Retry #2]
+    DB-->>ST: SQLException
+    RT->>ST: retryCallback
+    ST->>DB: executeCopy() [Retry #3]
+    DB-->>ST: SQLException (Max retries reached)
+    ST->>BP: throw exception
+    BP->>BP: record failed reference IDs
+    BP->>SU: update failed count
+    alt Global timeout exceeded
+        BP->>SU: failJob("Timeout exceeded")
+    else
+        BP->>SU: continue processing
+    end
+    SU->>DB: UPDATE job_status (FAILED)
+    SU->>SU: emit failure metrics
+```
+
+### 9.3 Backpressure Handling Sequence
+```mermaid
+sequenceDiagram
+    participant BP as Batch Processor
+    participant ET as Executor
+    participant ST as Storage
+    
+    BP->>BP: processBatchesFromStream()
+    BP->>ET: submitBatchAsync()
+    ET->>ET: queue.add(batch)
+    ET->>ET: queue.size() == 100?
+    ET-->>BP: TaskRejectedException
+    BP->>SU: failJob("System overloaded")
+    SU->>DB: UPDATE job_status (FAILED)
+    SU->>SU: emit error metrics
+```
+
+---
+
+## 10. External Contracts and Assumptions
+
+### External Service Interfaces
+```mermaid
+classDiagram
+    class KafkaConsumer {
+        <<interface>>
+        + consume(ConsumerRecord)
+    }
+
+    class GroupConfigService {
+        <<interface>>
+        + MatchingGroup getGroupConfig(groupId, domainId)
+    }
+
+    class GraphRequestFactory {
+        <<interface>>
+        + List~Node~ createNodesFromReferences(referenceIds, groupId, nodeType, domainId)
+    }
+
+    class CsvParser {
+        <<interface>>
+        + void parseInBatches(InputStream, NodeResponseFactory, Consumer)
+    }
+
+    class NodeResponseFactory {
+        <<interface>>
+        + NodeResponse createFromCsvRow(String[])
+    }
+
+    class QueryUtils {
+        <<interface>>
+        + String getNodesTempTableSQL()
+        + String getNodesUpsertSQL()
+    }
+
+```
+
+### Key Assumptions:
+1. **Kafka Topics**:
+    - Topics follow naming convention `*-users`
+    - Messages contain valid JSON payloads
+
+2. **File Format**:
+    - Cost-based imports use GZIP-compressed CSV
+    - CSV has expected headers (reference_id, etc.)
+
+3. **Database**:
+    - PostgreSQL 12+ with `pgcrypto` for `gen_random_uuid()`
+    - Proper indexing on `nodes` table
+
+4. **Node Types**:
+    - Only USER nodes are imported through this module
+    - Other node types handled elsewhere
+
+5. **Idempotency**:
+    - Import operations are idempotent
+    - Duplicate reference IDs update existing nodes
+
+---
+
+## 11. Known Risks and Recommendations
+
+### Risk Mitigation Matrix
+| Risk | Impact | Likelihood | Mitigation |
+|------|--------|------------|------------|
+| Large file processing | High | Medium | Implement file chunking and checkpointing |
+| Database connection leaks | Medium | Low | Use try-with-resources for connections |
+| Memory pressure from large reference ID lists | Medium | High | Stream reference IDs instead of loading all at once |
+| Deadlocks during concurrent upserts | Low | Medium | Ensure proper transaction isolation levels |
+| Inconsistent job status on failure | Medium | High | Use transactional status updates |
+| Slow COPY operations under load | Medium | Medium | Monitor and adjust PostgreSQL configuration |
+
+### Recommendations:
+1. **Critical Improvements**:
+    - Add file size limits to prevent OOM errors
+    - Implement streaming for reference ID lists
+    - Add transactional boundaries for status updates
+
+2. **Performance Optimizations**:
+    - Tune PostgreSQL `work_mem` for COPY operations
+    - Consider using `COPY` directly from client for larger datasets
+    - Add connection pool monitoring
+
+3. **Resilience Enhancements**:
+    - Add circuit breaker pattern for database operations
+    - Implement dead-letter queue reprocessing mechanism
+    - Add job resumption capability
+
+4. **Operational Improvements**:
+    - Add admin API for monitoring active jobs
+    - Implement automated cleanup of old job records
+    - Add alerts for long-running jobs
+
+---
+
+## 12. Testing Strategy (Pointers)
+
+### Testing Strategy Diagram
+```mermaid
+graph TD
+    subgraph Unit Tests
+        U1[Payload validation]
+        U2[Batch processing logic]
+        U3[Storage layer CSV building]
+        U4[Status tracker updates]
+    end
+    
+    subgraph Integration Tests
+        I1[End-to-end cost-based import]
+        I2[End-to-end non-cost-based import]
+        I3[DLQ message handling]
+        I4[Retry logic validation]
+    end
+    
+    subgraph Performance Tests
+        P1[Large file processing]
+        P2[High concurrency scenarios]
+        P3[Database load testing]
+    end
+    
+    subgraph Resilience Tests
+        R1[Database outage simulation]
+        R2[Kafka consumer restart]
+        R3[Memory pressure scenarios]
+    end
+    
+    U1 --> TestFramework
+    I1 --> TestFramework
+    P1 --> TestFramework
+    R1 --> TestFramework
+    TestFramework --> CI/CD
+```
+
+### Test Categories:
+1. **Unit Tests**:
+    - Payload validation logic
+    - Batch processing algorithms
+    - CSV formatting and parsing
+    - Status update calculations
+
+2. **Integration Tests**:
+    - End-to-end import workflows (both cost-based and non-cost-based)
+    - DLQ message handling and reprocessing
+    - Retry logic with simulated failures
+    - Database transaction boundaries
+
+3. **Performance Tests**:
+    - Large file processing (1GB+)
+    - High concurrency scenarios (multiple jobs simultaneously)
+    - Database load testing with realistic dataset sizes
+    - Memory usage profiling
+
+4. **Resilience Tests**:
+    - Database outage simulation (connection failures)
+    - Kafka consumer restart scenarios
+    - Memory pressure tests (large reference ID lists)
+    - Network partition testing
+
+5. **Chaos Engineering**:
+    - Randomly kill database connections during COPY
+    - Simulate slow network for Kafka consumers
+    - Inject latency in storage layer operations
+
+---
+

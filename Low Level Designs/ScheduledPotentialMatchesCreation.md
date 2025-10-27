@@ -712,47 +712,56 @@ stateDiagram-v2
 
 ### External Service Interfaces
 ```mermaid
-interfaceDiagram
-    interface DomainService {
-        + List<UUID> getActiveDomains()
+classDiagram
+    class DomainService {
+        <<interface>>
+        + List~UUID~ getActiveDomains()
     }
-    
-    interface MatchingGroupRepository {
-        + List<UUID> findGroupIdsByDomainId(UUID domainId)
+
+    class MatchingGroupRepository {
+        <<interface>>
+        + List~UUID~ findGroupIdsByDomainId(UUID domainId)
     }
-    
-    interface NodeRepository {
-        + Page<UUID> findIdsByGroupIdAndDomainId(UUID groupId, UUID domainId, Pageable pageable, Instant createdAfter)
-        + CompletableFuture<List<Node>> findByIdsWithMetadataAsync(List<UUID> ids)
-        + List<String> findDistinctMetadataKeysByGroupId(UUID groupId)
-        + Optional<Node> findByReferenceIdAndGroupIdAndDomainId(String refId, UUID groupId, UUID domainId)
-        + void markAsProcessed(List<UUID> nodeIds)
+
+    class NodeRepository {
+        <<interface>>
+        + Page~UUID~ findIdsByGroupIdAndDomainId(UUID groupId, UUID domainId, Pageable pageable, Instant createdAfter)
+        + CompletableFuture~List~Node~~ findByIdsWithMetadataAsync(List~UUID~ ids)
+        + List~String~ findDistinctMetadataKeysByGroupId(UUID groupId)
+        + Optional~Node~ findByReferenceIdAndGroupIdAndDomainId(String refId, UUID groupId, UUID domainId)
+        + void markAsProcessed(List~UUID~ nodeIds)
     }
-    
-    interface PotentialMatchParticipationHistoryRepository {
-        + void saveAll(List<HistoryEntry> entries)
+
+    class PotentialMatchParticipationHistoryRepository {
+        <<interface>>
+        + void saveAll(List~HistoryEntry~ entries)
     }
-    
-    interface GraphRequestFactory {
+
+    class GraphRequestFactory {
+        <<interface>>
         + QueueConfig getQueueConfig(UUID groupId, UUID domainId, String cycleId, QueueManagerConfig config)
         + PotentialMatch convertToPotentialMatch(Edge edge)
         + Edge toEdge(PotentialMatch match)
     }
-    
-    interface FlushUtils {
-        + void executeFlush(Semaphore sem, Executor executor, flushCallback, ...)
-        + void executeBlockingFlush(Semaphore sem, flushCallback, ...)
-        + void executeBoostedFlush(Semaphore sem, Executor executor, flushCallback, ...)
+
+    class FlushUtils {
+        <<interface>>
+        + void executeFlush(Semaphore sem, Executor executor, Function callback)
+        + void executeBlockingFlush(Semaphore sem, Function callback)
+        + void executeBoostedFlush(Semaphore sem, Executor executor, Function callback)
     }
-    
-    interface MetricsUtils {
-        + void registerQueueMetrics(...)
-        + void reportQueueMetrics(...)
+
+    class MetricsUtils {
+        <<interface>>
+        + void registerQueueMetrics(Map config)
+        + void reportQueueMetrics(Map data)
     }
-    
-    interface GraphFactory {
-        + BipartiteGraph createBipartiteGraph(List<Node> left, List<Node> right)
+
+    class GraphFactory {
+        <<interface>>
+        + BipartiteGraph createBipartiteGraph(List~Node~ left, List~Node~ right)
     }
+
 ```
 
 ### Key Assumptions:
@@ -855,4 +864,3 @@ graph TD
 
 ---
 
-This LLD represents a production-grade architecture for scalable, resilient potential match creation. The combination of sophisticated concurrency controls, adaptive backpressure, and comprehensive observability sets a new standard for distributed graph processing systems.
