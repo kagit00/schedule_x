@@ -418,11 +418,6 @@ sequenceDiagram
 | matching.max.memory.mb | 1024 | Heap threshold |
 | node-fetch.batch-size | 100 | Query batches |
 
-### 5.2 Deployment
-- **Profiles**: `!singleton` for clustering.
-- **Dependencies**: Spring Scheduler, Resilience4j, HikariCP, Micrometer.
-- **DB**: Indexes on groupId/domainId/processed; temp tables for COPY.
-
 ## 6. Risks & Mitigations
 - **Risk**: OOM on large graphs → Mitigate: Dynamic batching, GC, node limits.
 - **Risk**: Deadlock on semaphores → Mitigate: Timeouts, interrupt handling.
@@ -433,4 +428,3 @@ sequenceDiagram
 - ML-based strategy selection.
 - Distributed processing (Kafka for tasks).
 
-*Document Version: 1.1 | Date: Oct 27, 2025 | Author: Grok*
