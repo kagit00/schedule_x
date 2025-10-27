@@ -9,21 +9,22 @@
 
 ```mermaid
 graph TD
-    S[PerfectMatchesCreationScheduler<br/>(cron 03:00 IST)] -->|tasks| SC[PerfectMatchCreationService]
+    S[PerfectMatchesCreationScheduler (cron 03:00 IST)] -->|tasks| SC[PerfectMatchCreationService]
     SC -->|domain/group semaphores| PEX[PerfectMatchCreationJobExecutor]
     PEX -->|processGroup| PMS[PerfectMatchServiceImpl]
     PMS -->|stream potential matches| PSS[PerfectMatchStreamingService]
-    PSS -->|batch → Consumer| PMS
+    PSS -->|batch -> Consumer| PMS
     PMS -->|select strategy| MSS[MatchingStrategySelector]
-    MSS -->|strategy| MS[MatchingStrategy<br/>(Greedy, Hungarian, etc)]
-    MS -->|graph → top-K| PMR[PerfectMatchResultBuilder]
-    PMR -->|buffer| QM[QueueManager<br/>(reused from potenial-matches)]
-    QM -->|periodic flush| GS[GraphStore<br/>(MapDB temporary edge store)]
-    GS -->|final stream| PMS2[PerfectMatchServiceImpl<br/>(final-stage)]
+    MSS -->|strategy| MS[MatchingStrategy (Greedy, Hungarian, etc)]
+    MS -->|graph -> top-K| PMR[PerfectMatchResultBuilder]
+    PMR -->|buffer| QM[QueueManager (reused from potential-matches)]
+    QM -->|periodic flush| GS[GraphStore (MapDB temporary edge store)]
+    GS -->|final stream| PMS2[PerfectMatchServiceImpl (final-stage)]
     PMS2 -->|save final top-K| PMSV[PerfectMatchSaver]
-    PMSV -->|COPY/UPSERT| PMST[PerfectMatchStorageProcessor<br/>→ PostgreSQL]
+    PMSV -->|COPY/UPSERT| PMST[PerfectMatchStorageProcessor -> PostgreSQL]
     PMST -->|metrics / cleanup| FM[MatchesCreationFinalizer]
-    FM -->|clean LSH, queues, GC| LSH[LSHIndex<br/>(shared with potential-matches)]
+    FM -->|clean LSH, queues, GC| LSH[LSHIndex (shared with potential-matches)]
+
 ```
 
 > **Note**: The **perfect‑matches** pipeline runs **once per day** (cron) and **only on the leader** (see §9). All components (queues, LSH, MapDB) are **re‑used** from the potential‑matches module for DRYness.
@@ -236,18 +237,19 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    subgraph Chunk [ ]
+    subgraph Chunk
         A[Receive Batch] --> B[Group by nodeId]
         B --> C[PriorityQueue per node]
         C --> D[Trim to maxMatchesPerNode]
         D --> E[Run MatchingStrategy]
         E --> F[Convert to PerfectMatchEntity]
         F --> G[Buffer]
-        G --> H{Buffer ≥ batchSize?}
-        H -->|Yes| I[saveMatchesAsync()]
+        G --> H{Buffer >= batchSize?}
+        H -->|Yes| I[Save Matches Async]
         H -->|No| J[Next Batch]
         I --> K[Clear Buffer]
     end
+
 ```
 
 > Runs in `cpuExecutor`, bounded by `cpuTaskSemaphore`
