@@ -29,9 +29,10 @@ graph TD
     H -->|Bipartite| J[BipartiteGraphBuilder]
     I & J --> K[Edge Generation → PotentialMatch Entities]
     K --> L[QueueManager: Buffering]
-    L --> M[Periodic Flush to GraphStore (MapDB)]
+    L --> M["Periodic Flush to GraphStore \(MapDB\)"]
     M --> N[Finalize: Stream Top-K → Save to PostgreSQL]
     N --> O[Cleanup & Metrics]
+
 ```
 
 ---
