@@ -409,26 +409,32 @@ sequenceDiagram
 
 ### **External Service Interfaces**
 ```mermaid
-interfaceDiagram
-    interface DomainService {
-        + List<Domain> getActiveDomains()
+classDiagram
+    class DomainService {
+        <<interface>>
+        + List~Domain~ getActiveDomains()
     }
 
-    interface MatchingGroupRepository {
-        + List<UUID> findGroupIdsByDomainId(UUID domainId)
+    class MatchingGroupRepository {
+        <<interface>>
+        + List~UUID~ findGroupIdsByDomainId(UUID domainId)
     }
 
-    interface ResponseMakerUtility {
+    class ResponseMakerUtility {
+        <<interface>>
         + MatchTransfer buildMatchTransfer(Entity entity)
     }
 
-    interface ExportService {
-        + CompletableFuture<ExportedFile> exportMatches(Supplier<Stream<MatchTransfer>>, UUID groupId, UUID domainId)
+    class ExportService {
+        <<interface>>
+        + CompletableFuture~ExportedFile~ exportMatches(Supplier~Stream~MatchTransfer~~ supplier, UUID groupId, UUID domainId)
     }
 
-    interface ScheduleXProducer {
+    class ScheduleXProducer {
+        <<interface>>
         + void sendMessage(String topic, String key, String payload, boolean sync)
     }
+
 ```
 
 ### **Assumptions**
