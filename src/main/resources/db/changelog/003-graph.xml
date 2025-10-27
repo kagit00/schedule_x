@@ -394,20 +394,6 @@
         <renameTable oldTableName="nodes_export_jobs" newTableName="nodes_import_jobs"/>
     </changeSet>
 
-    <changeSet id="graph-03-revert-node-metadata" author="gsss">
-        <dropPrimaryKey tableName="node_metadata" constraintName="pk_node_metadata_composite"/>
-
-        <dropIndex tableName="node_metadata" indexName="idx_node_metadata_node_id"/>
-        <dropIndex tableName="node_metadata" indexName="idx_node_metadata_group_id"/>
-        <dropIndex tableName="node_metadata" indexName="idx_node_metadata_meta_key"/>
-
-        <dropColumn tableName="node_metadata" columnName="group_id"/>
-
-        <addPrimaryKey tableName="node_metadata"
-                       columnNames="node_id, meta_key"
-                       constraintName="pk_node_metadata"/>
-    </changeSet>
-
     <changeSet id="top-k-weighted-greedy" author="your-username">
         <insert tableName="matching_algorithms">
             <column name="id" value="topKWeightedGreedyMatchingStrategy"/>
@@ -510,16 +496,7 @@
         </createIndex>
     </changeSet>
 
-    <changeSet id="20250525-01-add-processing-cycle-id" author="grok">
-        <addColumn tableName="potential_matches">
-            <column name="processing_cycle_id" type="VARCHAR(50)">
-                <constraints nullable="true"/>
-            </column>
-        </addColumn>
-    </changeSet>
-
     <changeSet id="20250525-02-drop-and-recreate-is_processed" author="grok">
-        <dropColumn tableName="nodes" columnName="is_processed"/>
         <addColumn tableName="nodes">
             <column name="is_processed" type="BOOLEAN" defaultValueBoolean="false">
                 <constraints nullable="false"/>
@@ -533,5 +510,6 @@
                 columnName="group_id"
                 newDataType="UUID" />
     </changeSet>
+
 
 </databaseChangeLog>

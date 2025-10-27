@@ -23,6 +23,7 @@
                 <constraints nullable="false"/>
             </column>
             <column name="matched_at" type="timestamp"/>
+            <column name="processing_cycle_id" type="varchar(255)"/>
         </createTable>
     </changeSet>
 
@@ -103,7 +104,6 @@
                 <constraints nullable="false"/>
             </column>
         </addColumn>
-        <!-- Backfill domain_id for existing data -->
         <sql>
             UPDATE perfect_matches SET domain_id = (SELECT id FROM domains WHERE name = 'flairbit') WHERE domain_id IS NULL;
             UPDATE potential_matches SET domain_id = (SELECT id FROM domains WHERE name = 'flairbit') WHERE domain_id IS NULL;
@@ -158,22 +158,6 @@
         </update>
     </changeSet>
 
-    <changeSet id="20250602-01-add-new-column" author="yourname">
-        <addColumn tableName="perfect_matches">
-            <column name="processing_cycle_id" type="varchar(255)">
-                <constraints nullable="true"/>
-            </column>
-        </addColumn>
-    </changeSet>
-
-    <changeSet id="20250602-02-add-new-column" author="yourname">
-        <addColumn tableName="potential_matches">
-            <column name="processing_cycle_id" type="varchar(255)">
-                <constraints nullable="true"/>
-            </column>
-        </addColumn>
-    </changeSet>
-
 
     <changeSet id="create_last_run_perfect_matches_table" author="grok">
         <createTable tableName="last_run_perfect_matches">
@@ -211,6 +195,13 @@
                 tableName="last_run_perfect_matches"
                 columnName="group_id"
                 newDataType="UUID" />
+    </changeSet>
+
+    <changeSet id="20250525-02-processing_cycle_id_potential_matches_" author="grok" runInTransaction="false">
+        <sql>
+            ALTER TABLE potential_matches
+            ADD COLUMN IF NOT EXISTS processing_cycle_id varchar(255);
+        </sql>
     </changeSet>
 
 </databaseChangeLog>

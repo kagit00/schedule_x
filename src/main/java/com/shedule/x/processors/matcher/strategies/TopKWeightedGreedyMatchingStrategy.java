@@ -2,6 +2,7 @@ package com.shedule.x.processors.matcher.strategies;
 
 import com.shedule.x.dto.MatchResult;
 import com.shedule.x.service.GraphRecords;
+import jakarta.annotation.PostConstruct;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -22,7 +23,7 @@ public class TopKWeightedGreedyMatchingStrategy implements MatchingStrategy {
             Comparator.comparingDouble(GraphRecords.PotentialMatch::getCompatibilityScore)
                     .reversed()
                     .thenComparing(GraphRecords.PotentialMatch::getMatchedReferenceId);
-    private final Semaphore computeSemaphore;
+    private Semaphore computeSemaphore;
     private static final long GC_COOLDOWN_MS = 30_000;
     private volatile long lastGCTime = 0;
 
@@ -33,12 +34,13 @@ public class TopKWeightedGreedyMatchingStrategy implements MatchingStrategy {
     @Value("${matching.max.distinct.nodes:10000}")
     private int maxDistinctNodes;
     @Value("${matching.parallelism.level:0}")
-    private int parallelismLevel; // 0 means use available processors
+    private int parallelismLevel;
 
-    public TopKWeightedGreedyMatchingStrategy() {
-        int effectiveParallelism = parallelismLevel > 0 ? parallelismLevel : Runtime.getRuntime().availableProcessors();
-        this.computeSemaphore = new Semaphore(effectiveParallelism);
-        log.info("Initialized with parallelism level: {}", effectiveParallelism);
+    @PostConstruct
+    public void init() {
+        int effectiveParallelism = (parallelismLevel > 0) ? parallelismLevel : Runtime.getRuntime().availableProcessors();
+        this.computeSemaphore = new Semaphore(Math.max(1, effectiveParallelism));
+        log.info("Initialized TopKWeightedGreedyMatchingStrategy with parallelism level: {}", effectiveParallelism);
     }
 
     @Override
@@ -53,7 +55,6 @@ public class TopKWeightedGreedyMatchingStrategy implements MatchingStrategy {
         Objects.requireNonNull(groupId, "Group ID cannot be null");
         Objects.requireNonNull(domainId, "Domain ID cannot be null");
 
-        // Early distinct node count check
         long distinctNodes = allPotentialMatches.stream()
                 .flatMap(pm -> Stream.of(pm.getReferenceId(), pm.getMatchedReferenceId()))
                 .filter(Objects::nonNull)
@@ -78,7 +79,7 @@ public class TopKWeightedGreedyMatchingStrategy implements MatchingStrategy {
             computeMatches(adjacencyMap, resultMatches);
             log.debug("Processed sub-batch, resultMatches size: {}", resultMatches.size());
             adjacencyMap.clear();
-            subBatch.clear(); // Release references for GC
+            subBatch.clear();
         }
 
         log.info("Completed matching, total matches: {}", resultMatches.size());
@@ -91,7 +92,6 @@ public class TopKWeightedGreedyMatchingStrategy implements MatchingStrategy {
         long maxAllowedMemory = (long) (maxMemoryMb * 1024 * 1024 * MEMORY_THRESHOLD_RATIO);
         int adjustedSize = BASE_SUB_BATCH_SIZE;
 
-        // Scale up if memory usage is low
         if (usedMemory < maxAllowedMemory * 0.3 && distinctNodes < maxDistinctNodes * 0.3) {
             adjustedSize = Math.min(BASE_SUB_BATCH_SIZE * 4, 2000);
         } else if (usedMemory < maxAllowedMemory * 0.5 && distinctNodes < maxDistinctNodes * 0.5) {

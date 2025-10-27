@@ -15,5 +15,6 @@ public interface MatchingGroupRepository extends JpaRepository<MatchingGroup, UU
     MatchingGroup findByDomainIdAndId(UUID domainId, UUID groupId);
     @Query("SELECT g.id FROM MatchingGroup g WHERE g.domainId = :domainId")
     List<UUID> findGroupIdsByDomainId(UUID domainId);
-    Optional<MatchingGroup> findByDomainIdAndGroupId(UUID domainId, String groupId);
+    @Query("SELECT g FROM MatchingGroup g WHERE g.domainId = :domainId AND g.groupId = :groupId")
+    Optional<MatchingGroup> byDomainIdAndGroupId(UUID domainId, String groupId);
 }

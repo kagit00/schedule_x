@@ -6,7 +6,6 @@ import com.shedule.x.dto.NodesCount;
 import com.shedule.x.processors.GraphPreProcessor;
 import com.shedule.x.processors.WeightFunctionResolver;
 import com.shedule.x.models.*;
-import com.shedule.x.repo.LastMatchParticipationRepository;
 import com.shedule.x.utils.basic.DefaultValuesPopulator;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
@@ -28,9 +27,9 @@ import java.util.stream.Stream;
 public class PotentialMatchServiceImpl implements PotentialMatchService {
     private static final int MIN_LIMIT = 1;
     private static final int MAX_LIMIT = 5000;
-    private static final int BATCH_DEFAULT_LIMIT = 500;
-    private static final int MAX_NODES = 1000;
-    private static final int NODE_ID_SUB_BATCH_SIZE = 500;
+    private static final int BATCH_DEFAULT_LIMIT = 1000;
+    private static final int MAX_NODES = 2000;
+    private static final int NODE_ID_SUB_BATCH_SIZE = 1000;
     private static final int HISTORY_FLUSH_INTERVAL = 5;
 
     private final NodeFetchService nodeFetchService;
@@ -40,7 +39,6 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
     private final ExecutorService batchExecutor;
     private final ExecutorService ioExecutor;
     private final ExecutorService graphExecutor;
-    private final LastMatchParticipationRepository lastMatchParticipationRepository;
     private final MatchParticipationHistoryRepository matchParticipationHistoryRepository;
     private final ConcurrentLinkedQueue<MatchParticipationHistory> historyBuffer = new ConcurrentLinkedQueue<>();
     private final AtomicInteger pageCounter = new AtomicInteger(0);
@@ -53,7 +51,6 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
             @Qualifier("matchCreationExecutorService") ExecutorService batchExecutor,
             @Qualifier("ioExecutorService") ExecutorService ioExecutor,
             @Qualifier("graphExecutorService") ExecutorService graphExecutor,
-            LastMatchParticipationRepository lastMatchParticipationRepository,
             MatchParticipationHistoryRepository matchParticipationHistoryRepository
     ) {
         this.nodeFetchService = nodeFetchService;
@@ -63,13 +60,12 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
         this.batchExecutor = batchExecutor;
         this.ioExecutor = ioExecutor;
         this.graphExecutor = graphExecutor;
-        this.lastMatchParticipationRepository = lastMatchParticipationRepository;
         this.matchParticipationHistoryRepository = matchParticipationHistoryRepository;
     }
 
     @Override
     public CompletableFuture<NodesCount> matchByGroup(MatchingRequest request, int page, String cycleId) {
-        int limit = getLimitValue(request, BATCH_DEFAULT_LIMIT);
+        int limit = getLimitValue(request);
         Pageable pageable = PageRequest.of(page, limit);
         request.setPage(page);
         return processMatching(request, pageable, limit, cycleId);
@@ -124,6 +120,7 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
                     flushHistoryIfNeeded();
                 });
     }
+
 
     private CompletableFuture<List<Node>> fetchNodesInSubBatches(List<UUID> nodeIds, UUID groupId, LocalDateTime createdAfter) {
         List<List<UUID>> subBatches = Lists.partition(nodeIds, NODE_ID_SUB_BATCH_SIZE);
@@ -199,6 +196,7 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
                 });
     }
 
+
     private void bufferMatchParticipationHistory(List<Node> nodes, UUID groupId, UUID domainId, String cycleId) {
         LocalDateTime now = DefaultValuesPopulator.getCurrentTimestamp();
         List<MatchParticipationHistory> historyEntries = nodes.stream()
@@ -211,6 +209,7 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
                 .toList();
         historyBuffer.addAll(historyEntries);
     }
+
 
     private void flushHistoryIfNeeded() {
         if (pageCounter.incrementAndGet() % HISTORY_FLUSH_INTERVAL == 0 && !historyBuffer.isEmpty()) {
@@ -229,9 +228,9 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
         }
     }
 
-    private int getLimitValue(MatchingRequest request, int defaultLimit) {
+    private int getLimitValue(MatchingRequest request) {
         return request.getLimit() != null
                 ? Math.min(Math.max(request.getLimit(), MIN_LIMIT), MAX_LIMIT)
-                : defaultLimit;
+                : PotentialMatchServiceImpl.BATCH_DEFAULT_LIMIT;
     }
 }

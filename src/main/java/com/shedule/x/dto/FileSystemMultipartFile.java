@@ -25,9 +25,8 @@ public class FileSystemMultipartFile implements MultipartFile {
         this.originalFileName = originalFileName;
         this.contentType = contentType;
 
-        if (!Files.exists(this.filePath) || !Files.isReadable(this.filePath)) {
-            throw new IllegalArgumentException("File does not exist or is not readable: " + filePath);
-        }
+        if (!Files.exists(this.filePath)) throw new IllegalArgumentException("File does not exist: " + filePath);
+        if (!Files.isReadable(this.filePath)) throw new IllegalArgumentException("File is not readable: " + filePath);
     }
 
     @Override

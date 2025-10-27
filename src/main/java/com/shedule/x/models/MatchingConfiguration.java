@@ -37,6 +37,8 @@ public class MatchingConfiguration {
     @JoinColumn(name = "algorithm_id", nullable = false)
     private MatchingAlgorithm algorithm;
 
+    @Column(name = "real_time")
+    private boolean isRealtime;
 
     @Column(name = "timeout_ms")
     private Integer timeoutMs;

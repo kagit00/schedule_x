@@ -52,15 +52,17 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
     @Value("${graph.top-k:100}")
     private int topK;
 
+    private final AtomicInteger bipartiteFuturesPending = new AtomicInteger(0);
+
     public BipartiteGraphBuilder(
             BipartiteEdgeBuilder bipartiteEdgeBuilder,
             MeterRegistry meterRegistry,
             @Qualifier("graphBuildExecutor") ExecutorService computeExecutor,
             PotentialMatchSaver matchSaver,
             GraphStore graphStore,
-            @Qualifier("persistenceExecutor") ExecutorService mappingExecutor
-    ) {
-        this.bipartiteEdgeBuilder = Objects.requireNonNull(bipartiteEdgeBuilder, "bipartiteEdgeBuilder must not be null");
+            @Qualifier("persistenceExecutor") ExecutorService mappingExecutor) {
+        this.bipartiteEdgeBuilder = Objects.requireNonNull(bipartiteEdgeBuilder,
+                "bipartiteEdgeBuilder must not be null");
         this.meterRegistry = Objects.requireNonNull(meterRegistry, "meterRegistry must not be null");
         this.computeExecutor = Objects.requireNonNull(computeExecutor, "computeExecutor must not be null");
         this.matchSaver = Objects.requireNonNull(matchSaver, "matchSaver must not be null");
@@ -68,24 +70,54 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
         this.mappingExecutor = Objects.requireNonNull(mappingExecutor, "mappingExecutor must not be null");
     }
 
+
     @PostConstruct
     private void initializeMetrics() {
-        meterRegistry.gauge("bipartite_executor_queue", computeExecutor, exec -> ((ThreadPoolExecutor) exec).getQueue().size());
-        meterRegistry.gauge("bipartite_executor_active", computeExecutor, exec -> ((ThreadPoolExecutor) exec).getActiveCount());
-        meterRegistry.gauge("bipartite_mapping_queue", mappingExecutor, exec -> ((ThreadPoolExecutor) exec).getQueue().size());
-        meterRegistry.gauge("bipartite_mapping_active", mappingExecutor, exec -> ((ThreadPoolExecutor) exec).getActiveCount());
+        if (computeExecutor instanceof ThreadPoolExecutor) {
+            meterRegistry.gauge("bipartite_executor_queue", computeExecutor,
+                    exec -> ((ThreadPoolExecutor) exec).getQueue().size());
+            meterRegistry.gauge("bipartite_executor_active", computeExecutor,
+                    exec -> ((ThreadPoolExecutor) exec).getActiveCount());
+        } else {
+            log.warn("Compute executor is not a ThreadPoolExecutor. Cannot register queue and active count gauges.");
+        }
+        if (mappingExecutor instanceof ThreadPoolExecutor) {
+            meterRegistry.gauge("bipartite_mapping_queue", mappingExecutor,
+                    exec -> ((ThreadPoolExecutor) exec).getQueue().size());
+            meterRegistry.gauge("bipartite_mapping_active", mappingExecutor,
+                    exec -> ((ThreadPoolExecutor) exec).getActiveCount());
+        } else {
+            log.warn("Mapping executor is not a ThreadPoolExecutor. Cannot register queue and active count gauges.");
+        }
+
+        meterRegistry.gauge("bipartite_futures_pending", bipartiteFuturesPending);
+        meterRegistry.counter("bipartite_futures_completed");
     }
+
 
     @Retry(name = "bipartiteBuild")
     @CircuitBreaker(name = "bipartiteBuild", fallbackMethod = "buildFallback")
     @Override
-    public CompletableFuture<GraphRecords.GraphResult> build(List<Node> leftPartition, List<Node> rightPartition, MatchingRequest request) {
+    public CompletableFuture<GraphRecords.GraphResult> build(List<Node> leftPartition, List<Node> rightPartition,
+            MatchingRequest request) {
         UUID groupId = request.getGroupId();
         if (groupId == null) {
             log.error("Invalid groupId in MatchingRequest");
             throw new IllegalArgumentException("groupId must not be null or empty");
         }
         UUID domainId = request.getDomainId();
+
+        if (leftPartition == null || rightPartition == null) {
+            log.error("Left or right partition is null for groupId={}", groupId);
+            throw new IllegalArgumentException("leftPartition and rightPartition must not be null");
+        }
+
+        if (leftPartition.isEmpty() || rightPartition.isEmpty()) {
+            log.info("Empty left or right partition for groupId={}, returning empty graph", groupId);
+            Graph graph = GraphFactory.createBipartiteGraph(leftPartition, rightPartition);
+            return CompletableFuture.completedFuture(new GraphRecords.GraphResult(graph, List.of()));
+        }
+
         int numberOfNodes = leftPartition.size() + rightPartition.size();
 
         log.info("Building bipartite graph: groupId={}, domainId={}, leftNodes={}, rightNodes={}",
@@ -98,14 +130,16 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
         processChunks(leftChunks, rightChunks, request, groupId, domainId, numberOfNodes, resultFuture);
 
         return resultFuture.whenComplete((result, throwable) -> {
-            buildTimer.stop(meterRegistry.timer("bipartite_build_total", "groupId", groupId.toString(), "numberOfNodes", String.valueOf(numberOfNodes)));
+            buildTimer.stop(meterRegistry.timer("bipartite_build_total", "groupId", groupId.toString(), "numberOfNodes",
+                    String.valueOf(numberOfNodes)));
             if (throwable != null) {
                 log.error("Graph build failed for groupId={}, numberOfNodes={}", groupId, numberOfNodes, throwable);
             }
         });
     }
 
-    public CompletableFuture<GraphRecords.GraphResult> buildFallback(List<Node> leftPartition, List<Node> rightPartition, MatchingRequest request, Throwable t) {
+    public CompletableFuture<GraphRecords.GraphResult> buildFallback(List<Node> leftPartition,
+            List<Node> rightPartition, MatchingRequest request, Throwable t) {
         log.warn("Build fallback for groupId={}", request.getGroupId(), t);
         meterRegistry.counter("bipartite_build_fallbacks", "groupId", request.getGroupId().toString()).increment();
         return CompletableFuture.completedFuture(new GraphRecords.GraphResult(
@@ -119,62 +153,104 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
             UUID groupId,
             UUID domainId,
             int numberOfNodes,
-            CompletableFuture<GraphRecords.GraphResult> resultFuture
-    ) {
+            CompletableFuture<GraphRecords.GraphResult> resultFuture) {
         Semaphore computeSemaphore = new Semaphore(maxConcurrentBatches);
-        ExecutorCompletionService<GraphRecords.ChunkResult> completionService = new ExecutorCompletionService<>(computeExecutor);
+        ExecutorCompletionService<GraphRecords.ChunkResult> completionService = new ExecutorCompletionService<>(
+                computeExecutor);
+
+        final int leftChunkCount = leftChunks.size();
+        final int rightChunkCount = rightChunks.size();
+        final long totalTasks = (long) leftChunkCount * Math.max(1, rightChunkCount);
+
+        AtomicInteger nextLeftIndex = new AtomicInteger(0);
+        AtomicInteger nextRightIndex = new AtomicInteger(0);
         AtomicInteger chunkIndex = new AtomicInteger(0);
-        int totalChunks = Math.min(leftChunks.size(), rightChunks.size());
+
+        List<Future<GraphRecords.ChunkResult>> submittedTaskFutures = Collections.synchronizedList(new ArrayList<>());
+        List<CompletableFuture<Void>> persistenceFutures = Collections.synchronizedList(new ArrayList<>());
+        List<GraphRecords.PotentialMatch> finalMatches = Collections.synchronizedList(new ArrayList<>());
 
         computeExecutor.execute(() -> {
             try {
-                Iterator<List<Node>> leftIter = leftChunks.iterator();
-                Iterator<List<Node>> rightIter = rightChunks.iterator();
-
-                for (int i = 0; i < maxConcurrentBatches && leftIter.hasNext() && rightIter.hasNext(); i++) {
+                for (int s = 0; s < Math.min(totalTasks, maxConcurrentBatches); s++) {
+                    PairIndices p = nextPair(leftChunkCount, rightChunkCount, nextLeftIndex, nextRightIndex);
+                    if (p == null)
+                        break;
                     boolean acquired = computeSemaphore.tryAcquire(CHUNK_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                     if (!acquired) {
-                        log.warn("Timed out acquiring computeSemaphore for groupId={}", groupId);
-                        break;
+                        throw new InternalServerErrorException(
+                                "Timed out acquiring compute semaphore while submitting initial chunks for groupId="
+                                        + groupId);
                     }
-                    submitChunk(completionService, leftIter.next(), rightIter.next(), request, chunkIndex.getAndIncrement(), computeSemaphore);
+                    Future<GraphRecords.ChunkResult> fut = submitChunk(completionService, leftChunks.get(p.left),
+                            rightChunks.get(p.right), request, chunkIndex.getAndIncrement(), computeSemaphore);
+                    submittedTaskFutures.add(fut);
+                    bipartiteFuturesPending.incrementAndGet();
                 }
 
-                List<GraphRecords.PotentialMatch> finalMatches = Collections.synchronizedList(new ArrayList<>());
-                for (int processed = 0; processed < totalChunks; processed++) {
-                    if (Thread.interrupted()) {
+                long processed = 0;
+                while (processed < totalTasks) {
+                    if (Thread.currentThread().isInterrupted()) {
                         log.warn("Chunk processing interrupted for groupId={}", groupId);
                         throw new InterruptedException("Chunk processing interrupted");
                     }
 
-                    GraphRecords.ChunkResult result = completionService.poll(300, TimeUnit.SECONDS).get();
+                    Future<GraphRecords.ChunkResult> chunkFuture = completionService.take();
+                    submittedTaskFutures.remove(chunkFuture);
+                    bipartiteFuturesPending.decrementAndGet();
+                    GraphRecords.ChunkResult result = null;
+                    try {
+                        result = chunkFuture.get();
+                    } catch (ExecutionException ee) {
+                        throw ee;
+                    }
+                    processed++;
 
-                    meterRegistry.timer("bipartite_chunk_compute", "groupId", groupId.toString(), "numberOfNodes", String.valueOf(numberOfNodes))
+                    meterRegistry
+                            .timer("bipartite_chunk_compute", "groupId", groupId.toString(), "numberOfNodes",
+                                    String.valueOf(numberOfNodes))
                             .record(Duration.between(result.getStartTime(), Instant.now()));
 
-                    if (leftIter.hasNext() && rightIter.hasNext()) {
+                    PairIndices next = nextPair(leftChunkCount, rightChunkCount, nextLeftIndex, nextRightIndex);
+                    if (next != null) {
                         boolean acquired = computeSemaphore.tryAcquire(CHUNK_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                         if (!acquired) {
-                            log.warn("Timed out acquiring computeSemaphore for groupId={} during re-submission", groupId);
-                            break;
+                            throw new InternalServerErrorException(
+                                    "Timed out acquiring compute semaphore while submitting follow-up chunks for groupId="
+                                            + groupId);
                         }
-                        submitChunk(completionService, leftIter.next(), rightIter.next(), request, chunkIndex.getAndIncrement(), computeSemaphore);
+                        Future<GraphRecords.ChunkResult> fut = submitChunk(completionService, leftChunks.get(next.left),
+                                rightChunks.get(next.right), request, chunkIndex.getAndIncrement(), computeSemaphore);
+                        submittedTaskFutures.add(fut);
+                        bipartiteFuturesPending.incrementAndGet();
                     }
 
-                    // Persist matches
-                    graphStore.persistEdgesAsync(result.getMatches(), groupId, result.getChunkIndex())
+                    GraphRecords.ChunkResult finalResult = result;
+                    CompletableFuture<Void> persistFuture = graphStore
+                            .persistEdgesAsync(result.getMatches(), groupId, result.getChunkIndex())
                             .orTimeout(CHUNK_TIMEOUT_SECONDS, TimeUnit.SECONDS)
                             .exceptionally(e -> {
-                                log.error("Persist failed for groupId={}, chunkIndex={}", groupId, result.getChunkIndex(), e);
-                                meterRegistry.counter("bipartite_persist_errors", "groupId", groupId.toString()).increment();
+                                log.error("Persist failed for groupId={}, chunkIndex={}", groupId,
+                                        finalResult.getChunkIndex(), e);
+                                meterRegistry.counter("bipartite_persist_errors", "groupId", groupId.toString())
+                                        .increment();
                                 return null;
                             });
+                    persistenceFutures.add(persistFuture);
+
+                    meterRegistry.counter("bipartite_futures_completed").increment();
                 }
+
+                long dynamicTimeoutSeconds = CHUNK_TIMEOUT_SECONDS
+                        * Math.max(2, (int) ((totalTasks + maxConcurrentBatches - 1) / maxConcurrentBatches));
+                log.info("Waiting for {} persistence operations to complete for groupId={} with timeout {}s",
+                        persistenceFutures.size(), groupId, dynamicTimeoutSeconds);
+                CompletableFuture.allOf(persistenceFutures.toArray(new CompletableFuture[0]))
+                        .get(dynamicTimeoutSeconds, TimeUnit.SECONDS);
 
                 Graph graph = GraphFactory.createBipartiteGraph(
                         leftChunks.stream().flatMap(List::stream).collect(Collectors.toList()),
-                        rightChunks.stream().flatMap(List::stream).collect(Collectors.toList())
-                );
+                        rightChunks.stream().flatMap(List::stream).collect(Collectors.toList()));
 
                 try (AutoCloseableStream<Edge> edgeStream = graphStore.streamEdges(domainId, groupId)) {
                     edgeStream.forEach(edge -> {
@@ -185,46 +261,69 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
 
                 graphStore.cleanEdges(groupId);
 
-                meterRegistry.counter("matches_generated_total", "groupId", groupId.toString(), "numberOfNodes", String.valueOf(numberOfNodes), "mode", "bipartite")
+                meterRegistry
+                        .counter("matches_generated_total", "groupId", groupId.toString(), "numberOfNodes",
+                                String.valueOf(numberOfNodes), "mode", "bipartite")
                         .increment(finalMatches.size());
 
                 resultFuture.complete(new GraphRecords.GraphResult(graph, finalMatches));
-
-            } catch (Exception e) {
+            } catch (Throwable e) {
+                submittedTaskFutures.forEach(f -> {
+                    try {
+                        f.cancel(true);
+                    } catch (Exception ex) {
+                        log.debug("Failed to cancel task future", ex);
+                    }
+                });
                 handleProcessingError(groupId, numberOfNodes, resultFuture, e);
-            } finally {
-                while (computeSemaphore.availablePermits() < maxConcurrentBatches) {
-                    computeSemaphore.release();
-                }
             }
         });
     }
 
-    private GraphRecords.PotentialMatch convertToPotentialMatch(Edge edge, UUID groupId, UUID domainId) {
-        return new GraphRecords.PotentialMatch(
-                edge.getFromNode().getReferenceId(),
-                edge.getToNode().getReferenceId(),
-                edge.getWeight(),
-                groupId,
-                domainId
-        );
+    private static class PairIndices {
+        final int left;
+        final int right;
+
+        PairIndices(int l, int r) {
+            this.left = l;
+            this.right = r;
+        }
     }
 
-    private void submitChunk(
+    private PairIndices nextPair(int leftChunkCount, int rightChunkCount, AtomicInteger nextLeftIndex,
+            AtomicInteger nextRightIndex) {
+        synchronized (nextLeftIndex) {
+            int i = nextLeftIndex.get();
+            int j = nextRightIndex.get();
+            if (i >= leftChunkCount)
+                return null;
+            PairIndices p = new PairIndices(i, j);
+            int newJ = j + 1;
+            int newI = i;
+            if (newJ >= rightChunkCount) {
+                newJ = 0;
+                newI = i + 1;
+            }
+            nextRightIndex.set(newJ);
+            nextLeftIndex.set(newI);
+            return p;
+        }
+    }
+
+    private Future<GraphRecords.ChunkResult> submitChunk(
             ExecutorCompletionService<GraphRecords.ChunkResult> completionService,
             List<Node> leftBatch,
             List<Node> rightBatch,
             MatchingRequest request,
             int chunkIndex,
-            Semaphore computeSemaphore
-    ) {
+            Semaphore computeSemaphore) {
         if (leftBatch.isEmpty() || rightBatch.isEmpty()) {
             log.debug("Skipping empty chunk for groupId={}, chunkIndex={}", request.getGroupId(), chunkIndex);
             computeSemaphore.release();
-            return;
+            return CompletableFuture.completedFuture(null);
         }
 
-        completionService.submit(() -> {
+        Future<GraphRecords.ChunkResult> future = completionService.submit(() -> {
             try {
                 return processBipartiteChunk(leftBatch, rightBatch, request, chunkIndex)
                         .orTimeout(CHUNK_TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -233,15 +332,26 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
                 computeSemaphore.release();
             }
         });
-        meterRegistry.counter("bipartite_futures_pending", "groupId", request.getGroupId().toString()).increment();
+        bipartiteFuturesPending.incrementAndGet();
+        return future;
     }
+
+
+    private GraphRecords.PotentialMatch convertToPotentialMatch(Edge edge, UUID groupId, UUID domainId) {
+        return new GraphRecords.PotentialMatch(
+                edge.getFromNode().getReferenceId(),
+                edge.getToNode().getReferenceId(),
+                edge.getWeight(),
+                groupId,
+                domainId);
+    }
+
 
     private CompletableFuture<GraphRecords.ChunkResult> processBipartiteChunk(
             List<Node> leftBatch,
             List<Node> rightBatch,
             MatchingRequest request,
-            int chunkIndex
-    ) {
+            int chunkIndex) {
         Instant start = Instant.now();
         List<GraphRecords.PotentialMatch> matches = new ArrayList<>();
         UUID groupId = request.getGroupId();
@@ -251,23 +361,33 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
             matches.addAll(leftBatch.stream()
                     .flatMap(left -> rightBatch.stream()
                             .map(right -> new GraphRecords.PotentialMatch(
-                                    left.getReferenceId(), right.getReferenceId(), 1.0, groupId, request.getDomainId())))
+                                    left.getReferenceId(), right.getReferenceId(), 1.0, groupId,
+                                    request.getDomainId())))
                     .toList());
         } else {
             Map<String, Object> context = Map.of("executor", computeExecutor);
-            bipartiteEdgeBuilder.processBatch(leftBatch, rightBatch, matches, ConcurrentHashMap.newKeySet(), groupId, request.getDomainId(), context);
+            bipartiteEdgeBuilder.processBatch(leftBatch, rightBatch, matches, ConcurrentHashMap.newKeySet(), groupId,
+                    request.getDomainId(), context);
         }
 
         meterRegistry.counter("bipartite_matches_generated", "groupId", groupId.toString()).increment(matches.size());
         return CompletableFuture.completedFuture(new GraphRecords.ChunkResult(Set.of(), matches, chunkIndex, start));
     }
 
-    private void handleProcessingError(UUID groupId, int numberOfNodes, CompletableFuture<GraphRecords.GraphResult> resultFuture, Throwable e) {
+
+    private void handleProcessingError(UUID groupId, int numberOfNodes,
+            CompletableFuture<GraphRecords.GraphResult> resultFuture, Throwable e) {
         log.error("Graph processing failed for groupId={}, numberOfNodes={}", groupId, numberOfNodes, e);
-        meterRegistry.counter("bipartite_build_errors", "groupId", groupId.toString(), "numberOfNodes", String.valueOf(numberOfNodes)).increment();
+        meterRegistry.counter("bipartite_build_errors", "groupId", groupId.toString(), "numberOfNodes",
+                String.valueOf(numberOfNodes)).increment();
         cleanup(groupId);
-        resultFuture.completeExceptionally(new InternalServerErrorException("Graph build failed for groupId=" + groupId));
+        if (e instanceof InterruptedException) {
+            Thread.currentThread().interrupt();
+        }
+        resultFuture.completeExceptionally(
+                new InternalServerErrorException("Graph build failed for groupId=" + groupId + ": " + e.getMessage()));
     }
+
 
     private void cleanup(UUID groupId) {
         try {
@@ -281,6 +401,7 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
             throw new InternalServerErrorException("Cleanup failed");
         }
     }
+
 
     @PreDestroy
     public void shutdown() {

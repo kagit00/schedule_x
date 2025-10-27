@@ -120,6 +120,7 @@ public class PotentialMatchStreamingService {
     @PersistenceContext
     private EntityManager entityManager;
 
+
     @Transactional
     public Stream<PotentialMatchEntity> streamMatches(UUID groupId, UUID domainId, int offset, int limit) {
         return entityManager.createQuery(QueryUtils.getPotentialMatchesStreamingSQL(), PotentialMatchEntity.class)

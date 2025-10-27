@@ -17,15 +17,15 @@ public class MetadataBasedPartitioningStrategy implements PartitionStrategy {
 
     @Override
     public Pair<Stream<Node>, Stream<Node>> partition(Stream<Node> nodes, String key, String leftValue, String rightValue) {
-        List<Node> nodeList = nodes.collect(Collectors.toList());
+        List<Node> nodeList = nodes.toList();
 
         List<Node> left = nodeList.stream()
                 .filter(node -> leftValue.equals(node.getMetaData().getOrDefault(key, "")))
-                .collect(Collectors.toList());
+                .toList();
 
         List<Node> right = nodeList.stream()
                 .filter(node -> rightValue.equals(node.getMetaData().getOrDefault(key, "")))
-                .collect(Collectors.toList());
+                .toList();
 
         return Pair.of(left.stream(), right.stream());
     }

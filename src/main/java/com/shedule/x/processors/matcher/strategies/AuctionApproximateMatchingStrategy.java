@@ -53,7 +53,6 @@ public class AuctionApproximateMatchingStrategy implements MatchingStrategy {
                 continue;
             }
 
-            // Existing validation for score and null fields
             if (pm.getReferenceId() == null || pm.getMatchedReferenceId() == null ||
                     Double.isNaN(pm.getCompatibilityScore()) || pm.getCompatibilityScore() < 0 || pm.getCompatibilityScore() > 1.0) {
                 log.warn("Skipping invalid PotentialMatch (score out of [0, 1] or null fields) after group/domain filter: {} for groupId: {}", pm, groupId);
@@ -68,7 +67,6 @@ public class AuctionApproximateMatchingStrategy implements MatchingStrategy {
             return Collections.emptyMap();
         }
 
-        // Deduplicate and sort matches for each left node
         leftToMatches.replaceAll((leftId, matches) -> {
             Map<String, PotentialMatch> deduped = matches.stream()
                     .collect(Collectors.toMap(
@@ -100,7 +98,7 @@ public class AuctionApproximateMatchingStrategy implements MatchingStrategy {
 
             while (iterator.hasNext()) {
                 String leftId = iterator.next();
-                List<PotentialMatch> matches = leftToMatches.get(leftId); // get() is safe here as leftId comes from leftToMatches.keySet()
+                List<PotentialMatch> matches = leftToMatches.get(leftId);
 
                 PotentialMatch bestMatchForLeft = findBestMatch(matches, prices, reverseAssignments, leftId,
                         assignments, bestMatches, currentIterationLosers);
@@ -132,7 +130,7 @@ public class AuctionApproximateMatchingStrategy implements MatchingStrategy {
 
         Set<String> trulyUnmatchedAfterAuction = new HashSet<>(unmatchedLefts);
         for (String leftId : trulyUnmatchedAfterAuction) {
-            List<PotentialMatch> matches = leftToMatches.get(leftId); // get() is safe here
+            List<PotentialMatch> matches = leftToMatches.get(leftId);
 
             PotentialMatch bestFallbackMatch = matches.stream()
                     .filter(pm -> !reverseAssignments.containsKey(pm.getMatchedReferenceId()))

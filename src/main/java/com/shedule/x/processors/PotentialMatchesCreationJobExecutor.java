@@ -10,6 +10,10 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import java.util.UUID;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 @Slf4j
 @Component
@@ -44,10 +48,12 @@ public class PotentialMatchesCreationJobExecutor {
         this.maxConcurrentPages = maxConcurrentPages;
     }
 
+
     public CompletableFuture<Void> processGroup(UUID groupId, UUID domainId, String cycleId) {
         Semaphore pageSemaphore = pageSemaphores.computeIfAbsent(groupId, g -> new Semaphore(maxConcurrentPages, true));
 
         return CompletableFuture.runAsync(() -> {
+            AtomicBoolean pageAcquired = new AtomicBoolean(false);
             long totalProcessed = 0;
             int zeroNodeCount = 0;
             int maxPages = (int) Math.ceil((double) nodesLimitForFullJob / batchLimit);
@@ -58,6 +64,7 @@ public class PotentialMatchesCreationJobExecutor {
                     meterRegistry.counter("semaphore.acquire.timeout", "groupId", groupId.toString(), "cycleId", cycleId).increment();
                     return;
                 }
+                pageAcquired.set(true);
 
                 for (int page = 0; page < maxPages; page++) {
                     log.info("Processing groupId={}, cycleId={}, page={}, permits left={}, activeThreads={}",
@@ -92,17 +99,28 @@ public class PotentialMatchesCreationJobExecutor {
                 }
 
                 log.info("Group finished: groupId={}, cycleId={}, totalProcessed={}", groupId, cycleId, totalProcessed);
+
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 log.error("Interrupted: groupId={}, cycleId={}: {}", groupId, cycleId, e.getMessage());
+
             } catch (Exception e) {
                 log.error("Error processing groupId={}, cycleId={}: {}", groupId, cycleId, e.getMessage(), e);
                 meterRegistry.counter("group.processing.errors", "groupId", groupId.toString(), "domainId", domainId.toString(), "cycleId", cycleId).increment();
-            } finally {
-                pageSemaphore.release();
-                log.debug("Released permit: groupId={}, cycleId={}, available={}", groupId, cycleId, pageSemaphore.availablePermits());
 
-                if (pageSemaphore.availablePermits() == maxConcurrentPages) {
+            } finally {
+                if (pageAcquired.get()) {
+                    try {
+                        pageSemaphore.release();
+                        log.debug("Released permit: groupId={}, cycleId={}, available={}", groupId, cycleId, pageSemaphore.availablePermits());
+                    } catch (Exception ex) {
+                        log.error("Failed to release pageSemaphore for groupId={}: {}", groupId, ex.getMessage(), ex);
+                    }
+                } else {
+                    log.debug("No page permit to release for groupId={}, cycleId={}", groupId, cycleId);
+                }
+
+                if (pageSemaphore.availablePermits() == maxConcurrentPages && !pageSemaphore.hasQueuedThreads()) {
                     pageSemaphores.remove(groupId, pageSemaphore);
                 }
             }

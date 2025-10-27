@@ -13,6 +13,8 @@ import com.shedule.x.utils.basic.DefaultValuesPopulator;
 import com.shedule.x.utils.media.csv.ValueSanitizer;
 import lombok.experimental.UtilityClass;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.web.multipart.MultipartFile;
+
 import java.util.*;
 
 
@@ -156,6 +158,10 @@ public final class GraphRequestFactory {
         return new FileSystemMultipartFile(payload.getFilePath(), payload.getFileName(), payload.getContentType());
     }
 
+    public static RemoteMultipartFile fromRemotePayload(NodeExchange payload) {
+        return new RemoteMultipartFile(payload.getFilePath(), payload.getFileName(), payload.getContentType());
+    }
+
     public static PotentialMatchEntity convertToPotentialMatch(GraphRecords.PotentialMatch match) {
         return PotentialMatchEntity.builder()
                 .groupId(match.getGroupId())
@@ -200,6 +206,13 @@ public final class GraphRequestFactory {
                 .flushIntervalSeconds(queueManagerConfig.getFlushIntervalSeconds()).maxFinalBatchSize(queueManagerConfig.getMaxFinalBatchSize())
                 .drainWarningThreshold(queueManagerConfig.getDrainWarningThreshold()).domainId(domainId)
                 .build();
+    }
+
+    public static MultipartFile resolvePayload(NodeExchange payload) {
+        String path = payload.getFilePath();
+        if (path == null) throw new IllegalArgumentException("File path cannot be null in payload");
+        if (path.startsWith("http://") || path.startsWith("https://")) return fromRemotePayload(payload);
+        return fromPayload(payload);
     }
 
 }

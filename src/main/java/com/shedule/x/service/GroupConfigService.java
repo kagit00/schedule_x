@@ -18,7 +18,7 @@ public class GroupConfigService {
 
     @Cacheable(value = "groupCache", key = "'group_id' + '_' + #groupId + 'domain_id_' + #domainId")
     public MatchingGroup getGroupConfig(String groupId, UUID domainId) {
-        return groupConfigRepository.findByDomainIdAndGroupId(domainId, groupId).orElseThrow(
+        return groupConfigRepository.byDomainIdAndGroupId(domainId, groupId).orElseThrow(
                 () -> new BadRequestException("No group against groupId: " + groupId)
         );
     }

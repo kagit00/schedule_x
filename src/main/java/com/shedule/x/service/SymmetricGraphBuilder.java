@@ -72,10 +72,10 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
             PotentialMatchComputationProcessor potentialMatchComputationProcessor,
             MeterRegistry meterRegistry,
             @Qualifier("graphBuildExecutor") ExecutorService computeExecutor,
-            @Qualifier("persistenceExecutor") ExecutorService persistenceExecutor
-    ) {
+            @Qualifier("persistenceExecutor") ExecutorService persistenceExecutor) {
         this.strategyFactory = Objects.requireNonNull(strategyFactory, "strategyFactory must not be null");
-        this.potentialMatchComputationProcessor = Objects.requireNonNull(potentialMatchComputationProcessor, "matchProcessor must not be null");
+        this.potentialMatchComputationProcessor = Objects.requireNonNull(potentialMatchComputationProcessor,
+                "matchProcessor must not be null");
         this.meterRegistry = Objects.requireNonNull(meterRegistry, "meterRegistry must not be null");
         this.computeExecutor = Objects.requireNonNull(computeExecutor, "computeExecutor must not be null");
         this.persistenceExecutor = Objects.requireNonNull(persistenceExecutor, "persistenceExecutor must not be null");
@@ -85,10 +85,14 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
     private void initialize() {
         this.computeSemaphore = new Semaphore(maxConcurrentBatches, true);
         this.mappingSemaphore = new Semaphore(maxConcurrentMappings, true);
-        meterRegistry.gauge("graph_builder_compute_queue", computeExecutor, exec -> ((ThreadPoolExecutor) exec).getQueue().size());
-        meterRegistry.gauge("graph_builder_compute_active", computeExecutor, exec -> ((ThreadPoolExecutor) exec).getActiveCount());
-        meterRegistry.gauge("graph_builder_persistence_queue", persistenceExecutor, exec -> ((ThreadPoolExecutor) exec).getQueue().size());
-        meterRegistry.gauge("graph_builder_persistence_active", persistenceExecutor, exec -> ((ThreadPoolExecutor) exec).getActiveCount());
+        meterRegistry.gauge("graph_builder_compute_queue", computeExecutor,
+                exec -> ((ThreadPoolExecutor) exec).getQueue().size());
+        meterRegistry.gauge("graph_builder_compute_active", computeExecutor,
+                exec -> ((ThreadPoolExecutor) exec).getActiveCount());
+        meterRegistry.gauge("graph_builder_persistence_queue", persistenceExecutor,
+                exec -> ((ThreadPoolExecutor) exec).getQueue().size());
+        meterRegistry.gauge("graph_builder_persistence_active", persistenceExecutor,
+                exec -> ((ThreadPoolExecutor) exec).getActiveCount());
     }
 
     @PreDestroy
@@ -114,8 +118,7 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
             SymmetricEdgeBuildingStrategy strategy,
             MatchingRequest request,
             int chunkIndex,
-            String processingCycleId
-    ) {
+            String processingCycleId) {
         List<GraphRecords.PotentialMatch> matches = new ArrayList<>();
         Instant startTime = Instant.now();
 
@@ -130,14 +133,19 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
 
         Instant rocksStart = Instant.now();
         return matchesFuture.thenComposeAsync(m -> {
-                    GraphRecords.ChunkResult chunkResult = new GraphRecords.ChunkResult(Collections.emptySet(), m, chunkIndex, startTime);
-                    return potentialMatchComputationProcessor.processChunkMatches(chunkResult, request.getGroupId(), request.getDomainId(), processingCycleId, matchBatchSize)
-                            .thenApply(v -> {
-                                meterRegistry.timer("graph_builder_rocksdb_persist", "groupId", request.getGroupId().toString(), "processingCycleId", processingCycleId)
-                                        .record(Duration.between(rocksStart, Instant.now()));
-                                return chunkResult;
-                            });
-                }, persistenceExecutor)
+            GraphRecords.ChunkResult chunkResult = new GraphRecords.ChunkResult(Collections.emptySet(), m, chunkIndex,
+                    startTime);
+            return potentialMatchComputationProcessor
+                    .processChunkMatches(chunkResult, request.getGroupId(), request.getDomainId(), processingCycleId,
+                            matchBatchSize)
+                    .thenApply(v -> {
+                        meterRegistry
+                                .timer("graph_builder_rocksdb_persist", "groupId", request.getGroupId().toString(),
+                                        "processingCycleId", processingCycleId)
+                                .record(Duration.between(rocksStart, Instant.now()));
+                        return chunkResult;
+                    });
+        }, persistenceExecutor)
                 .exceptionally(e -> {
                     log.error("Chunk {} failed for groupId={}, processingCycleId={}: {}",
                             chunkIndex, request.getGroupId(), processingCycleId, e.getMessage());
@@ -150,8 +158,7 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
             SymmetricEdgeBuildingStrategy strategy,
             MatchingRequest request,
             int chunkIndex,
-            String processingCycleId
-    ) {
+            String processingCycleId) {
         return retryProcessChunk(nodeChunk, strategy, request, chunkIndex, processingCycleId, 0);
     }
 
@@ -161,35 +168,43 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
             MatchingRequest request,
             int chunkIndex,
             String processingCycleId,
-            int attempts
-    ) {
+            int attempts) {
         if (attempts >= chunkRetryMaxAttempts) {
             log.warn("Chunk {} for groupId={} failed after {} retries, skipping",
                     chunkIndex, request.getGroupId(), chunkRetryMaxAttempts);
-            meterRegistry.counter("chunk_processing_skipped", "groupId", request.getGroupId().toString(), "chunkIndex", String.valueOf(chunkIndex)).increment();
-            return CompletableFuture.completedFuture(new GraphRecords.ChunkResult(Collections.emptySet(), Collections.emptyList(), chunkIndex, Instant.now()));
+            meterRegistry.counter("chunk_processing_skipped", "groupId", request.getGroupId().toString(), "chunkIndex",
+                    String.valueOf(chunkIndex)).increment();
+            return CompletableFuture.completedFuture(new GraphRecords.ChunkResult(Collections.emptySet(),
+                    Collections.emptyList(), chunkIndex, Instant.now()));
         }
 
         return processChunk(nodeChunk, strategy, request, chunkIndex, processingCycleId)
                 .orTimeout(30, TimeUnit.SECONDS)
                 .exceptionallyCompose(e -> {
-                    log.warn("Chunk {} failed for groupId={}, processingCycleId={} (attempt {}/{}), retrying. Error: {}",
-                            chunkIndex, request.getGroupId(), processingCycleId, attempts + 1, chunkRetryMaxAttempts, e.getMessage());
-                    meterRegistry.counter("chunk_retry_attempts", "groupId", request.getGroupId().toString()).increment();
+                    log.warn(
+                            "Chunk {} failed for groupId={}, processingCycleId={} (attempt {}/{}), retrying. Error: {}",
+                            chunkIndex, request.getGroupId(), processingCycleId, attempts + 1, chunkRetryMaxAttempts,
+                            e.getMessage());
+                    meterRegistry.counter("chunk_retry_attempts", "groupId", request.getGroupId().toString())
+                            .increment();
                     long delaySeconds = (long) Math.pow(2, attempts) * chunkRetryInitialBackoffSeconds;
-                    return CompletableFuture.supplyAsync(() -> null, CompletableFuture.delayedExecutor(delaySeconds, TimeUnit.SECONDS))
-                            .thenCompose(__ -> retryProcessChunk(nodeChunk, strategy, request, chunkIndex, processingCycleId, attempts + 1));
+                    return CompletableFuture
+                            .supplyAsync(() -> null, CompletableFuture.delayedExecutor(delaySeconds, TimeUnit.SECONDS))
+                            .thenCompose(__ -> retryProcessChunk(nodeChunk, strategy, request, chunkIndex,
+                                    processingCycleId, attempts + 1));
                 });
     }
 
     private void handleProcessingError(UUID groupId, int numberOfChunks, String processingCycleId, Throwable e) {
         log.error("Graph processing failed for groupId={}, newChunks={}, processingCycleId={}: {}",
                 groupId, numberOfChunks, processingCycleId, e.getMessage());
-        meterRegistry.counter("graph_build_errors", "groupId", groupId.toString(), "newChunks", String.valueOf(numberOfChunks),
+        meterRegistry.counter("graph_build_errors", "groupId", groupId.toString(), "newChunks",
+                String.valueOf(numberOfChunks),
                 "processingCycleId", processingCycleId, "mode", "incremental").increment();
         cleanup(groupId);
         throw new CompletionException("Graph build failed for groupId=" + groupId, e);
     }
+
 
     @Override
     public CompletableFuture<GraphRecords.GraphResult> build(List<Node> newNodes, MatchingRequest request) {
@@ -207,7 +222,8 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
         }
 
         Timer.Sample buildTimer = Timer.start(meterRegistry);
-        SymmetricEdgeBuildingStrategy strategy = strategyFactory.createStrategy(request.getWeightFunctionKey(), newNodes);
+        SymmetricEdgeBuildingStrategy strategy = strategyFactory.createStrategy(request.getWeightFunctionKey(),
+                newNodes);
 
         CompletableFuture<Void> indexFuture = strategy.indexNodes(newNodes, page);
 
@@ -220,7 +236,8 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
 
         indexFuture.thenRunAsync(() -> {
             try {
-                processNodeChunks(newNodeChunks, strategy, request, groupId, domainId, processingCycleId, graphResultFuture);
+                processNodeChunks(newNodeChunks, strategy, request, groupId, domainId, processingCycleId,
+                        graphResultFuture);
             } catch (Exception e) {
                 handleProcessingError(groupId, newNodeChunks.size(), processingCycleId, e);
             }
@@ -228,13 +245,15 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
             log.error("Graph build failed for groupId={}, page={}, newChunks={}, processingCycleId={}: {}",
                     groupId, page, newNodeChunks.size(), processingCycleId, throwable.getMessage());
             if (!graphResultFuture.isDone()) {
-                graphResultFuture.completeExceptionally(new InternalServerErrorException("Graph build failed for groupId=" + groupId));
+                graphResultFuture.completeExceptionally(
+                        new InternalServerErrorException("Graph build failed for groupId=" + groupId));
             }
             return null;
         });
 
         return graphResultFuture.whenComplete((result, throwable) -> {
-            buildTimer.stop(meterRegistry.timer("graph_builder_total", "groupId", groupId.toString(), "processingCycleId", processingCycleId,
+            buildTimer.stop(meterRegistry.timer("graph_builder_total", "groupId", groupId.toString(),
+                    "processingCycleId", processingCycleId,
                     "status", throwable == null ? "success" : "failure"));
             if (throwable != null) {
                 cleanup(groupId);
@@ -255,9 +274,12 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
         }
     }
 
-    private void finalizeGraph(UUID groupId, UUID domainId, String processingCycleId, CompletableFuture<GraphRecords.GraphResult> graphResultFuture) {
+
+    private void finalizeGraph(UUID groupId, UUID domainId, String processingCycleId,
+            CompletableFuture<GraphRecords.GraphResult> graphResultFuture) {
         try {
-            AutoCloseableStream<Edge> edgeStream = potentialMatchComputationProcessor.streamEdges(groupId, domainId, processingCycleId, topK);
+            AutoCloseableStream<Edge> edgeStream = potentialMatchComputationProcessor.streamEdges(groupId, domainId,
+                    processingCycleId, topK);
             long edgeCount = edgeStream.getStream().count();
             log.info("Edge stream count for groupId={}: {}", groupId, edgeCount);
             if (edgeCount == 0) {
@@ -267,9 +289,11 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
             edgeStream = potentialMatchComputationProcessor.streamEdges(groupId, domainId, processingCycleId, topK);
             potentialMatchComputationProcessor.saveFinalMatches(groupId, domainId, processingCycleId, edgeStream, topK)
                     .thenRun(() -> {
-                        long finalMatchCount = potentialMatchComputationProcessor.getFinalMatchCount(groupId, domainId, processingCycleId);
+                        long finalMatchCount = potentialMatchComputationProcessor.getFinalMatchCount(groupId, domainId,
+                                processingCycleId);
                         log.info("Completed graph build: groupId={}, totalMatches={}", groupId, finalMatchCount);
-                        meterRegistry.counter("matches_generated_total", "groupId", groupId.toString()).increment(finalMatchCount);
+                        meterRegistry.counter("matches_generated_total", "groupId", groupId.toString())
+                                .increment(finalMatchCount);
                         potentialMatchComputationProcessor.cleanup(groupId); // Moved after getFinalMatchCount
                         if (!graphResultFuture.isDone()) {
                             graphResultFuture.complete(new GraphRecords.GraphResult(null, Collections.emptyList()));
@@ -285,6 +309,7 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
         }
     }
 
+
     private void processNodeChunks(
             List<List<Node>> newNodeChunks,
             SymmetricEdgeBuildingStrategy strategy,
@@ -292,17 +317,18 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
             UUID groupId,
             UUID domainId,
             String processingCycleId,
-            CompletableFuture<GraphRecords.GraphResult> graphResultFuture
-    ) {
+            CompletableFuture<GraphRecords.GraphResult> graphResultFuture) {
         List<CompletableFuture<Void>> mappingFutures = Collections.synchronizedList(new ArrayList<>());
         BlockingQueue<GraphRecords.ChunkResult> chunkResults = new LinkedBlockingQueue<>(newNodeChunks.size());
         AtomicInteger chunkIndex = new AtomicInteger(0);
         int totalChunks = newNodeChunks.size();
 
-        ExecutorCompletionService<GraphRecords.ChunkResult> computeService = new ExecutorCompletionService<>(computeExecutor);
+        ExecutorCompletionService<GraphRecords.ChunkResult> computeService = new ExecutorCompletionService<>(
+                computeExecutor);
 
         for (int i = 0; i < Math.min(maxConcurrentBatches, totalChunks); i++) {
-            submitComputeTask(computeService, newNodeChunks, strategy, request, chunkIndex.getAndIncrement(), groupId, processingCycleId, chunkResults);
+            submitComputeTask(computeService, newNodeChunks, strategy, request, chunkIndex.getAndIncrement(), groupId,
+                    processingCycleId, chunkResults);
         }
 
         CompletableFuture<Void> computeAndMap = CompletableFuture.runAsync(() -> {
@@ -319,7 +345,8 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
                     }
 
                     if (chunkIndex.get() < totalChunks) {
-                        submitComputeTask(computeService, newNodeChunks, strategy, request, chunkIndex.getAndIncrement(), groupId, processingCycleId, chunkResults);
+                        submitComputeTask(computeService, newNodeChunks, strategy, request,
+                                chunkIndex.getAndIncrement(), groupId, processingCycleId, chunkResults);
                     }
                 } catch (InterruptedException e) {
                     log.error("Interrupted processing chunks for groupId={}", groupId);
@@ -348,13 +375,16 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
 
         computeAndMap.thenCombine(mappingPipeline, (v1, v2) -> null)
                 .thenCompose(v -> CompletableFuture.allOf(mappingFutures.toArray(new CompletableFuture[0])))
-                .thenCompose(v -> potentialMatchComputationProcessor.savePendingMatches(groupId, domainId, processingCycleId, matchBatchSize))
-                .thenRunAsync(() -> finalizeGraph(groupId, domainId, processingCycleId, graphResultFuture), persistenceExecutor)
+                .thenCompose(v -> potentialMatchComputationProcessor.savePendingMatches(groupId, domainId,
+                        processingCycleId, matchBatchSize))
+                .thenRunAsync(() -> finalizeGraph(groupId, domainId, processingCycleId, graphResultFuture),
+                        persistenceExecutor)
                 .exceptionally(e -> {
                     handleProcessingError(groupId, totalChunks, processingCycleId, e);
                     return null;
                 });
     }
+
 
     private void submitComputeTask(
             ExecutorCompletionService<GraphRecords.ChunkResult> computeService,
@@ -364,8 +394,7 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
             int chunkIndex,
             UUID groupId,
             String processingCycleId,
-            BlockingQueue<GraphRecords.ChunkResult> chunkResults
-    ) {
+            BlockingQueue<GraphRecords.ChunkResult> chunkResults) {
         if (shutdownInitiated) {
             log.warn("Skipping chunk {} for groupId={} due to shutdown", chunkIndex, groupId);
             return;
@@ -381,14 +410,16 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
             computeService.submit(() -> {
                 try {
                     CompletableFuture<GraphRecords.ChunkResult> future = processChunkWithRetry(
-                            newNodeChunks.get(chunkIndex), strategy, request, chunkIndex, processingCycleId
-                    ).orTimeout(chunkProcessingTimeoutSeconds, TimeUnit.SECONDS);
+                            newNodeChunks.get(chunkIndex), strategy, request, chunkIndex, processingCycleId)
+                            .orTimeout(chunkProcessingTimeoutSeconds, TimeUnit.SECONDS);
 
                     CompletableFuture<GraphRecords.ChunkResult> resultFuture = new CompletableFuture<>();
 
                     future.thenAcceptAsync(r -> {
                         if (chunkCounter.incrementAndGet() % 100 == 0 && r != null) {
-                            meterRegistry.timer("graph_builder_chunk_compute", "groupId", groupId.toString(), "processingCycleId", processingCycleId)
+                            meterRegistry
+                                    .timer("graph_builder_chunk_compute", "groupId", groupId.toString(),
+                                            "processingCycleId", processingCycleId)
                                     .record(Duration.between(r.getStartTime(), Instant.now()));
                         }
                         resultFuture.complete(r);
@@ -405,7 +436,8 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
                 }
             });
         } catch (InterruptedException e) {
-            log.error("Interrupted while trying to acquire computeSemaphore for chunk {} in groupId={}", chunkIndex, groupId);
+            log.error("Interrupted while trying to acquire computeSemaphore for chunk {} in groupId={}", chunkIndex,
+                    groupId);
             Thread.currentThread().interrupt();
         }
     }
@@ -414,8 +446,7 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
             GraphRecords.ChunkResult result,
             UUID groupId,
             UUID domainId,
-            String processingCycleId
-    ) {
+            String processingCycleId) {
         if (shutdownInitiated) {
             return CompletableFuture.completedFuture(null);
         }
@@ -434,7 +465,8 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
         }
 
         Instant startTime = Instant.now();
-        return potentialMatchComputationProcessor.processChunkMatches(result, groupId, domainId, processingCycleId, matchBatchSize)
+        return potentialMatchComputationProcessor
+                .processChunkMatches(result, groupId, domainId, processingCycleId, matchBatchSize)
                 .whenComplete((v, ex) -> {
                     mappingSemaphore.release();
                     if (ex != null) {
@@ -442,7 +474,9 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
                         meterRegistry.counter("chunk_processing_errors", "groupId", groupId.toString()).increment();
                     }
                     if (chunkCounter.get() % 100 == 0 && ex == null) {
-                        meterRegistry.timer("graph_builder_rocksdb_persist", "groupId", groupId.toString(), "processingCycleId", processingCycleId)
+                        meterRegistry
+                                .timer("graph_builder_rocksdb_persist", "groupId", groupId.toString(),
+                                        "processingCycleId", processingCycleId)
                                 .record(Duration.between(startTime, Instant.now()));
                     }
                 });

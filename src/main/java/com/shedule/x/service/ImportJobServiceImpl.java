@@ -29,7 +29,7 @@ public class ImportJobServiceImpl implements ImportJobService {
         UUID jobId = statusUpdater.initiateNodesImport(payload);
 
         if (NodeImportValidator.isValidPayloadForCostBasedNodes(payload)) {
-            MultipartFile file = GraphRequestFactory.fromPayload(payload);
+            MultipartFile file = GraphRequestFactory.resolvePayload(payload);
             FileValidationUtility.validateInput(file, payload.getGroupId());
             log.info("Starting node import for groupId={}, file size={}", payload.getGroupId(), file.getSize());
             return nodesImportService.processNodesImport(jobId, file, payload);

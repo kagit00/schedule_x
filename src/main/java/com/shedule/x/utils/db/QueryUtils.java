@@ -128,7 +128,7 @@ public final class QueryUtils {
                 ") SELECT DISTINCT ON (group_id, reference_id, matched_reference_id)\n" +
                 "    id, group_id, domain_id, processing_cycle_id, reference_id, matched_reference_id, compatibility_score, matched_at\n" +
                 "FROM temp_perfect_matches\n" +
-                "ORDER BY group_id, reference_id, matched_reference_id, compatibility_score DESC, matched_at DESC\n" + // Adjust ordering logic if needed
+                "ORDER BY group_id, reference_id, matched_reference_id, compatibility_score DESC, matched_at DESC\n" +
                 "ON CONFLICT (group_id, reference_id, matched_reference_id)\n" +
                 "DO UPDATE SET\n" +
                 "    compatibility_score = EXCLUDED.compatibility_score,\n" +

@@ -8,6 +8,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 public interface PotentialMatchComputationProcessor {
+
     CompletableFuture<Void> processChunkMatches(GraphRecords.ChunkResult chunkResult, UUID groupId, UUID domainId, String processingCycleId, int matchBatchSize);
     CompletableFuture<Void> savePendingMatches(UUID groupId, UUID domainId, String processingCycleId, int batchSize);
     CompletableFuture<Void> saveFinalMatches(UUID groupId, UUID domainId, String processingCycleId, AutoCloseableStream<Edge> initialEdgeStream, int topK);

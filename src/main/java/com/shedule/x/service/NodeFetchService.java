@@ -12,7 +12,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Pageable;
-import org.springframework.retry.support.RetryTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -28,11 +27,10 @@ public class NodeFetchService {
     private final NodeRepository nodeRepository;
     private final MeterRegistry meterRegistry;
     private final Executor executor;
-    private final RetryTemplate retryTemplate;
     private final TransactionTemplate transactionTemplate;
     private final long futureTimeoutSeconds;
 
-    @Value("${node-fetch.batch-size:500}")
+    @Value("${node-fetch.batch-size:1000}")
     private int batchSize;
 
     public NodeFetchService(
@@ -46,10 +44,6 @@ public class NodeFetchService {
         this.meterRegistry = meterRegistry;
         this.executor = executor;
         this.futureTimeoutSeconds = futureTimeoutSeconds;
-        this.retryTemplate = RetryTemplate.builder()
-                .maxAttempts(3)
-                .fixedBackoff(1000)
-                .build();
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.transactionTemplate.setReadOnly(true);
         this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
@@ -123,6 +117,7 @@ public class NodeFetchService {
                     sample.stop(meterRegistry.timer("node_fetch_by_ids_duration", Tags.of("groupId", groupId.toString())));
                 });
     }
+
 
     @Transactional
     public void markNodesAsProcessed(List<UUID> nodeIds, UUID groupId) {

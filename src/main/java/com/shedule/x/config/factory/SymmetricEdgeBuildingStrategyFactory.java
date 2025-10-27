@@ -46,6 +46,7 @@ public class SymmetricEdgeBuildingStrategyFactory {
         this.executor = executor;
     }
 
+
     public SymmetricEdgeBuildingStrategy createStrategy(String weightFunctionKey, List<Node> nodes) {
         Map<UUID, Node> nodeMap = nodes.stream()
                 .collect(Collectors.toMap(Node::getId, node -> node));

@@ -48,7 +48,7 @@ public class GraphStore implements AutoCloseable {
     public GraphStore(
             @Qualifier("persistenceExecutor") ExecutorService mapdbExecutor,
             MeterRegistry meterRegistry,
-            @Value("${mapdb.path:e:/web_project/x/graphstore}") String dbPath,
+            @Value("${mapdb.path:d:/web_dev/schedulex/graphstore}") String dbPath,
             @Value("${mapdb.batch-size:500}") int batchSize,
             @Value("${mapdb.commit-queue-max:1}") int commitQueueMax,
             @Value("${mapdb.commit-threads:2}") int commitThreads

@@ -22,6 +22,9 @@ import org.springframework.stereotype.Component;
 
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.*;
+import java.util.concurrent.*;
 
 
 @Slf4j
@@ -93,7 +96,6 @@ public class PotentialMatchesCreationScheduler {
         Timer.Sample sample = Timer.start(meterRegistry);
         String cycleId = DefaultValuesPopulator.getUid();
         log.info("Starting batch matching at {}, cycleId={}", DefaultValuesPopulator.getCurrentTimestamp(), cycleId);
-        logExecutorState();
 
         List<Domain> domains = domainService.getActiveDomains();
         if (domains.isEmpty()) {
@@ -140,7 +142,6 @@ public class PotentialMatchesCreationScheduler {
         }
 
         groupLocks.entrySet().removeIf(entry -> entry.getValue().availablePermits() == 1 && !entry.getValue().hasQueuedThreads());
-        logExecutorState();
         sample.stop(meterRegistry.timer("batch_matches_total_duration"));
     }
 
@@ -148,12 +149,16 @@ public class PotentialMatchesCreationScheduler {
         Semaphore groupSemaphore = groupLocks.computeIfAbsent(groupId, id -> new Semaphore(1, true));
         Timer.Sample batchTimer = Timer.start(meterRegistry);
 
+        AtomicBoolean domainAcquired = new AtomicBoolean(false);
+        AtomicBoolean groupAcquired = new AtomicBoolean(false);
+
         return CompletableFuture.runAsync(() -> {
                     try {
                         boolean acquired = domainSemaphore.tryAcquire(30, TimeUnit.SECONDS);
                         if (!acquired) {
                             throw new TimeoutException("Timed out acquiring domainSemaphore for domainId=" + domainId);
                         }
+                        domainAcquired.set(true);
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
                         throw new RuntimeException("Interrupted acquiring domainSemaphore", e);
@@ -167,6 +172,7 @@ public class PotentialMatchesCreationScheduler {
                         if (!acquired) {
                             throw new TimeoutException("Timed out acquiring groupSemaphore for groupId=" + groupId);
                         }
+                        groupAcquired.set(true);
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
                         throw new RuntimeException("Interrupted acquiring groupSemaphore", e);
@@ -176,14 +182,36 @@ public class PotentialMatchesCreationScheduler {
                 }, batchExecutor))
                 .thenCompose(v -> {
                     log.info("Acquired locks for groupId={} domainId={}, cycleId={}", groupId, domainId, cycleId);
-                    logSemaphoreState(groupId);
                     return jobExecutor.processGroup(groupId, domainId, cycleId)
                             .thenRunAsync(() -> doFlushLoop(groupId, domainId, cycleId), batchExecutor);
                 })
                 .whenComplete((v, e) -> {
-                    groupSemaphore.release();
-                    domainSemaphore.release();
-                    matchesCreationFinalizer.finalize(false);
+                    if (groupAcquired.get()) {
+                        try {
+                            groupSemaphore.release();
+                        } catch (Exception ex) {
+                            log.error("Failed to release groupSemaphore for groupId={}: {}", groupId, ex.getMessage(), ex);
+                        }
+                    } else {
+                        log.debug("Group semaphore was not acquired for groupId={}, skipping release", groupId);
+                    }
+
+                    if (domainAcquired.get()) {
+                        try {
+                            domainSemaphore.release();
+                        } catch (Exception ex) {
+                            log.error("Failed to release domainSemaphore for domainId={}: {}", domainId, ex.getMessage(), ex);
+                        }
+                    } else {
+                        log.debug("Domain semaphore was not acquired for domainId={}, skipping release", domainId);
+                    }
+
+                    try {
+                        matchesCreationFinalizer.finalize(false);
+                    } catch (Exception ex) {
+                        log.warn("matchesCreationFinalizer.finalize(false) threw for groupId={}, cycleId={}: {}", groupId, cycleId, ex.getMessage());
+                    }
+
                     log.info("Released locks for groupId={} domainId={} cycleId={}, permits: domain={} group={}",
                             groupId, domainId, cycleId,
                             domainSemaphore.availablePermits(), groupSemaphore.availablePermits());
@@ -193,6 +221,10 @@ public class PotentialMatchesCreationScheduler {
                                 "domainId", domainId.toString(), "groupId", groupId.toString(), "cycleId", cycleId).increment();
                         log.error("Error in batch+flush for groupId={} domainId={} cycleId={}: {}",
                                 groupId, domainId, cycleId, e.getMessage(), e);
+                    }
+
+                    if (groupSemaphore.availablePermits() == 1 && !groupSemaphore.hasQueuedThreads()) {
+                        groupLocks.remove(groupId, groupSemaphore);
                     }
 
                     batchTimer.stop(meterRegistry.timer("batch_matches_duration",
@@ -256,18 +288,5 @@ public class PotentialMatchesCreationScheduler {
                     "domainId", domainId.toString(), "cycleId", cycleId).increment(queueSize);
         }
         log.info("Completed flush for groupId={} cycleId={}", groupId, cycleId);
-    }
-
-    private void logExecutorState() {
-        if (batchExecutor instanceof ThreadPoolExecutor tpe) {
-            log.debug("Async pool: active={} queue={} completed={}",
-                    tpe.getActiveCount(), tpe.getQueue().size(), tpe.getCompletedTaskCount());
-        }
-    }
-
-    private void logSemaphoreState(UUID groupId) {
-        log.debug("Permits: domain={} group={}",
-                domainSemaphore.availablePermits(),
-                groupLocks.getOrDefault(groupId, new Semaphore(1)).availablePermits());
     }
 }

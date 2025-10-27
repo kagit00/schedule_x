@@ -36,34 +36,34 @@ public class PerfectMatchesCreationScheduler {
         this.perfectMatchCreationService = perfectMatchCreationService;
     }
 
-    @Scheduled(cron = "${sync.cron:0 5 16 * * *}")
-    public void syncStorage() {
+    @Scheduled(cron = "0 0 3 * * *", zone = "Asia/Kolkata")
+    public void createPerfectMatches() {
         Timer.Sample sample = Timer.start(metrics);
-        log.info("Starting storage sync at {}", Instant.now());
+        log.info("Starting Perfect Matches Creation at {}", Instant.now());
 
         List<Map.Entry<Domain, UUID>> tasks = perfectMatchCreationService.getTasksToProcess();
         if (tasks.isEmpty()) {
-            log.info("No groups to process for storage sync");
-            sample.stop(metrics.timer("sync_duration_total"));
+            log.info("No groups to process for perfect matches creation");
+            sample.stop(metrics.timer("perfect_matches_creation"));
             return;
         }
 
         tasks.forEach(task -> {
             try {
-                syncGroup(task.getValue(), task.getKey().getId());
+                generatePerfectMatchesCreationGroup(task.getValue(), task.getKey().getId());
             } catch (Exception e) {
-                log.error("Failed to sync groupId={}: {}", task.getValue(), e.getMessage());
-                metrics.counter("sync_errors_total", "groupId", task.getValue().toString()).increment();
+                log.error("Failed to create perfect matches for groupId={}: {}", task.getValue(), e.getMessage());
+                metrics.counter("perfect_matches_creation_errors_total", "groupId", task.getValue().toString()).increment();
             }
         });
 
-        sample.stop(metrics.timer("sync_duration_total"));
-        log.info("Completed storage sync at {}", Instant.now());
+        sample.stop(metrics.timer("perfect_matches_creation"));
+        log.info("Completed Perfect Matches Creation at {}", Instant.now());
     }
 
-    @Retry(name = "sync")
-    @CircuitBreaker(name = "sync", fallbackMethod = "syncGroupFallback")
-    private void syncGroup(UUID groupId, UUID domainId) {
+    @Retry(name = "perfect_matches")
+    @CircuitBreaker(name = "perfect_matches", fallbackMethod = "generatePerfectMatchesCreationGroupFallback")
+    private void generatePerfectMatchesCreationGroup(UUID groupId, UUID domainId) {
         Timer.Sample sample = Timer.start(metrics);
         LastRunPerfectMatches lastRun = perfectMatchCreationService.getLastRun(domainId, groupId);
         lastRun.setRunDate(LocalDateTime.now());
@@ -78,19 +78,17 @@ public class PerfectMatchesCreationScheduler {
         cache.clearMatches(groupId);
 
         perfectMatchCreationService.processAllDomains();
-        metrics.counter("sync_triggered_total", "domainId", domainId.toString(), "groupId", groupId.toString()).increment();
+        metrics.counter("perfect_matches_creation", "domainId", domainId.toString(), "groupId", groupId.toString()).increment();
 
         lastRun.setStatus(JobStatus.COMPLETED.name());
         lastRun.setNodeCount(processedNodes);
         perfectMatchCreationService.saveLastRun(lastRun);
 
-        sample.stop(metrics.timer("sync_group_duration", "groupId", groupId.toString()));
         log.info("Processed storage for groupId={}", groupId);
     }
 
-    private void syncGroupFallback(UUID groupId, UUID domainId, Throwable t) {
-        log.warn("Sync failed for groupId={}: {}", groupId, t.getMessage());
-        metrics.counter("sync_fallbacks_total", "groupId", groupId.toString()).increment();
+    private void generatePerfectMatchesCreationGroupFallback(UUID groupId, UUID domainId, Throwable t) {
+        metrics.counter("perfect_matches_creation_fallback", "groupId", groupId.toString()).increment();
         LastRunPerfectMatches lastRun = perfectMatchCreationService.getLastRun(domainId, groupId);
         lastRun.setRunDate(LocalDateTime.now());
         lastRun.setStatus(JobStatus.FAILED.name());

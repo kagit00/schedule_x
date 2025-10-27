@@ -39,6 +39,7 @@ public class NodesImportStatusUpdater {
 
     @Transactional
     public UUID initiateNodesImport(NodeExchange message) {
+        log.info("domain id: {}, group id: {}", message.getDomainId(), message.getGroupId() );
         MatchingGroup group = groupConfigService.getGroupConfig(message.getGroupId(), message.getDomainId());
         NodesImportJob job = GraphRequestFactory.createNodesImportJob(
                 group.getId(),
