@@ -1,450 +1,399 @@
-# **Scheduled Perfect Matches Creation — High-Level Design (HLD) with Diagrams**
+# Scheduled Perfect Matches Creation — High-Level Design (HLD)
 
 ---
 
-## **1) Purpose and Scope**
+## 1. Purpose & Scope
 
-### **Purpose Diagram**
-```mermaid
-graph TD
-  A["Purpose"] --> B["Compute Perfect Matches"]
-  A --> C["Daily Batch Execution"]
-  A --> D["Consume Potential Matches"]
+### 1.1 Purpose
 
-  B --> E["Apply Configured Algorithm"]
-  B --> F["Persist to PostgreSQL"]
+Compute and persist **Perfect Matches** daily by consuming pre-computed **Potential Matches**. This batch runs at 03:00 IST and produces high-quality, non-overlapping matchings per group/domain using configurable strategies (TopKWeightedGreedy, Hopcroft–Karp, Hungarian, AuctionApproximate).
 
-  C --> G["Cron-triggered (3 AM)"]
-  C --> H["Avoids Real-Time Complexity"]
+### 1.2 Scope
 
-  D --> I["Stream from DB"]
-  D --> J["Track Last Run Status"]
+**In scope**
 
+* Scheduled orchestration and task discovery (domains/groups).
+* Streaming potential matches from PostgreSQL.
+* Strategy-based match computation.
+* Efficient, idempotent persistence to PostgreSQL.
+* Observability, retries, circuit-breakers, and memory safety.
+
+**Out of scope**
+
+* Real-time matching pipelines.
+* UI components.
+
+### 1.3 Goals / NFRs
+
+* **Scalability**: Support 10K+ nodes per group; default memory cap 1GB.
+* **SLOs**: Default processing target: 10K nodes < 60 minutes (tunable).
+* **Reliability**: Retries (3), circuit-breaker, idempotency via `LastRunPerfectMatches`.
+* **Observability**: Micrometer metrics + logs with `cycleId`.
+* **Security**: Least-privilege DB role for batch operations.
+
+---
+
+## 2. Triggers & Single-Run Guarantee
+
+### 2.1 Schedule
+
+* Cron: `0 0 3 * * *` (Asia/Kolkata)
+* Entry method: `PerfectMatchesCreationScheduler.createPerfectMatches()`
+
+### 2.2 Single-run (Leader Lease)
+
+Prevent duplicate runs in multi-instance deployments:
+
+* Attempt to acquire a cluster-wide lease at job start using one of:
+
+    * **DB lease**: `SELECT ... FOR UPDATE SKIP LOCKED` on a singleton `batch_leases` row (recommended if DB is available and latency is acceptable).
+    * **Redis lease**: RedLock with TTL ≥ expected max runtime (for multi-dc use consider tombstone/lease refresh).
+* If lease not acquired → log and exit cycle.
+
+**Snippet (conceptual)**:
+
+```sql
+BEGIN;
+SELECT id FROM batch_leases WHERE name='perfect_matches' FOR UPDATE SKIP LOCKED;
+-- if selected, proceed and update last_run; else commit and exit
+COMMIT;
 ```
 
-### **Scope**
-- **Objective**: Daily computation and persistence of "perfect matches" for each group/domain by consuming existing potential matches.
-- **Inputs**:
-    - `PotentialMatchEntity` stream from PostgreSQL
-    - DB-driven `MatchingConfiguration`
-- **Process**:
-    - Applies a selected `MatchingStrategy`
-    - Tracks per-group last run status
-- **Outputs**:
-    - `PerfectMatchEntity` written to PostgreSQL
-    - Updated `LastRunPerfectMatches` records
+---
+
+## 3. Architecture Overview
+
+### 3.1 Major Components
+
+* **Scheduler** (`PerfectMatchesCreationScheduler`) — cron + leader lease + high-level retries.
+* **Orchestrator** (`PerfectMatchCreationService`) — task discovery, concurrency orchestration.
+* **Job Executor** (`PerfectMatchCreationJobExecutor`) — per-group execution with retries and group-level lock.
+* **Matching Service** (`PerfectMatchServiceImpl`) — streams potentials, builds adjacency, invokes matching strategy, buffers results.
+* **PotentialMatchStreamingService** — JDBC forward-only streaming with fetch size and backpressure.
+* **Strategy Layer** (`MatchingStrategySelector` + `MatchingStrategy` implementations) — TopK, Auction, Hopcroft-Karp, Hungarian.
+* **Persistence** (`PerfectMatchSaver` + `PerfectMatchStorageProcessor`) — async batching, `COPY` → `UPSERT`.
+* **Finalizer** (`MatchesCreationFinalizer`) — cleanup and GC hints.
+* **State**: `LastRunPerfectMatches`, `MatchingConfiguration`, `MatchCache`.
+
+### 3.2 High-level flow (brief)
+
+1. Scheduler fires → acquires lease.
+2. Orchestrator builds tasks list (domains/groups).
+3. For each eligible task: mark `LastRun`=PENDING, clear cache, acquire semaphores/locks, invoke job executor.
+4. Job executor streams potentials, builds graph (memory-aware), selects strategy, computes matches.
+5. Saver performs `COPY` to temp table and atomic `UPSERT`.
+6. Mark `LastRun` COMPLETED or FAILED; release locks; finalizer runs.
 
 ---
 
-## **2) Triggers and Entry Points**
+## 4. Data Flow & Persistence
 
-### **Trigger Flow Diagram**
-```mermaid
-flowchart TD
-    A["Scheduler @ 3 AM"] --> B["Trigger createPerfectMatches()"]
-    B --> C{"Get Tasks to Process"}
-    C --> D{"Reprocess if needed?"}
-    D -- Yes --> E["Execute Group Job"]
-    D -- No --> F["Skip"]
+### 4.1 Inputs / Outputs
 
+* **Input**: `PotentialMatchEntity` (refId, matchedRefId, score, metadata), `MatchingConfiguration`.
+* **Output**: `PerfectMatchEntity` (refId, matchedRefId, score, matchedAt, cycleId), `LastRunPerfectMatches`.
+
+### 4.2 Streaming
+
+* Use **JDBC forward-only** `PreparedStatement` with `setFetchSize(BATCH_SIZE_FROM_CURSOR)` (default 5000).
+* Avoid OFFSET / LIMIT on large tables.
+* Streaming retry: 3 attempts with exponential backoff (1s, 2s, 4s).
+
+### 4.3 Persistence pattern (fast + idempotent)
+
+1. Buffer match entities into batches (default 1000).
+2. For each batch:
+
+    * Binary `COPY` into a **temporary staging table**.
+    * Atomic `UPSERT` into `perfect_matches` (use primary key/unique constraint).
+    * Clean staging table.
+3. Optional: set `synchronous_commit=off` during bulk import for throughput; document tradeoffs.
+
+**UPSERT pseudo-SQL**:
+
+```sql
+COPY temp_perfect_matches FROM STDIN WITH (FORMAT binary);
+INSERT INTO perfect_matches (cols...)
+SELECT cols... FROM temp_perfect_matches
+ON CONFLICT (ref_id, matched_ref_id) DO UPDATE SET score = EXCLUDED.score, matched_at = EXCLUDED.matched_at;
 ```
 
-- **Scheduler**: `PerfectMatchesCreationScheduler.createPerfectMatches`
-- **Cron**: `0 0 3 * * *` (Asia/Kolkata)
-- **Eligibility**: Reprocess if `processedNodes > lastRun.nodeCount` OR `lastRun.status` is `PENDING` or `FAILED`.
+---
+
+## 5. Concurrency, Backpressure & Memory
+
+### 5.1 In-process semaphores (single-instance)
+
+* `domainSemaphore` (maxConcurrentDomains, default 2)
+* `groupSemaphore` (max 1 per group)
+* `cpuTaskSemaphore` (processors * 2)
+
+### 5.2 Multi-instance (production)
+
+* Use **distributed locks** (Redis / DB lease) for domain/group semaphores to prevent concurrent processing of same domain/group across instances.
+* If only single instance is deployed, in-process semaphores are acceptable.
+
+### 5.3 Memory Guard & Backpressure
+
+* Config: `matching.max.memory.mb` (default 1024 MB) and `matching.memory.guard.threshold` (default 0.8).
+* Monitor:
+
+    * JVM heap usage
+    * `adjacency_map_current_size` (gauge)
+* Policy on breach:
+
+    1. On crossing 80%: lower streaming fetch size (÷2), reduce sub-batch size, attempt soft `System.gc()` once.
+    2. If still above threshold: abort group job gracefully → set `LastRun.status=FAILED` and capture heap dump (if configured and allowed).
+* No partial in-memory processing that risks OOM; alternative: implement external partial-aggregation (out-of-core) future enhancement.
 
 ---
 
-## **3) Architecture Overview**
+## 6. Matching Strategy Selection
 
-### **High-Level Architecture Diagram**
-```mermaid
-graph TD
-    subgraph Orchestration
-        A[Scheduler] --> B[PerfectMatchCreationService]
-        B --> C[JobExecutor]
-    end
+### 6.1 Decision rules (configurable)
 
-    subgraph MatchingPipeline
-        C --> D[PerfectMatchServiceImpl]
-        D --> E[PotentialMatchStreamingService]
-        D --> F[MatchingStrategySelector]
-        F --> G[MatchingStrategy Layer]
-    end
+* If `group.isSymmetric && group.isCostBased` → **TopKWeightedGreedy**
+* Else if bipartite AND total distinct nodes ≤ `matching.strategy.hungarian.maxNodes` (default 100) → **Hungarian**
+* Else if bipartite AND distinct nodes ≤ `matching.strategy.hopcroft.maxNodes` (default 10000) → **HopcroftKarp**
+* Else → **AuctionApproximateMatchingStrategy** (scalable approximate)
 
-    subgraph Persistence
-        D --> H[PerfectMatchSaver]
-        H --> I[PerfectMatchStorageProcessor]
-        I --> J[PostgreSQL]
-    end
+Make thresholds tunable via config keys:
 
-    subgraph StateManagement
-        B --> K[LastRunPerfectMatchesRepo]
-        D --> L[MatchCache]
-    end
-```
+* `matching.strategy.hungarian.maxNodes`
+* `matching.strategy.hopcroft.maxNodes`
 
-### **Key Layers**
-- **Orchestration**: Manages scheduled execution, task discovery, and concurrency control.
-- **Matching Pipeline**: Streams potential matches, applies a selected strategy, and manages memory.
-- **Strategy Layer**: Pluggable algorithms for perfect match computation.
-- **Persistence**: Handles high-performance batch writes to PostgreSQL.
+### 6.2 Strategy summary
+
+* **TopKWeightedGreedy** — streaming-friendly, memory-aware, good for symmetric cost-based graphs.
+* **Hungarian** — exact, O(n^3), limited to small graphs.
+* **Hopcroft–Karp** — max cardinality for bipartite graphs, O(E sqrt(V)), medium scale.
+* **AuctionApproximate** — scalable approximate assignment for very large graphs.
 
 ---
 
-## **4) End-to-End Flow (Per Cycle)**
+## 7. Resilience, Retries & Timeouts
 
-### **End-to-End Flow Diagram**
-```mermaid
-flowchart TD
-    A[Start Scheduler Cycle] --> B[Build Tasks List]
-    B --> C{For Each Task}
-    C --> D[Set LastRun PENDING]
-    D --> E[Clear MatchCache]
-    E --> F[Acquire Semaphores]
-    F --> G[Execute Group Job]
-    G --> H{Success?}
-    H -- Yes --> I[Set LastRun COMPLETED]
-    H -- No --> J[Set LastRun FAILED]
-    I --> K[Release Semaphores]
-    J --> K
-    K --> C
-    C -- All Done --> L[Finalize Cycle]
-```
+### 7.1 Retry policies
 
-### **Detailed Flow**
-1. **Scheduler**: Builds a list of (domain, group) tasks.
-2. **For Each Task**:
-    - Updates `LastRun` status to `PENDING`.
-    - Clears `MatchCache` for the group.
-    - Acquires domain and group semaphores.
-    - Executes the group job with retries.
-3. **On Completion**:
-    - Updates `LastRun` to `COMPLETED` or `FAILED`.
-    - Releases semaphores.
-4. **After All Tasks**: Finalizes the cycle.
+* **Scheduler**: maxRetries = 3 (1s, 2s, 4s), circuit-breaker opens after 5 consecutive failures for that group for 15 minutes.
+* **JobExecutor**: maxRetries = 3 with exponential backoff; if retries fail → mark group `FAILED`.
+* **Streaming**: retry 3x for transient SQL errors.
+* **Storage**: retry 3x for transient DB errors; ensure idempotence via COPY→UPSERT.
+
+### 7.2 Timeouts
+
+* `PAGE_PROCESSING_TIMEOUT_SECONDS` (default 300)
+* Per-batch save timeout (configurable)
+* Overall cycle timeout (configurable via scheduler orchestration)
+
+### 7.3 Fallbacks
+
+* On final failure set `LastRun.status = FAILED`, emit metric `perfect_matches_creation_errors_total` and alert. Avoid silent data corruption.
 
 ---
 
-## **5) Components and Responsibilities**
+## 8. Observability & Logging
 
-### **Component Responsibility Diagram**
-```mermaid
-classDiagram
-    class PerfectMatchesCreationScheduler {
-        +Cron trigger
-        +Iterates tasks
-        +@Retry/@CircuitBreaker
-    }
+### 8.1 Metrics (Micrometer)
 
-    class PerfectMatchCreationService {
-        +Discovers tasks
-        +Manages concurrency
-        +Persists LastRun status
-    }
+* **Counters**
 
-    class PerfectMatchCreationJobExecutor {
-        +Per-group execution
-        +Retry with backoff
-        +Per-group semaphore
-    }
+    * `perfect_matches_creation_total{domainId,groupId}` — completed cycles
+    * `perfect_matches_creation_errors_total{domainId,groupId}` — failures
+    * `perfect_matches_saved_total{domainId,groupId,cycleId}`
+* **Timers**
 
-    class PerfectMatchServiceImpl {
-        +Streams potential matches
-        +Memory-aware processing
-        +Invokes MatchingStrategy
-        +Persists perfect matches
-    }
+    * `matching_duration{domainId,groupId,cycleId}`
+    * `perfect_match_storage_duration{domainId,groupId,cycleId}`
+* **Gauges**
 
-    class MatchingStrategySelector {
-        +Resolves strategy bean
-    }
+    * `adjacency_map_current_size`
+    * `system_heap_usage_mb`
+* **Tracing / Logs**
 
-    class PotentialMatchStreamingService {
-        +JDBC streaming
-        +Retry on SQL errors
-    }
+    * Every log line for a run must include `cycleId`, `groupId`, `domainId`.
+    * Sample structured log fields: `{level, timestamp, cycleId, groupId, domainId, message, metrics...}`.
 
-    class PerfectMatchSaver {
-        +Async saving facade
-        +Timeout control
-    }
+### 8.2 Dashboards / Alerts
 
-    class PerfectMatchStorageProcessor {
-        +Batched DB writes
-        +COPY + upsert
-        +Transactional, @Retryable
-    }
-```
-
-### **Component Responsibilities**
-| **Component** | **Responsibility** |
-|---------------|--------------------|
-| PerfectMatchesCreationScheduler | Cron trigger, task iteration, high-level retries |
-| PerfectMatchCreationService | Task discovery, concurrency management, state persistence |
-| PerfectMatchCreationJobExecutor | Per-group execution with retry logic |
-| PerfectMatchServiceImpl | Match computation, memory management, persistence |
-| MatchingStrategySelector | Strategy resolution based on configuration |
-| PotentialMatchStreamingService | High-performance data streaming from PostgreSQL |
-| PerfectMatchSaver | Async saving facade with timeouts |
-| PerfectMatchStorageProcessor | Batched database writes with upsert |
+* SLO breach: alert if `matching_duration` > configured SLO for 3 consecutive runs.
+* OOM/heap threshold: alert if heap > 90% or memory guard triggered.
+* Failed cycles rate: alert when `perfect_matches_creation_errors_total` spikes.
 
 ---
 
-## **6) Data Flow and Persistence**
+## 9. Security & Permissions
 
-### **Data Flow Diagram**
-```mermaid
-graph TD
-    A[PotentialMatchEntity Stream] --> B[In-Memory Transformation]
-    B --> C[MatchingStrategy]
-    C --> D[MatchResult]
-    D --> E[PerfectMatchEntity]
-    E --> F[PostgreSQL]
-```
+* Use a **dedicated DB role** for this batch with only required privileges:
 
-- **Inputs**:
-    - `PotentialMatchEntity` stream
-    - `MatchingConfiguration`
-- **Transformations**:
-    - Build per-node top-K adjacency
-    - Apply matching strategy
-- **Outputs**:
-    - `PerfectMatchEntity`
-    - `LastRunPerfectMatches`
-
-### **Persistence Details**
-- **Mechanism**: `COPY` to a temporary table, then `UPSERT` into the final table.
-- **Batching**: Partitions input by `import.batch-size` (default 1000).
-- **Resilience**: Timeout and retry mechanisms for robustness.
+    * `SELECT` on potential matches tables
+    * `CREATE TEMP TABLE`
+    * `INSERT`, `UPDATE` on `perfect_matches`
+    * `EXECUTE` on helper functions if any
+* Do **not** use superuser credentials.
+* Store DB credentials/secrets in a secure vault (HashiCorp Vault, AWS Secrets Manager, etc.), not in plain environment variables.
+* Audit DB operations (optional): log batch imports with `cycleId` and row counts.
 
 ---
 
-## **7) Concurrency, Backpressure, and Memory**
+## 10. Testing & Rollout Strategy
 
-### **Concurrency Model Diagram**
-```mermaid
-graph TD
-    subgraph Semaphores
-        S1[domainSemaphore]
-        S2[groupSemaphore]
-        S3[jobExecutorSemaphore]
-        S4[cpuTaskSemaphore]
-    end
+### 10.1 Local / Dev
 
-    subgraph Backpressure
-        B1[Streaming Fetch Size]
-        B2[Dynamic Sub-Batching]
-        B3[Max Nodes Per Batch]
-        B4[Max Matches Per Node]
-    end
+* `TestDataSeeder` for dev profile seeds `MatchingConfiguration` and small datasets.
 
-    subgraph Memory Guards
-        M1[Memory Threshold Exceeded?]
-        M2[Cancel Futures]
-        M3[Shutdown CPU Executor]
-    end
+### 10.2 Dry-run mode
 
-    S1 --> Orchestration
-    S2 --> Orchestration
-    S3 --> Orchestration
-    S4 --> MatchingPipeline
-    B1 --> MatchingPipeline
-    B2 --> MatchingPipeline
-    B3 --> MatchingPipeline
-    B4 --> MatchingPipeline
-    M1 --> MatchingPipeline
-```
+* support `--dry-run` where matches are computed but not persisted (useful for correctness and perf testing).
 
-- **Semaphores**: Control concurrency at domain, group, job, and CPU task levels.
-- **Backpressure**:
-    - Streaming fetch size
-    - Dynamic sub-batching based on memory
-    - Limits on nodes per batch and matches per node
-- **Memory Guards**:
-    - Halts processing if memory threshold is exceeded
-    - Cancels pending futures to protect the system
+### 10.3 Canary / Progressive rollout
+
+* Canary: run new strategy for small % of groups (e.g., 1–5%) and compare match-quality metrics.
+* Gate promotion on metrics thresholds (match count, average score, SLOs).
+
+### 10.4 QA checks
+
+* Unit tests for strategies.
+* Integration tests using embedded Postgres for streaming + COPY path.
+* Backward compatibility tests for `UPSERT` schema changes.
 
 ---
 
-## **8) Matching Strategies (Pluggable)**
+## 11. Configuration (selected keys & defaults)
 
-### **Strategy Layer Diagram**
-```mermaid
-classDiagram
-    class MatchingStrategy {
-        <<interface>>
-        +match(List<PotentialMatch>)
-        +supports(String)
-    }
-
-    class AuctionApproximateMatchingStrategy {
-        +match()
-    }
-
-    class HopcroftKarpMatchingStrategy {
-        +match()
-    }
-
-    class HungarianMatchingStrategy {
-        +match()
-    }
-
-    class TopKWeightedGreedyMatchingStrategy {
-        +match()
-    }
-
-    MatchingStrategy <|-- AuctionApproximateMatchingStrategy
-    MatchingStrategy <|-- HopcroftKarpMatchingStrategy
-    MatchingStrategy <|-- HungarianMatchingStrategy
-    MatchingStrategy <|-- TopKWeightedGreedyMatchingStrategy
-```
-
-- **AuctionApproximateMatchingStrategy**: Near-optimal one-to-one assignments.
-- **HopcroftKarpMatchingStrategy**: Maximum bipartite matching.
-- **HungarianMatchingStrategy**: Optimal assignment.
-- **TopKWeightedGreedyMatchingStrategy**: Top-K per node (memory-aware).
+| Key                                    |       Default | Description               |
+| -------------------------------------- | ------------: | ------------------------- |
+| `cron`                                 | `0 0 3 * * *` | scheduler                 |
+| `match.max-concurrent-domains`         |           `2` | domain semaphore          |
+| `match.max-retries`                    |           `3` | default retries           |
+| `PAGE_PROCESSING_TIMEOUT_SECONDS`      |         `300` | per page timeout          |
+| `matching.max.memory.mb`               |        `1024` | heap guard                |
+| `matching.memory.guard.threshold`      |         `0.8` | fraction to trigger guard |
+| `BATCH_SIZE_FROM_CURSOR`               |        `5000` | JDBC fetchSize            |
+| `import.batch-size`                    |        `1000` | COPY batch size           |
+| `matching.strategy.hungarian.maxNodes` |         `100` | threshold                 |
+| `matching.strategy.hopcroft.maxNodes`  |       `10000` | threshold                 |
 
 ---
 
-## **9) Resilience, Timeouts, Retries**
+## 12. Sequence & Class Diagrams
 
-### **Resilience Mechanisms**
-```mermaid
-graph TD
-    A[Resilience] --> B[Retries & Backoff]
-    A --> C[Timeouts]
-    A --> D[Circuit Breakers]
-    A --> E[State Tracking]
+### 12.1 High-Level Sequence
 
-    B --> F[Scheduler Level]
-    B --> G[JobExecutor Level]
-    B --> H[Streaming Level]
-    B --> I[Storage Level]
-
-    C --> J[Page Processing]
-    C --> K[Save Matches]
-
-    D --> L[Scheduler Level]
-
-    E --> M[LastRunPerfectMatches]
-```
-
-- **Retries**: Applied at scheduler, job executor, streaming, and storage levels.
-- **Timeouts**: Page processing, save matches, and top-level operations.
-- **Circuit Breakers**: Wraps per-group execution at the scheduler.
-- **State Tracking**: `LastRunPerfectMatches` ensures idempotent re-runs.
-
----
-
-## **10) Observability**
-
-### **Observability Dashboard**
-```mermaid
-graph LR
-    subgraph Timers
-        T1[perfect_matches_creation]
-        T2[matching_duration]
-        T3[perfect_match_storage_duration]
-    end
-
-    subgraph Counters
-        C1[perfect_matches_creation_errors_total]
-        C2[retry_attempts_total]
-        C3[matching_errors_total]
-        C4[perfect_matches_saved_total]
-    end
-
-    subgraph Gauges
-        G1[adjacency_map_current_size]
-        G2[system_cpu_usage]
-    end
-```
-
-- **Metrics**: Timers, counters, and gauges for all critical operations.
-- **Logging**: Consistent tagging (`groupId`, `domainId`, `cycleId`) for traceability.
-
----
-
-## **11) Configuration (Selected)**
-
-| **Category** | **Key** | **Default** |
-|--------------|---------|-------------|
-| Scheduling | `cron` | `0 0 3 * * *` |
-| Concurrency | `match.max-concurrent-domains` | 2 |
-| Retries | `match.max-retries` | 3 |
-| Timeouts | `PAGE_PROCESSING_TIMEOUT_SECONDS` | 300 |
-| Memory | `matching.max.memory.mb` | 1024 |
-| Streaming | `BATCH_SIZE_FROM_CURSOR` | 5000 |
-
----
-
-## **12) Key Sequences**
-
-### **High-Level Sequence Diagram**
 ```mermaid
 sequenceDiagram
-    participant Scheduler
-    participant Service
-    participant JobExecutor
-    participant ServiceImpl
-    participant DB
+  participant Scheduler
+  participant Orchestrator
+  participant JobExecutor
+  participant MatchingService
+  participant Streamer
+  participant Strategy
+  participant Saver
+  participant DB
 
-    Scheduler->>Service: createPerfectMatches()
-    Service->>JobExecutor: processGroup()
-    JobExecutor->>ServiceImpl: processAndSaveMatches()
-    ServiceImpl->>ServiceImpl: streamAllMatches()
-    ServiceImpl->>ServiceImpl: applyStrategy()
-    ServiceImpl->>DB: saveMatchesAsync()
-    Service->>DB: updateLastRun()
+  Scheduler->>Orchestrator: createPerfectMatches()
+  Orchestrator->>Orchestrator: acquireLease()
+  Orchestrator->>JobExecutor: processGroup(groupId)
+  JobExecutor->>MatchingService: processAndSaveMatches()
+  MatchingService->>Streamer: streamAllMatches()
+  Streamer-->>MatchingService: batches
+  MatchingService->>Strategy: match()
+  Strategy-->>MatchingService: matches
+  MatchingService->>Saver: saveMatchesAsync()
+  Saver->>DB: COPY + UPSERT
+  DB-->>Saver: success
+  Saver-->>JobExecutor: done
+  JobExecutor-->>Orchestrator: complete
 ```
 
----
+### 12.2 Class diagram (summary)
 
-## **13) Data and Entities**
-
-| **Entity** | **Purpose** |
-|--------------------|-------------|
-| `PotentialMatchEntity` | Input data for potential matches |
-| `PerfectMatchEntity` | Output data for perfect matches |
-| `LastRunPerfectMatches` | State tracking for idempotency and observability |
-| `MatchingConfiguration` | Drives strategy selection and behavior |
-
----
-
-## **14) Risks and Considerations**
-
-| **Risk** | **Mitigation** |
-|--------------|----------------|
-| Memory Safety | Graceful shutdown on memory threshold breach |
-| Concurrency Layering | Verify combined semaphore limits |
-| Unused Semaphore | Remove or enforce for backpressure |
-| Bean Uniqueness | Ensure unique bean names for strategies |
-
----
-
-## **15) Extensibility**
-
-### **Extensibility Points**
 ```mermaid
-graph TD
-    A[Extensibility] --> B[Add New Matching Strategies]
-    A --> C[Tune via Configuration]
-    A --> D[Swap Data Sources]
+classDiagram
+  class PerfectMatchesCreationScheduler
+  class PerfectMatchCreationService
+  class PerfectMatchCreationJobExecutor
+  class PerfectMatchServiceImpl
+  class PotentialMatchStreamingService
+  class MatchingStrategySelector
+  class MatchingStrategy
+  class PerfectMatchSaver
+  class PerfectMatchStorageProcessor
 
-    B --> E[Implement MatchingStrategy]
-    B --> F[Register in Spring]
-
-    C --> G[Batch sizes]
-    C --> H[Timeouts]
-    C --> I[Memory limits]
-
-    D --> J[Streaming source]
-    D --> K[Persistence schema]
+  PerfectMatchesCreationScheduler --> PerfectMatchCreationService
+  PerfectMatchCreationService --> PerfectMatchCreationJobExecutor
+  PerfectMatchCreationJobExecutor --> PerfectMatchServiceImpl
+  PerfectMatchServiceImpl --> PotentialMatchStreamingService
+  PerfectMatchServiceImpl --> MatchingStrategySelector
+  MatchingStrategySelector --> MatchingStrategy
+  PerfectMatchServiceImpl --> PerfectMatchSaver
+  PerfectMatchSaver --> PerfectMatchStorageProcessor
 ```
 
-- **New Strategies**: Implement `MatchingStrategy` and register in Spring.
-- **Configuration**: Tune batch sizes, timeouts, and memory limits via configuration files.
-- **Data Sources**: Swap streaming source or persistence schema with limited changes.
+---
+
+## 13. Risks & Mitigations
+
+| Risk                                       | Mitigation                                                     |
+| ------------------------------------------ | -------------------------------------------------------------- |
+| Duplicate runs in multi-instance           | Leader lease (DB/Redis) + idempotent `LastRun` state           |
+| OOM while building adjacency               | Memory guard, adaptive backpressure, abort and fail-safe       |
+| Slow DB writes                             | Binary COPY + UPSERT, `synchronous_commit` tradeoff documented |
+| Deadlock on semaphores                     | Timeouts on locks + distributed semaphore with TTL             |
+| Strategy misuse (Hungarian on huge graphs) | Hard thresholds + configuration overrides                      |
+| Security leakage (DB creds)                | Vault-managed secrets + least-priv roles                       |
 
 ---
+
+## 14. Operational Runbook (brief)
+
+**Start cycle**
+
+* Scheduler acquires lease, starts orchestrator.
+
+**If cycle fails**
+
+* Check `perfect_matches_creation_errors_total` and `LastRunPerfectMatches`.
+* Inspect logs filtered by `cycleId`.
+* If OOM: inspect heap dump, increase `matching.max.memory.mb` or lower batch sizes.
+
+**Restore**
+
+* Re-run failed group via explicit admin job (idempotent via `LastRun`).
+
+---
+
+## 15. Appendix — Useful snippets & examples
+
+### A. JDBC streaming (Java pseudo)
+
+```java
+PreparedStatement ps = conn.prepareStatement(sql, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
+ps.setFetchSize(BATCH_SIZE_FROM_CURSOR);
+ResultSet rs = ps.executeQuery();
+while (rs.next()) {
+  // read, buffer, backpressure checks
+}
+```
+
+### B. COPY + UPSERT pattern (Postgres)
+
+1. CREATE TEMP TABLE temp_perfect_matches (...);
+2. Use `CopyManager` binary COPY to `temp_perfect_matches`.
+3. `INSERT INTO perfect_matches SELECT ... FROM temp_perfect_matches ON CONFLICT (...) DO UPDATE ...;`
+4. DROP temp table.
+
+### C. Circuit-breaker & retry config (conceptual)
+
+```yaml
+resilience:
+  scheduler:
+    maxRetries: 3
+    backoffMs: 1000
+    circuitBreaker:
+      failureThreshold: 5
+      openForSeconds: 900
+```
+
+---
+
