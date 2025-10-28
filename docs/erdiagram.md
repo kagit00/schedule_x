@@ -4,170 +4,171 @@
 
 ```mermaid
 erDiagram
-    domains {
-        UUID id PK "Primary Key"
-        VARCHAR(255) name UK "Unique domain name"
-        VARCHAR(50) industry "Industry type (e.g., dating)"
-        BOOLEAN is_active "Whether domain is active"
-        TIMESTAMP created_at "Domain creation timestamp"
-    }
+  domains {
+    UUID id PK "Primary Key"
+    VARCHAR name "Unique domain name"
+    VARCHAR industry "Industry type (e.g., dating)"
+    BOOLEAN is_active "Whether domain is active"
+    TIMESTAMP created_at "Domain creation timestamp"
+  }
 
-    matching_groups {
-        UUID id PK "Primary Key"
-        UUID domain_id FK "References domains.id"
-        VARCHAR(255) group_id "Group identifier (e.g., dating-default)"
-        VARCHAR(50) industry "Industry type"
-        BOOLEAN is_cost_based "Whether matching is cost-based"
-        BOOLEAN is_symmetric "Whether matching is symmetric"
-        TIMESTAMP created_at "Group creation timestamp"
-    }
+  matching_groups {
+    UUID id PK "Primary Key"
+    UUID domain_id FK "References domains.id"
+    VARCHAR group_id "Group identifier (e.g., dating-default)"
+    VARCHAR industry "Industry type"
+    BOOLEAN is_cost_based "Whether matching is cost-based"
+    BOOLEAN is_symmetric "Whether matching is symmetric"
+    TIMESTAMP created_at "Group creation timestamp"
+  }
 
-    matching_algorithms {
-        VARCHAR(255) id PK "Algorithm identifier"
-        VARCHAR(255) name "Algorithm name"
-        VARCHAR(255) description "Algorithm description"
-    }
+  matching_algorithms {
+    VARCHAR id PK "Algorithm identifier"
+    VARCHAR name "Algorithm name"
+    VARCHAR description "Algorithm description"
+  }
 
-    matching_configurations {
-        UUID id PK "Primary Key"
-        UUID group_id FK "References matching_groups.id"
-        INTEGER node_count_min "Minimum nodes for matching"
-        INTEGER node_count_max "Maximum nodes for matching"
-        VARCHAR(100) algorithm_id FK "References matching_algorithms.id"
-        INTEGER priority "Configuration priority"
-        INTEGER timeout_ms "Processing timeout in milliseconds"
-        BOOLEAN cost_based "Cost-based matching flag"
-        BOOLEAN real_time "Real-time processing flag"
-        TIMESTAMP created_at "Configuration creation timestamp"
-    }
+  matching_configurations {
+    UUID id PK "Primary Key"
+    UUID group_id FK "References matching_groups.id"
+    INTEGER node_count_min "Minimum nodes for matching"
+    INTEGER node_count_max "Maximum nodes for matching"
+    VARCHAR algorithm_id FK "References matching_algorithms.id"
+    INTEGER priority "Configuration priority"
+    INTEGER timeout_ms "Processing timeout in milliseconds"
+    BOOLEAN cost_based "Cost-based matching flag"
+    BOOLEAN real_time "Real-time processing flag"
+    TIMESTAMP created_at "Configuration creation timestamp"
+  }
 
-    nodes {
-        UUID id PK "Primary Key"
-        UUID domain_id FK "References domains.id"
-        UUID group_id "References matching_groups.id"
-        VARCHAR(50) type "Node type"
-        VARCHAR(255) reference_id "External reference ID"
-        BOOLEAN is_processed "Processing status flag"
-        TIMESTAMP created_at "Node creation timestamp"
-    }
+  nodes {
+    UUID id PK "Primary Key"
+    UUID domain_id FK "References domains.id"
+    UUID group_id FK "References matching_groups.id"
+    VARCHAR type "Node type"
+    VARCHAR reference_id "External reference ID"
+    BOOLEAN is_processed "Processing status flag"
+    TIMESTAMP created_at "Node creation timestamp"
+  }
 
-    node_metadata {
-        UUID node_id PK,FK1 "References nodes.id"
-        VARCHAR(255) meta_key PK "Metadata key"
-        TEXT meta_value "Metadata value"
-    }
+  node_metadata {
+    UUID node_id PK FK "References nodes.id"
+    VARCHAR meta_key PK "Metadata key"
+    TEXT meta_value "Metadata value"
+  }
 
-    edges {
-        UUID id PK "Primary Key"
-        VARCHAR(255) from_node "Source node reference_id"
-        VARCHAR(255) to_node "Target node reference_id"
-        DOUBLE weight "Edge weight"
-        JSONB metadata "Edge metadata in JSON"
-        TIMESTAMP created_at "Edge creation timestamp"
-        TIMESTAMP updated_at "Edge last update timestamp"
-    }
+  edges {
+    UUID id PK "Primary Key"
+    VARCHAR from_node "Source node reference_id"
+    VARCHAR to_node "Target node reference_id"
+    DOUBLE weight "Edge weight"
+    JSONB metadata "Edge metadata in JSON"
+    TIMESTAMP created_at "Edge creation timestamp"
+    TIMESTAMP updated_at "Edge last update timestamp"
+  }
 
-    nodes_import_jobs {
-        UUID id PK "Primary Key"
-        UUID domain_id FK "References domains.id"
-        VARCHAR(255) group_id "Job group identifier"
-        VARCHAR(50) status "Job status"
-        INTEGER total_nodes "Total nodes to process"
-        INTEGER processed_nodes "Nodes processed so far"
-        TEXT error_message "Error message if failed"
-        VARCHAR(50) started_at "Start timestamp as string"
-        VARCHAR(50) ended_at "End timestamp as string"
-        TIMESTAMP completed_at "Completion timestamp"
-    }
+  nodes_import_jobs {
+    UUID id PK "Primary Key"
+    UUID domain_id FK "References domains.id"
+    VARCHAR group_id "Job group identifier"
+    VARCHAR status "Job status"
+    INTEGER total_nodes "Total nodes to process"
+    INTEGER processed_nodes "Nodes processed so far"
+    TEXT error_message "Error message if failed"
+    VARCHAR started_at "Start timestamp as string"
+    VARCHAR ended_at "End timestamp as string"
+    TIMESTAMP completed_at "Completion timestamp"
+  }
 
-    perfect_matches {
-        UUID id PK "Primary Key"
-        UUID domain_id FK "References domains.id"
-        UUID group_id "References matching_groups.id"
-        VARCHAR(255) reference_id "First user reference"
-        VARCHAR(255) matched_reference_id "Second user reference"
-        DOUBLE compatibility_score "Match compatibility score"
-        TIMESTAMP matched_at "Match timestamp"
-        VARCHAR(255) processing_cycle_id "Processing cycle identifier"
-    }
+  perfect_matches {
+    UUID id PK "Primary Key"
+    UUID domain_id FK "References domains.id"
+    UUID group_id FK "References matching_groups.id"
+    VARCHAR reference_id "First user reference"
+    VARCHAR matched_reference_id "Second user reference"
+    DOUBLE compatibility_score "Match compatibility score"
+    TIMESTAMP matched_at "Match timestamp"
+    VARCHAR processing_cycle_id "Processing cycle identifier"
+  }
 
-    potential_matches {
-        UUID id PK "Partition key part 1"
-        UUID group_id PK "Partition key part 2, references matching_groups.id"
-        UUID domain_id FK "References domains.id"
-        VARCHAR(50) reference_id "First user reference"
-        VARCHAR(50) matched_reference_id "Second user reference"
-        DOUBLE compatibility_score "Potential match score"
-        TIMESTAMP matched_at "Candidate match timestamp"
-        VARCHAR(255) processing_cycle_id "Processing cycle identifier"
-    }
+  potential_matches {
+    UUID id PK "Primary Key"
+    UUID group_id PK "Partition key part 2, references matching_groups.id"
+    UUID domain_id FK "References domains.id"
+    VARCHAR reference_id "First user reference"
+    VARCHAR matched_reference_id "Second user reference"
+    DOUBLE compatibility_score "Potential match score"
+    TIMESTAMP matched_at "Candidate match timestamp"
+    VARCHAR processing_cycle_id "Processing cycle identifier"
+  }
 
-    last_run_perfect_matches {
-        UUID id PK "Primary Key"
-        VARCHAR(255) group_id "Group identifier"
-        UUID domain_id "Domain reference"
-        BIGINT node_count "Number of nodes processed"
-        TIMESTAMP run_date "Run timestamp"
-        VARCHAR(50) status "Run status"
-    }
+  last_run_perfect_matches {
+    UUID id PK "Primary Key"
+    VARCHAR group_id "Group identifier"
+    UUID domain_id "Domain reference"
+    BIGINT node_count "Number of nodes processed"
+    TIMESTAMP run_date "Run timestamp"
+    VARCHAR status "Run status"
+  }
 
-    last_match_participation {
-        VARCHAR(255) group_id PK "Part of composite PK"
-        UUID domain_id PK "Part of composite PK, references domains.id"
-        TIMESTAMP last_run_timestamp "Last participation timestamp"
-        TIMESTAMP updated_at "Last update timestamp"
-    }
+  last_match_participation {
+    VARCHAR group_id PK "Part of composite PK"
+    UUID domain_id PK "Part of composite PK, references domains.id"
+    TIMESTAMP last_run_timestamp "Last participation timestamp"
+    TIMESTAMP updated_at "Last update timestamp"
+  }
 
-    match_participation_history {
-        BIGSERIAL id PK "Auto-incrementing primary key"
-        UUID node_id "References nodes.id"
-        VARCHAR(255) group_id "Group identifier"
-        UUID domain_id "References domains.id"
-        TIMESTAMP participated_at "Participation timestamp"
-    }
+  match_participation_history {
+    BIGSERIAL id PK "Auto-incrementing primary key"
+    UUID node_id "References nodes.id"
+    VARCHAR group_id "Group identifier"
+    UUID domain_id "References domains.id"
+    TIMESTAMP participated_at "Participation timestamp"
+  }
 
-    %% Relationship Definitions
-    domains ||--o{ matching_groups : "has_many"
-    domains ||--o{ nodes : "contains"
-    domains ||--o{ nodes_import_jobs : "manages"
-    domains ||--o{ perfect_matches : "contains_matches"
-    domains ||--o{ potential_matches : "contains_candidates"
-    domains ||--o{ last_run_perfect_matches : "tracks_runs"
-    domains ||--o{ last_match_participation : "tracks_participation"
-    domains ||--o{ match_participation_history : "records_history"
-    
-    matching_groups ||--o{ matching_configurations : "configures_with"
-    matching_groups ||--o{ nodes : "groups"
-    matching_groups ||--o{ perfect_matches : "produces_matches"
-    matching_groups ||--o{ potential_matches : "produces_candidates"
-    
-    matching_algorithms ||--o{ matching_configurations : "implemented_by"
-    
-    nodes ||--o{ node_metadata : "has_metadata"
-    nodes ||--o{ edges : "source_of"
-    nodes ||--o{ edges : "target_of"
-    nodes ||--o{ match_participation_history : "participates_in"
-    
-    matching_groups }o--|| domains : "belongs_to_domain"
-    nodes }o--|| domains : "belongs_to_domain"
-    nodes_import_jobs }o--|| domains : "belongs_to_domain"
-    perfect_matches }o--|| domains : "belongs_to_domain"
-    potential_matches }o--|| domains : "belongs_to_domain"
-    last_run_perfect_matches }o--|| domains : "belongs_to_domain"
-    last_match_participation }o--|| domains : "belongs_to_domain"
-    match_participation_history }o--|| domains : "belongs_to_domain"
-    
-    matching_configurations }o--|| matching_groups : "configured_for_group"
-    nodes }o--|| matching_groups : "member_of_group"
-    perfect_matches }o--|| matching_groups : "result_of_group"
-    potential_matches }o--|| matching_groups : "candidate_from_group"
-    
-    matching_configurations }o--|| matching_algorithms : "uses_algorithm"
-    
-    node_metadata }o--|| nodes : "describes_node"
-    edges }o--|| nodes : "references_source_node"
-    edges }o--|| nodes : "references_target_node"
-    match_participation_history }o--|| nodes : "records_node_participation"
+  %% Relationships
+  domains ||--o{ matching_groups : "has_many"
+  domains ||--o{ nodes : "contains"
+  domains ||--o{ nodes_import_jobs : "manages"
+  domains ||--o{ perfect_matches : "contains_matches"
+  domains ||--o{ potential_matches : "contains_candidates"
+  domains ||--o{ last_run_perfect_matches : "tracks_runs"
+  domains ||--o{ last_match_participation : "tracks_participation"
+  domains ||--o{ match_participation_history : "records_history"
+
+  matching_groups ||--o{ matching_configurations : "configures_with"
+  matching_groups ||--o{ nodes : "groups"
+  matching_groups ||--o{ perfect_matches : "produces_matches"
+  matching_groups ||--o{ potential_matches : "produces_candidates"
+
+  matching_algorithms ||--o{ matching_configurations : "implemented_by"
+
+  nodes ||--o{ node_metadata : "has_metadata"
+  nodes ||--o{ edges : "source_of"
+  nodes ||--o{ edges : "target_of"
+  nodes ||--o{ match_participation_history : "participates_in"
+
+  matching_groups }o--|| domains : "belongs_to_domain"
+  nodes }o--|| domains : "belongs_to_domain"
+  nodes_import_jobs }o--|| domains : "belongs_to_domain"
+  perfect_matches }o--|| domains : "belongs_to_domain"
+  potential_matches }o--|| domains : "belongs_to_domain"
+  last_run_perfect_matches }o--|| domains : "belongs_to_domain"
+  last_match_participation }o--|| domains : "belongs_to_domain"
+  match_participation_history }o--|| domains : "belongs_to_domain"
+
+  matching_configurations }o--|| matching_groups : "configured_for_group"
+  nodes }o--|| matching_groups : "member_of_group"
+  perfect_matches }o--|| matching_groups : "result_of_group"
+  potential_matches }o--|| matching_groups : "candidate_from_group"
+
+  matching_configurations }o--|| matching_algorithms : "uses_algorithm"
+
+  node_metadata }o--|| nodes : "describes_node"
+  edges }o--|| nodes : "references_source_node"
+  edges }o--|| nodes : "references_target_node"
+  match_participation_history }o--|| nodes : "records_node_participation"
+
 ```
 
 ## Database Schema Details
