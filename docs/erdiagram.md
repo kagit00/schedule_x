@@ -52,7 +52,7 @@ erDiagram
   }
 
   node_metadata {
-    UUID node_id PK FK "References nodes.id"
+    UUID node_id PK "Primary key; references nodes.id (FK)"
     VARCHAR meta_key PK "Metadata key"
     TEXT meta_value "Metadata value"
   }
@@ -168,7 +168,6 @@ erDiagram
   edges }o--|| nodes : "references_source_node"
   edges }o--|| nodes : "references_target_node"
   match_participation_history }o--|| nodes : "records_node_participation"
-
 ```
 
 ## Database Schema Details
