@@ -1,569 +1,453 @@
-# **Scheduled Potential Match Creation — High-Level Design (HLD) with Diagrams**
+# Scheduled Potential Match Creation — High-Level Design (HLD)
 
 ---
 
-## **1) Purpose and Scope**
+## 0. Intent — short and merciless
 
-### **Purpose Diagram**
-```mermaid
-graph TD
-    A[Purpose] --> B[Compute Potential Matches]
-    A --> C[Batch-Oriented Pipeline]
-    A --> D[Strong Backpressure & Resilience]
+This HLD describes a resilient, backpressure-aware, scheduled batch that computes **Potential Matches** per domain/group, stages them in MapDB, and persists final potential matches to PostgreSQL for downstream consumption by the Perfect Matches job. Designed to run safely in **multi-instance production** with cluster coordination and operational guardrails.
 
-    B --> E[Between Nodes by Domain/Group]
-    B --> F[Configurable Graph Strategies]
+---
 
-    D --> G[Semaphores for Concurrency Control]
-    D --> H[Bounded Queues for Backpressure]
-    D --> I[Resilience with Retries & Circuit Breakers]
+## 1. Purpose & Scope
+
+### 1.1 Purpose
+
+* Produce high-quality **Potential Match** edges between nodes per domain/group using pluggable matching strategies (LSH, metadata rules, bipartite chunking).
+* Stage transient edges in **MapDB** for fast writes and streaming.
+* Finalize results into **PostgreSQL** via `COPY` → `UPSERT`.
+
+### 1.2 Scope
+
+**In scope**
+
+* Scheduled orchestration, domain/group discovery and locking.
+* Node fetching, weight function selection, LSH or bipartite builders.
+* QueueManager per-group, MapDB staging, finalization pipeline to Postgres.
+* Observability, retries, circuit breakers, backpressure.
+
+**Out of scope**
+
+* Real-time matching (Kafka stream processing).
+* UI or consumer-facing APIs (consumers read `potential_matches` table).
+
+### 1.3 Goals / NFRs
+
+* **Safety**: Avoid OOMs, avoid duplicate concurrent group processing.
+* **Throughput**: Tunable to process groups with up to 10k–100k nodes (configurable).
+* **Resilience**: Retries, circuit breakers, idempotent persistence.
+* **Observability**: Metrics + tracing with `processing_cycle_id` (aka `cycleId`).
+* **Security**: Least-privileged DB role for batch ops.
+
+---
+
+## 2. Scheduling & Guaranteed Ordering
+
+### 2.1 Schedule
+
+* Default cron (configurable): `0 0 1 * * *` (UTC) — production suggests earlier-night run to allow downstream PerfectMatches at 03:00 IST; configure per site needs.
+* Entrypoint: `PotentialMatchesCreationScheduler.processAllDomainsScheduled()`.
+
+### 2.2 Inter-job dependency (must)
+
+To prevent the PerfectMatches job from reading partial data:
+
+* **Completion marker**: At the end of each group run, write `LastRunPotentialMatches{groupId,domainId,processing_cycle_id,status}` with `status=COMPLETED` and timestamp.
+* **PerfectMatches job**: MUST check `LastRunPotentialMatches` for `COMPLETED` before consuming that group’s `potential_matches`.
+
+Use this OR schedule the two jobs with enough buffer. No marker → no consumption. Period.
+
+---
+
+## 3. Architecture Overview
+
+### 3.1 Logical components
+
+* **Scheduler** (`PotentialMatchesCreationScheduler`) — cron + leader-lease + high-level retries.
+* **JobExecutor** (`PotentialMatchesCreationJobExecutor`) — per-group orchestration with retries, page semaphores.
+* **PotentialMatchServiceImpl** — orchestrates fetch → build → compute → enqueue.
+* **NodeFetchService** — paged, transactional node retrieval.
+* **WeightFunctionResolver** — chooses score/weight function per group.
+* **GraphPreProcessor** — selects SYMMETRIC / BIPARTITE / AUTO path and enforces build concurrency.
+* **SymmetricGraphBuilder** / **BipartiteGraphBuilder** — LSH index build / bipartite chunking.
+* **QueueManager** (per-group) — bounded buffer, boosted drain triggers, TTL eviction.
+* **GraphStore (MapDB)** — transient staging, batched writes, streamable by group.
+* **PotentialMatchSaver** / **PotentialMatchStorageProcessor** — COPY → UPSERT into `public.potential_matches`.
+* **MatchesCreationFinalizer** — final flush, cleanup, and completion marker update.
+
+### 3.2 Multi-instance readiness
+
+* **Leader-lease** before starting a global cycle (DB or Redis lease).
+* **Distributed semaphores** for domain/group/page (Redis or DB-backed) to ensure mutually-exclusive processing across instances.
+* In-process semaphores only valid if deployed singleton (profile: `singleton`).
+
+---
+
+## 4. Data Flow (end-to-end)
+
+1. Scheduler fires and attempts to acquire **global lease**.
+2. Build list of active domains/groups to process.
+3. For each group:
+
+    * Acquire **domain semaphore** and **group semaphore** (distributed).
+    * Set `LastRunPotentialMatches.status = PENDING` and create `processing_cycle_id` (UUID).
+    * Clear/initialize per-group QueueManager & caches.
+    * Fetch node IDs (keyset pagination), load nodes in sub-batches.
+    * Resolve weight function and build graph:
+
+        * Symmetric path: LSH index build → chunk queries → edge scoring.
+        * Bipartite path: left/right chunk Cartesian scoring → immediate staging.
+    * Enqueue candidate potential matches to QueueManager (bounded).
+    * QueueManager drains to MapDB (periodic or boosted).
+    * When group completes, Finalizer:
+
+        * Force queue flush → MapDB commit.
+        * Stream MapDB edges, compute per-node Top-K if required, group results into batches.
+        * Save to Postgres via `COPY` → `UPSERT`.
+        * Set `LastRunPotentialMatches.status = COMPLETED` (or FAILED).
+    * Release semaphores and continue.
+
+---
+
+## 5. Data Model & Schema (summary)
+
+### `potential_matches` (final)
+
+```sql
+CREATE TABLE public.potential_matches (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  group_id UUID NOT NULL,
+  domain_id UUID NOT NULL,
+  processing_cycle_id VARCHAR(36) NOT NULL,
+  reference_id VARCHAR(255) NOT NULL,
+  matched_reference_id VARCHAR(255) NOT NULL,
+  compatibility_score DOUBLE PRECISION NOT NULL,
+  matched_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+  UNIQUE (group_id, reference_id, matched_reference_id)
+);
 ```
 
-### **Scope**
-- **Inputs**: Nodes with metadata and relationships
-- **Process**: Compute potential matches using configurable graph strategies
-- **Outputs**:
-    - Transient edges stored in MapDB for staging/streaming
-    - Finalized potential matches upserted into PostgreSQL
-- **Constraints**:
-    - Batch-oriented processing
-    - Strong backpressure and resilience mechanisms
+### `LastRunPotentialMatches`
 
----
-
-## **2) Architecture Overview**
-
-### **High-Level Architecture Diagram**
-```mermaid
-graph TD
-    subgraph Orchestration
-        A["Scheduler"] --> B["JobExecutor"]
-    end
-
-    subgraph MatchingPipeline
-        B --> C["PotentialMatchService"]
-        C --> D["NodeFetchService"]
-        C --> E["WeightFunctionResolver"]
-        C --> F["GraphPreProcessor"]
-        F --> G["SymmetricGraphBuilder"]
-        F --> H["BipartiteGraphBuilder"]
-    end
-
-    subgraph PersistencePipeline
-        G --> I["PotentialMatchComputationProcessor"]
-        H --> I
-        I --> J["QueueManager"]
-        J --> K["GraphStore - MapDB"]
-        J --> L["PotentialMatchSaver"]
-        L --> M["PostgreSQL"]
-    end
-
-    subgraph Finalization
-        I --> N["MatchesCreationFinalizer"]
-    end
-
+```sql
+CREATE TABLE last_run_potential_matches (
+  group_id UUID PRIMARY KEY,
+  domain_id UUID NOT NULL,
+  processing_cycle_id VARCHAR(36),
+  status VARCHAR(16), -- PENDING|COMPLETED|FAILED
+  started_at TIMESTAMP,
+  finished_at TIMESTAMP
+);
 ```
 
-### **Key Components**
-- **Orchestration**: Scheduler, JobExecutor
-- **Matching Pipeline**: Node fetching, weight function resolution, graph preprocessing, and building
-- **Persistence Pipeline**: Queue management, MapDB staging, PostgreSQL persistence
-- **Finalization**: Cleanup and completion signaling
+**Contract**: DB `processing_cycle_id` ↔ application `cycleId` (UUID string). Always include it in logs and metrics.
 
 ---
 
-## **3) End-to-End Flow**
+## 6. Persistence & Upsert Semantics
 
-### **End-to-End Flow Diagram**
-```mermaid
-flowchart TD
-    A[Start Scheduled Cycle] --> B[Enumerate Active Domains/Groups]
-    B --> C[Acquire Semaphores]
-    C --> D[Run Per-Group Job]
-    D --> E[Fetch Node IDs]
-    E --> F[Fetch Nodes]
-    F --> G[Resolve Weight Function]
-    G --> H[Build Graph]
-    H --> I[Compute Potential Matches]
-    I --> J[Enqueue Matches]
-    J --> K[Drain to MapDB]
-    K --> L[Persist to PostgreSQL]
-    L --> M[Mark Nodes Processed]
-    M --> N[Flush Participation History]
-    N --> O[Finalize Cycle]
+### MapDB staging
+
+* Key format: `groupId:chunkIndex:referenceId:matchedReferenceId` → serialized `PotentialMatch`.
+* MapDB config: disk-backed HTreeMap, periodic commits, TTL per-group for cleanup.
+
+### Final persistence (safe & fast)
+
+* Batch size: default `matches.save.batch-size = 5000`.
+* For each batch:
+
+    1. Create temp table `temp_potential_matches`.
+    2. Binary `COPY` from client (CopyManager) to temp table.
+    3. `INSERT INTO potential_matches SELECT * FROM temp_potential_matches ON CONFLICT ... DO UPDATE ...`.
+    4. DROP temp table.
+
+### Conflict resolution (dedupe policy)
+
+Keep the row with *highest* `compatibility_score`. Example UPSERT:
+
+```sql
+INSERT INTO potential_matches (group_id, domain_id, processing_cycle_id, reference_id, matched_reference_id, compatibility_score, matched_at)
+SELECT group_id, domain_id, processing_cycle_id, reference_id, matched_reference_id, compatibility_score, matched_at FROM temp_potential_matches
+ON CONFLICT (group_id, reference_id, matched_reference_id)
+DO UPDATE SET
+  compatibility_score = GREATEST(potential_matches.compatibility_score, EXCLUDED.compatibility_score),
+  matched_at = EXCLUDED.matched_at,
+  processing_cycle_id = EXCLUDED.processing_cycle_id;
 ```
 
-### **Detailed Flow**
-1. **Scheduled Cycle**:
-    - Triggered by cron schedule
-    - Enumerates active domains and groups
-    - Acquires semaphores for domain/group concurrency control
-2. **Per-Group Job**:
-    - Fetches node IDs and nodes
-    - Resolves weight function based on metadata
-    - Builds graph (symmetric or bipartite)
-    - Computes potential matches
-3. **Persistence**:
-    - Enqueues matches for draining
-    - Drains to MapDB for staging
-    - Persists to PostgreSQL
-4. **Finalization**:
-    - Marks nodes as processed
-    - Flushes participation history
-    - Finalizes cycle and cleans up
+**Important**: This makes persistence idempotent for retries (same or lower score rows won’t overwrite higher scores).
 
 ---
 
-## **4) Components and Responsibilities**
+## 7. Concurrency & Backpressure
 
-### **Component Responsibility Diagram**
+### Semaphores & Executors
+
+* **Global lease** (single-run per cluster cycle).
+* **Domain semaphore** (default 2).
+* **Group semaphore** (1 per group).
+* **Page semaphore** (max concurrent page fetches per group).
+* **Build semaphores** (limit parallel LSH builds).
+* **Save semaphore** (limit concurrent DB copy/upssert operations).
+
+Executors:
+
+* `matchCreationExecutorService` for orchestration.
+* `graphExecutorService` for compute (chunk workers).
+* `ioExecutorService` for node fetch & MapDB writes.
+* `persistenceExecutor` for COPY/upsert.
+
+### QueueManager
+
+* Per-group bounded queue (`match.queue.capacity`, default 500k).
+* Boosted drain when queue fill ratio > `drainWarningThreshold` (config).
+* On queue full: emit `match_drops_total{reason="queue_full"}` and trigger boosted drain. Do not crash; fail-safe and alert.
+
+---
+
+## 8. Memory & LSH guards
+
+* Config:
+
+    * `matching.max.memory.mb` (default 1024)
+    * `matching.memory.guard.threshold` (default 0.8)
+    * `graph.max-nodes-per-build` (default 10000)
+* Monitor heap usage and `adjacency_map_current_size`.
+* On threshold breach:
+
+    1. Halve fetchSize and reduce chunkSize; attempt soft `System.gc()`.
+    2. If still over threshold, abort group gracefully (set `LastRun=FAILED`), capture heap dump (if allowed), and alert.
+* For large groups > `graph.max-nodes-per-build`, switch to chunked, out-of-core processing or AuctionApproximate-like fallbacks.
+
+---
+
+## 9. Resilience (timeouts, retries, CB)
+
+### Retry policies (defaults)
+
+* `match.max-retries = 3`
+* Exponential backoff: 1s, 2s, 4s.
+* Circuit-breaker: open after 5 consecutive failures for a group; open duration 15 minutes.
+
+### Where applied
+
+* Node fetch page retries.
+* Chunk processing retries.
+* MapDB commit retries.
+* COPY/UPSERT retries (idempotent).
+
+### Fallbacks
+
+* LSH build failure → fall back to flat-chunk scoring or mark group failed depending on config.
+* MapDB write failure → fail group; surface alert.
+
+---
+
+## 10. Observability & Monitoring
+
+### Canonical metrics (Micrometer)
+
+* Counters:
+
+    * `potential_matches_generated_total{groupId,domainId,processing_cycle_id}`
+    * `potential_matches_saved_total{groupId,domainId,processing_cycle_id}`
+    * `match_drops_total{reason,groupId,domainId}`
+* Timers:
+
+    * `batch_matches_total_duration{groupId,domainId,processing_cycle_id}`
+    * `graph_build_duration{groupId}`
+    * `storage_processor_batch_duration{groupId}`
+* Gauges:
+
+    * `adjacency_map_current_size{groupId}`
+    * `system_heap_usage_mb`
+    * `queue_manager_size{groupId}`
+* Logs: include `{cycleId, groupId, domainId, page, chunk}` in structured logs.
+
+### Alerts (suggested)
+
+* `increase(match_drops_total[5m]) > 100`
+* `graph_build_errors > 0`
+* `heap_usage > matching.max.memory.mb * 0.9`
+* `too_many_groups_failed_in_window` (configurable)
+
+---
+
+## 11. MapDB Operational Rules (don’t ignore this)
+
+* **Flush policy**: MapDB is flushed to disk on every forced drain, and periodic commits every `mapdb.commit.interval.seconds` (default 5s).
+* **Disk sizing**: Provisioned disk ≥ `match.queue.capacity * avgSerializedMatchSize * safetyFactor` (calculate with measured sizes; default safetyFactor=1.5).
+* **TTL & cleanup**: Per-group entries removed after finalization; MapDB compaction scheduled daily during low load.
+* **Failure**: If MapDB write or disk error occurs, mark group `FAILED` and alert. Do **not** continue processing for that group.
+* **Placement**: Use SSD-backed local disk, not network mount. Containerized: mount a dedicated volume.
+
+---
+
+## 12. Testing & Rollout
+
+### Modes
+
+* **Dry-run**: `--dry-run` computes matches and writes to logs/metrics but does not persist to PostgreSQL (useful for correctness and perf).
+* **Canary**: Run new strategy for X% groups (e.g., 1–5%); compare metrics before broad rollout.
+
+### Testing matrix
+
+* Unit tests for all `MatchingStrategy` implementations.
+* Integration tests with embedded Postgres and MapDB.
+* Load test: simulate high queue fill, MapDB flush, and concurrent groups.
+* Chaos tests: disk full, DB timeout, node fetch failures, and leader lease loss.
+
+---
+
+## 13. Security & Permissions
+
+* Use dedicated DB role for batch:
+
+    * `SELECT` on node tables
+    * `CREATE TEMP TABLE`, `INSERT`, `UPDATE` on `potential_matches`
+    * Avoid superuser
+* Store DB credentials in a secret manager (Vault, AWS Secrets Manager).
+* Audit `COPY` operations (log batch sizes and `cycleId`).
+* Limit access to MapDB files to process user only.
+
+---
+
+## 14. Configuration (selected keys & defaults)
+
+| Key                               |       Default | Purpose              |
+| --------------------------------- | ------------: | -------------------- |
+| `cron`                            | `0 0 1 * * *` | schedule             |
+| `match.max-concurrent-domains`    |           `2` | domain parallelism   |
+| `match.max-retries`               |           `3` | retries              |
+| `matching.max.memory.mb`          |        `1024` | memory guard         |
+| `matching.memory.guard.threshold` |         `0.8` | guard fraction       |
+| `graph.max-nodes-per-build`       |       `10000` | LSH build threshold  |
+| `BATCH_SIZE_FROM_CURSOR`          |        `5000` | node fetch fetchSize |
+| `match.queue.capacity`            |      `500000` | per-group buffer     |
+| `import.batch-size`               |        `5000` | COPY batch size      |
+| `mapdb.commit.interval.seconds`   |           `5` | MapDB commit         |
+
+---
+
+## 15. Sequence & Class Diagrams
+
+### 15.1 High-level sequence
+
+```mermaid
+sequenceDiagram
+  participant Scheduler
+  participant LeaseMgr
+  participant Orchestrator
+  participant JobExecutor
+  participant NodeFetcher
+  participant GraphBuilder
+  participant QueueManager
+  participant MapDB
+  participant Saver
+  participant Postgres
+
+  Scheduler->>LeaseMgr: tryAcquireGlobalLease()
+  LeaseMgr-->>Scheduler: leaseGranted
+  Scheduler->>Orchestrator: buildTasks()
+  Orchestrator->>JobExecutor: processGroup(groupId)
+  JobExecutor->>NodeFetcher: fetchNodePage()
+  NodeFetcher-->>JobExecutor: nodes
+  JobExecutor->>GraphBuilder: buildChunkAndScore()
+  GraphBuilder->>QueueManager: enqueue(matches)
+  QueueManager->>MapDB: drainToMapDB()
+  JobExecutor->>Saver: finalizeAndSave()
+  Saver->>Postgres: COPY + UPSERT
+  Postgres-->>Saver: ok
+  JobExecutor->>LeaseMgr: releaseLease()
+```
+
+### 15.2 Class diagram (summary)
+
 ```mermaid
 classDiagram
-    class PotentialMatchesCreationScheduler {
-        +Scheduled entrypoint
-        +Builds task list
-        +Triggers JobExecutor
-    }
-
-    class PotentialMatchesCreationJobExecutor {
-        +Paged per-group processing
-        +Retry/backoff
-        +Limits concurrent pages
-    }
-
-    class PotentialMatchServiceImpl {
-        +Fetch node IDs/nodes
-        +Derive weight function
-        +Drive GraphPreProcessor
-    }
-
-    class NodeFetchService {
-        +Async, transactional fetch
-        +Partitioned fetch of nodes
-        +Marks nodes processed
-    }
-
-    class WeightFunctionResolver {
-        +Chooses metadata-based weight function
-        +Registers configurable weight function
-    }
-
-    class GraphPreProcessor {
-        +Selects strategy: SYMMETRIC/BIPARTITE/AUTO
-        +Global build concurrency
-        +Deadline watchdog
-    }
-
-    class SymmetricGraphBuilder {
-        +Index nodes
-        +Chunk computation with backpressure
-        +Retry on chunks
-        +Stream edges for final save
-    }
-
-    class BipartiteGraphBuilder {
-        +Cartesian chunking across partitions
-        +Process chunk matches
-        +Persist chunk results to MapDB
-        +Rebuild graph from MapDB
-    }
-
-    class PotentialMatchComputationProcessorImp {
-        +Per-group queue manager
-        +Enqueue/de-duplicate
-        +Dynamic flush
-        +Drain to MapDB and PostgreSQL
-    }
-
-    class QueueManagerFactory {
-        +Bounded per-group queues
-        +Periodic/boosted/blocking flush
-        +TTL eviction
-    }
-
-    class GraphStore {
-        +Transient edges in MapDB
-        +Batched writes with commit
-        +Stream by group
-        +Cleanup
-    }
-
-    class PotentialMatchSaver {
-        +Async PostgreSQL persistence
-        +Temp table + COPY + upsert
-        +Deletion and counting
-    }
-```
-
-### **Component Responsibilities**
-| **Component** | **Responsibility** |
-|---------------|--------------------|
-| PotentialMatchesCreationScheduler | Scheduled entrypoint, task list building, JobExecutor trigger |
-| PotentialMatchesCreationJobExecutor | Paged per-group processing with retry/backoff |
-| PotentialMatchServiceImpl | Node fetching, weight function resolution, graph preprocessing |
-| NodeFetchService | Async, transactional node fetching and marking |
-| WeightFunctionResolver | Metadata-based weight function selection |
-| GraphPreProcessor | Strategy selection, global build concurrency |
-| SymmetricGraphBuilder | Node indexing, chunked computation, edge streaming |
-| BipartiteGraphBuilder | Partition chunking, match processing, MapDB persistence |
-| PotentialMatchComputationProcessorImp | Queue management, flushing, PostgreSQL persistence |
-| QueueManagerFactory | Bounded queue management, flush orchestration |
-| GraphStore | Transient edge storage, batched writes, streaming, cleanup |
-| PotentialMatchSaver | Async PostgreSQL persistence with upsert |
-
----
-
-## **5) Concurrency and Backpressure**
-
-### **Concurrency Model Diagram**
-```mermaid
-graph TD
-    subgraph Semaphores
-        S1[domainSemaphore]
-        S2[groupSemaphore]
-        S3[pageSemaphore]
-        S4[buildSemaphore]
-        S5[computeSemaphore]
-        S6[mappingSemaphore]
-        S7[saveSemaphore]
-        S8[storageSemaphore]
-    end
-
-    subgraph Executors
-        E1[matchCreationExecutorService]
-        E2[ioExecutorService]
-        E3[graphExecutorService]
-        E4[persistenceExecutor]
-        E5[queueFlushExecutor]
-        E6[watchdogExecutor]
-    end
-
-    S1 --> E1
-    S2 --> E1
-    S3 --> E1
-    S4 --> E3
-    S5 --> E3
-    S6 --> E3
-    S7 --> E4
-    S8 --> E4
-```
-
-### **Backpressure Mechanisms**
-- **Bounded Queues**: Capacity limits to prevent memory overload
-- **Dynamic Flush Intervals**: Adjust based on queue fill ratio
-- **Boosted Drains**: Triggered at fill ratio thresholds
-- **Drops with Metrics**: Track and alert on queue overflows
-
-### **Concurrency Controls**
-- **Semaphores**: Control access to domains, groups, pages, builds, computations, mappings, saves
-- **Executors**: Separate pools for orchestration, I/O, graph building, persistence, queue flushing, watchdog
-- **Acquisition Order**: Domain → Group → Page → Build/Compute/Mapping → Save
-
----
-
-## **6) Data and Persistence**
-
-### **Data Model Diagram**
-```mermaid
-erDiagram
-    NODE {
-        uuid id PK
-        string referenceId
-        string type
-        timestamp createdAt
-        jsonb metaData
-    }
-
-    POTENTIAL_MATCH {
-        string referenceId
-        string matchedReferenceId
-        double compatibilityScore
-        uuid groupId
-        uuid domainId
-    }
-
-    GRAPH_RECORDS_POTENTIAL_MATCH {
-        string referenceId
-        string matchedReferenceId
-        double compatibilityScore
-        uuid groupId
-        uuid domainId
-    }
-
-    POTENTIAL_MATCH_ENTITY {
-        uuid id PK
-        string referenceId
-        string matchedReferenceId
-        double compatibilityScore
-        uuid groupId
-        uuid domainId
-        string processingCycleId
-        timestamp matchedAt
-    }
-
-    NODE ||--o{ POTENTIAL_MATCH : "has"
-    POTENTIAL_MATCH ||--|{ GRAPH_RECORDS_POTENTIAL_MATCH : "transforms to"
-    GRAPH_RECORDS_POTENTIAL_MATCH ||--|{ POTENTIAL_MATCH_ENTITY : "persists as"
-```
-
-### **Persistence Layers**
-- **MapDB (GraphStore)**:
-    - Key: `groupId:chunkIndex:referenceId:matchedReferenceId` → serialized `PotentialMatch`
-    - Batched persist with commit
-    - Streaming and cleanup by group
-- **PostgreSQL (PotentialMatchStorageProcessor)**:
-    - COPY to temp table + upsert into `public.potential_matches`
-    - Upsert key: `(group_id, reference_id, matched_reference_id)`
-    - Incremental and finalization save paths
-
----
-
-## **7) Resilience and Error Handling**
-
-### **Resilience Mechanisms Diagram**
-```mermaid
-graph TD
-    A[Error Handling] --> B[Timeouts]
-    A --> C[Retries & Backoff]
-    A --> D[Circuit Breakers]
-    A --> E[Fallbacks]
-
-    B --> F[Semaphore acquisitions]
-    B --> G[Async tasks]
-    B --> H[Chunk processing]
-    B --> I[Flushes]
-    B --> J[MapDB commits]
-    B --> K[DB saves]
-
-    C --> L[Page processing]
-    C --> M[Symmetric chunk processing]
-    C --> N[Storage layer]
-
-    D --> O[BipartiteGraphBuilder]
-
-    E --> P[PotentialMatchComputationProcessor]
-    E --> Q[GraphStore]
-```
-
-### **Error Handling Strategies**
-- **Timeouts**: Applied to semaphore acquisitions, async tasks, chunk processing, flushes, MapDB commits, DB saves
-- **Retries & Backoff**:
-    - Page processing (configurable)
-    - Symmetric chunk processing (exponential backoff)
-    - Storage layer (`@Retryable` for batch saves/deletes)
-- **Circuit Breakers/Fallbacks**:
-    - BipartiteGraphBuilder (Resilience4j `@Retry`/`@CircuitBreaker` with fallback)
-    - PotentialMatchComputationProcessor fallbacks for chunk and pending save
-    - GraphStore fallbacks for persist/stream/clean
-- **Shutdown**: Flush queues, remove instances, cleanup GraphStore, orderly executor termination
-
----
-
-## **8) Observability**
-
-### **Observability Diagram**
-```mermaid
-graph TD
-    A[Metrics] --> B[Timers]
-    A --> C[Counters]
-    A --> D[Gauges]
-
-    B --> E[batch_matches_total_duration]
-    B --> F[matching_duration]
-    B --> G[graph_preprocessor_duration]
-    B --> H[storage_processor_duration]
-
-    C --> I[nodes_processed_total]
-    C --> J[matches_generated_total]
-    C --> K[matching_errors_total]
-    C --> L[queue_drain_warnings_total]
-
-    D --> M[adjacency_map_current_size]
-    D --> N[system_cpu_usage]
-    D --> O[executor_queue_length]
-```
-
-### **Key Metrics**
-- **Timers**: End-to-end durations, graph build durations, storage durations
-- **Counters**: Nodes processed, matches generated, errors, queue warnings
-- **Gauges**: Map sizes, CPU usage, executor queue lengths
-
-### **Logging**
-- **Tags**: `groupId`, `domainId`, `cycleId`, `page/chunk`
-- **Levels**: Warnings for backpressure, timeouts, partial pages
-
----
-
-## **9) Configuration & Tuning**
-
-### **Configuration Matrix**
-| **Category** | **Key** | **Default** | **Effect** |
-|--------------|---------|-------------|------------|
-| Scheduling | match.save.delay | 600000 | Fixed delay between cycles (ms) |
-| Concurrency | match.max-concurrent-domains | 2 | Domain-level parallelism |
-| Paging | match.batch-limit | 500 | Nodes per page request |
-| Retries | match.max-retries | 3 | Page retry count |
-| Graph Build | graph.max-concurrent-builds | 2 | Build parallelism |
-| Queue & Flush | match.queue.capacity | 500k..1M | Bounded queue size |
-| Storage | matches.save.batch-size | 5000 | DB batch size |
-| MapDB | mapdb.path | d:/web_dev/... | DB file path |
-
-### **Tuning Guidance**
-- Increase `maxConcurrentDomains`, pool sizes, and queue capacity to scale throughput
-- Adjust `chunkSize`, `node-fetch batch-size`, and commit threads to match I/O bandwidth
-- Use flush thresholds and boosted drains to manage bursty loads
-
----
-
-## **10) Scaling & Capacity Planning**
-
-### **Scaling Diagram**
-```mermaid
-graph TD
-    A[Horizontal Scaling] --> B[Domain/Group Concurrency]
-    A --> C[Executor Pools]
-
-    B --> D[maxConcurrentDomains]
-    B --> E[groupSemaphore]
-
-    C --> F[matchCreationExecutorService]
-    C --> G[ioExecutorService]
-    C --> H[graphExecutorService]
-```
-
-### **Capacity Planning**
-- **Horizontal Scaling**: Via domain/group concurrency and executor pools
-- **Backpressure**: Ensures bounded memory; queues provide smoothing for bursty producers
-- **MapDB**: SSD-backed local paths recommended for low-latency persistence
-- **Monitoring**: MapDB commit latency and queue flush throughput are critical
-
----
-
-## **11) Security & Data Integrity**
-
-### **Security Diagram**
-```mermaid
-graph TD
-    A[Security] --> B[Data Integrity]
-    A --> C[Access Control]
-
-    B --> D[Upsert Semantics]
-    B --> E[MapDB Transient Storage]
-
-    D --> F[Prevents Duplicates]
-    E --> G[Per-Group Cleanup]
-```
-
-### **Key Measures**
-- **Upsert Semantics**: Prevents duplicates in PostgreSQL on `(group_id, reference_id, matched_reference_id)`
-- **MapDB**: Transient and per-group cleaned after finalization
-- **Credentials**: Managed via Hikari configuration (externalized)
-- **Idempotency**: Finalization re-reads edges for final write safely
-
----
-
-## **12) Trade-offs & Known Considerations**
-
-### **Trade-offs Diagram**
-```mermaid
-graph TD
-    A[Trade-offs] --> B[Two-Stage Persistence]
-    A --> C[Blocking Waits]
-    A --> D[MetadataEncoder Cache]
-
-    B --> E[Adds I/O]
-    B --> F[Operational Decoupling]
-
-    C --> G[Requires Executor Sizing]
-    C --> H[Prevents Starvation]
-
-    D --> I[Shared Cache Risk]
-    D --> J[Per-Batch Localization]
-```
-
-### **Considerations**
-- **Two-Stage Persistence**: Adds I/O but provides backpressure and operational decoupling
-- **Blocking Waits**: Requires adequate executor sizing to prevent starvation
-- **MetadataEncoder Cache**: Batch-global cache reset not ideal if shared; prefer per-batch or strategy-local instances
-- **Double-Processing Risk**: Verify dedupe/desired behavior in symmetric pipeline
-- **Naming Consistency**: Minor log/metric duplication in GraphStore can be polished
-
----
-
-## **13) Deployment & Operational Notes**
-
-### **Deployment Diagram**
-```mermaid
-graph TD
-    A[Prerequisites] --> B[PostgreSQL]
-    A --> C[Local Disk for MapDB]
-
-    B --> D[Write Throughput]
-    C --> E[Write Permissions]
-    C --> F[Adequate Space]
-```
-
-### **Operational Notes**
-- **Prerequisites**: PostgreSQL reachable with sufficient write throughput; local disk path for MapDB
-- **Shutdown**: Module flushes queues, removes queue managers, cleans GraphStore per group, closes executors
-- **Portability**: Ensure `mapdb.path` configured appropriately for target OS/container
-
----
-
-## **14) Sequence Flows**
-
-### **Symmetric Strategy Flow**
-```mermaid
-sequenceDiagram
-    participant Scheduler
-    participant JobExecutor
-    participant PotentialMatchService
-    participant NodeFetchService
-    participant GraphPreProcessor
-    participant SymmetricGraphBuilder
-    participant QueueManager
-    participant GraphStore
-    participant PotentialMatchSaver
-
-    Scheduler->>JobExecutor: Trigger per-group job
-    JobExecutor->>PotentialMatchService: Process group
-    PotentialMatchService->>NodeFetchService: Fetch node IDs/nodes
-    NodeFetchService-->>PotentialMatchService: Nodes
-    PotentialMatchService->>GraphPreProcessor: Build graph
-    GraphPreProcessor->>SymmetricGraphBuilder: Index nodes, process chunks
-    SymmetricGraphBuilder->>QueueManager: Enqueue matches
-    QueueManager->>GraphStore: Drain to MapDB
-    QueueManager->>PotentialMatchSaver: Persist to PostgreSQL
-    PotentialMatchSaver->>NodeFetchService: Mark nodes processed
-```
-
-### **Bipartite Strategy Flow**
-```mermaid
-sequenceDiagram
-    participant GraphPreProcessor
-    participant BipartiteGraphBuilder
-    participant GraphStore
-    participant PotentialMatchSaver
-
-    GraphPreProcessor->>BipartiteGraphBuilder: Process chunks
-    BipartiteGraphBuilder->>GraphStore: Persist chunk results
-    BipartiteGraphBuilder->>GraphStore: Stream edges, rebuild graph
-    GraphStore->>PotentialMatchSaver: Finalize to PostgreSQL
-    GraphStore->>GraphStore: Cleanup
+  class PotentialMatchesCreationScheduler
+  class PotentialMatchesCreationJobExecutor
+  class PotentialMatchServiceImpl
+  class NodeFetchService
+  class GraphPreProcessor
+  class SymmetricGraphBuilder
+  class BipartiteGraphBuilder
+  class QueueManager
+  class GraphStore
+  class PotentialMatchSaver
+
+  PotentialMatchesCreationScheduler --> PotentialMatchesCreationJobExecutor
+  PotentialMatchesCreationJobExecutor --> PotentialMatchServiceImpl
+  PotentialMatchServiceImpl --> NodeFetchService
+  PotentialMatchServiceImpl --> GraphPreProcessor
+  GraphPreProcessor --> SymmetricGraphBuilder
+  GraphPreProcessor --> BipartiteGraphBuilder
+  SymmetricGraphBuilder --> QueueManager
+  QueueManager --> GraphStore
+  GraphStore --> PotentialMatchSaver
 ```
 
 ---
 
-## **15) Glossary**
+## 16. Operational Runbook (cheat sheet)
 
-| **Term** | **Definition** |
-|----------|----------------|
-| **Domain/Group** | Logical segmentation of nodes for matching |
-| **CycleId** | Unique identifier for a scheduled processing cycle |
-| **MatchType** | SYMMETRIC (same-type nodes) vs BIPARTITE (left/right partitions) |
-| **LSH** | Locality Sensitive Hashing for candidate pair narrowing |
-| **MapDB** | Embedded key/value store for transient graph edge staging |
+**Start-of-day checks**
+
+* Ensure `mapdb.path` volume free space > threshold.
+* Postgres reachable and WAL retention adequate.
+* Monitoring dashboards up.
+
+**If a group fails**
+
+* Inspect `LastRunPotentialMatches` for `processing_cycle_id`.
+* Check MapDB status and commit logs for group.
+* If MapDB disk full: free space or increase volume; re-run group after cleanup.
+* For DB COPY failures: inspect temp table logs; re-run save with same `processing_cycle_id` (idempotent).
+
+**Recovery**
+
+* Re-run a group manually via admin job; uses `processing_cycle_id` to avoid duplicate score regressions because UPSERT logic chooses highest score.
 
 ---
 
-This completes the High-Level Design (HLD) with comprehensive diagrams for the **Scheduled Potential Match Creation** system.
+## 17. Trade-offs & Limitations
+
+* **Two-stage persistence (MapDB + Postgres)** adds operational complexity (MapDB lifecycle) but provides backpressure and high write throughput.
+* **Not exactly-once** across cluster reboots — UPSERT strategy mitigates duplicates, but consumers must accept "latest best-scored" semantics.
+* **Large groups** may need vertical scaling or sharding; consider sharding by `domainId` for horizontal scale in future.
+
+---
+
+## 18. Future improvements (roadmap)
+
+* Replace MapDB with durable streaming (Kafka/Redis Streams) for distributed durability and replay.
+* Implement distributed checkpointing for group-level resume after crash.
+* Move LSH to an external index (HNSW/FAISS) for higher recall and persistent indices.
+* Add ML-based ranking step post-persistence.
+
+---
+
+## 19. Appendix — Useful snippets
+
+### Global lease (DB conceptual)
+
+```sql
+BEGIN;
+SELECT id FROM batch_leases WHERE name='potential_matches' FOR UPDATE SKIP LOCKED;
+-- if row returned -> hold lease and proceed; else COMMIT and exit cycle
+COMMIT;
+```
+
+### UPSERT (keep highest score)—Postgres
+
+(See section 6; copy-paste ready.)
+
+### JDBC streaming (node fetch pseudo)
+
+```java
+PreparedStatement ps = conn.prepareStatement(sql, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
+ps.setFetchSize(BATCH_SIZE_FROM_CURSOR);
+ResultSet rs = ps.executeQuery();
+while(rs.next()) { /* read node, buffer, backpressure checks */ }
+```
+
+---
