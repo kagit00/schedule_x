@@ -208,32 +208,38 @@ graph TB
 
     %% Producer Threads
     subgraph ProducerThreads ["Producer Threads (2 per Group)"]
-        X --> P1[PotentialMatchStreamingService<br/>Streams from potential_matches table]
-        X --> P2[PerfectMatchStreamingService<br/>Streams from perfect_matches table]
+        X --> P1["PotentialMatchStreamingService<br>Streams from potential_matches table"]
+        X --> P2["PerfectMatchStreamingService<br>Streams from perfect_matches table"]
     end
 
     %% In-Memory Buffer
     subgraph InMemoryBuffer ["Bounded In-Memory Buffer"]
-        B[LinkedBlockingQueue<br/>Capacity: 100 Batches<br/>Acts as a shock absorber]
+        B["LinkedBlockingQueue<br>Capacity: 100 Batches<br>Acts as a shock absorber"]
     end
 
     %% Consumer Thread
     subgraph ConsumerThread ["Consumer Thread (1 per Group)"]
-        C[Export & Publish Service]
+        C["Export & Publish Service"]
     end
 
-    P1 -->|queue.put(batch)<br/>(Blocks if full)| B
-    P2 -->|queue.put(batch)<br/>(Blocks if full)| B
-    C -->|queue.poll(300ms)<br/>(Waits if empty)| B
+    P1 --> B
+    P2 --> B
+    B --> C
+
+    %% Edge Labels (use text instead of <br/>)
+    P1 -.->|"queue.put(batch) — Blocks if full"| B
+    P2 -.->|"queue.put(batch) — Blocks if full"| B
+    C -.->|"queue.poll(300ms) — Waits if empty"| B
 
     %% Output Sinks
     subgraph OutputSinks ["Output Sinks"]
-        D[ExportService<br/>Writes to File]
-        E[ScheduleXProducer<br/>Sends Kafka Notification]
+        D["ExportService<br>Writes to File"]
+        E["ScheduleXProducer<br>Sends Kafka Notification"]
     end
 
-    C -->|Lazily consumes stream| D
-    C -->|After file is written| E
+    C -->|"Lazily consumes stream"| D
+    C -->|"After file is written"| E
+
 ```
 
 ### **4.2. Granular Discussion & Key Design Decisions**
