@@ -50,19 +50,23 @@ The module is architected around a staged, asynchronous processing model to deco
 
 ```mermaid
 graph TD
-    A[Kafka Consumer Threads<br>Concurrency: 4] --> B[Payload Processor]
+    A["Kafka Consumer Threads<br/>Concurrency: 4"] --> B[Payload Processor]
     B --> C[Import Orchestration Service]
-    C -- 1. Creates Job Record<br>(Status: PENDING) --► F[DB: `job_status` Table]
-    C -- 2. Routes to appropriate<br>workflow (Cost vs. Non-Cost) --► D{Batch Processing Engine}
-    D -- 3. Submits Batches to Executor --► G[nodesImportExecutor<br>Queue Capacity: 100]
-    G --► E[Storage Layer]
-    subgraph "High-Throughput Persistence"
-        E -- 4. Builds In-Memory CSV --► H[PostgreSQL `COPY` Command]
-        H -- 5. `INSERT ... ON CONFLICT DO UPDATE` --► I[DB: `nodes` Table]
+
+    C -->|"1. Creates Job Record<br/>Status: PENDING"| F["DB: job_status Table"]
+    C -->|"2. Routes to appropriate<br/>workflow (Cost vs Non-Cost)"| D{Batch Processing Engine}
+    D -->|"3. Submits Batches to Executor"| G["nodesImportExecutor<br/>Queue Capacity: 100"]
+    G --> E[Storage Layer]
+
+    subgraph High_Throughput_Persistence ["High-Throughput Persistence"]
+        E -->|"4. Builds In-Memory CSV"| H["PostgreSQL COPY Command"]
+        H -->|"5. INSERT ... ON CONFLICT DO UPDATE"| I["DB: nodes Table"]
     end
-    I -- Returns Upserted IDs --► E
-    E -- Reports Progress --► D
-    D -- 6. Atomically Updates Job Stats --► F
+
+    I -->|"Returns Upserted IDs"| E
+    E -->|"Reports Progress"| D
+    D -->|"6. Atomically Updates Job Stats"| F
+
 ```
 
 ### **2.2. Granular Discussion & Key Design Decisions**
