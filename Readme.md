@@ -153,27 +153,28 @@ A naive all-pairs comparison (`N²`) is computationally infeasible for large `N`
 
 ```mermaid
 flowchart TD
-    A[Start Job: Stream Potential Matches<br>from PostgreSQL via `setFetchSize`] --> B[Load `MatchingConfiguration` for the Group]
-    B --> C{Decision: Graph Type & Size}
+    A["Start Job:<br/>Stream Potential Matches<br/>from PostgreSQL via setFetchSize"] --> B["Load MatchingConfiguration for the Group"]
+    B --> C{"Decision:<br/>Graph Type & Size"}
 
-    subgraph "Strategy Selection Logic"
-        C -- Is Symmetric? --► D[Select: `TopKWeightedGreedy`]
-        C -- Is Bipartite? --► E{Node Count < 100?}
-        E -- Yes --► F[Select: `Hungarian` (Exact, O(n³))]
-        E -- No --► G{Node Count < 10K?}
-        G -- Yes --► H[Select: `Hopcroft-Karp` (Max Cardinality, O(E√V))]
-        G -- No --► I[Select: `Auction` (Weighted Approx.)]
+    subgraph Strategy_Selection_Logic ["Strategy Selection Logic"]
+        C -->|"Is Symmetric?"| D["Select: TopKWeightedGreedy"]
+        C -->|"Is Bipartite?"| E{"Node Count < 100?"}
+        E -->|"Yes"| F["Select: Hungarian<br/>Exact, O(n³)"]
+        E -->|"No"| G{"Node Count < 10K?"}
+        G -->|"Yes"| H["Select: Hopcroft-Karp<br/>Max Cardinality, O(E√V)"]
+        G -->|"No"| I["Select: Auction<br/>Weighted Approximation"]
     end
 
-    subgraph "Algorithm Execution"
-        D --> J[Process nodes greedily, picking best available match from a PriorityQueue]
-        F --> K[Build a cost matrix and find a minimum weight matching]
-        H --> L[Find the maximum number of non-adjacent edges via BFS/DFS leveling]
-        I --> M[Simulate an auction where nodes bid on matches to maximize total score]
+    subgraph Algorithm_Execution ["Algorithm Execution"]
+        D --> J["Process nodes greedily,<br/>picking best available match<br/>from a PriorityQueue"]
+        F --> K["Build a cost matrix<br/>and find a minimum weight matching"]
+        H --> L["Find maximum number<br/>of non-adjacent edges<br/>via BFS/DFS leveling"]
+        I --> M["Simulate an auction<br/>where nodes bid on matches<br/>to maximize total score"]
     end
 
-    J & K & L & M --> N[Buffer `PerfectMatchEntity` Objects]
-    N --> O[Save to PostgreSQL via Staged `COPY` Command]
+    J & K & L & M --> N["Buffer PerfectMatchEntity objects"]
+    N --> O["Save to PostgreSQL<br/>via staged COPY command"]
+
 ```
 
 ### **3.4. Granular Discussion & Key Design Decisions**
