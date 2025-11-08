@@ -1,5 +1,4 @@
 
----
 # **The Graph Matching Platform (Detailed Technical Overview)**
 
 
@@ -10,7 +9,7 @@ The platform operates as a sequential pipeline where data is progressively refin
 ```mermaid
 graph TD
     subgraph Ingestion [Module 1: Data Ingestion]
-        A[Kafka Topics: `.*-users`] --> B[Nodes Import Module]
+        A["Kafka Topics<br/>.*-users"] --> B[Nodes Import Module]
     end
 
     subgraph Persistence [Primary Datastore]
@@ -24,17 +23,19 @@ graph TD
 
     subgraph Distribution [Module 4: Client Delivery]
         F[Match Transfer Module]
-        G[Exported Files (S3/NFS)]
-        H[Kafka Topics: `*-suggestions`]
+        G["Exported Files<br/>S3 or NFS"]
+        H["Kafka Topics<br/>*-suggestions"]
     end
 
-    B -- 1. Idempotent Bulk Upsert<br>(via Staged COPY Command) --► C
-    C -- 2. JDBC Streaming of Nodes --► D
-    D -- 3. Writes Candidate Matches<br>(via Two-Tier Storage) --► C
-    C -- 4. JDBC Streaming of Candidates --► E
-    E -- 5. Writes Final Matches<br>(Graph Algorithms) --► C
-    C -- 6. Dual-Producer Streaming --► F
-    F -- 7. Exports & Publishes Notification --► G & H
+    %% Data Flow
+    B -- "1. Idempotent Bulk Upsert<br/>(via Staged COPY Command)" --> C
+    C -- "2. JDBC Streaming of Nodes" --> D
+    D -- "3. Writes Candidate Matches<br/>(via Two-Tier Storage)" --> C
+    C -- "4. JDBC Streaming of Candidates" --> E
+    E -- "5. Writes Final Matches<br/>(Graph Algorithms)" --> C
+    C -- "6. Dual-Producer Streaming" --> F
+    F -- "7. Exports & Publishes Notification" --> G & H
+
 ```
 
 ---
@@ -102,28 +103,31 @@ This engine is composed of two distinct but sequential modules: Potential Matche
 ```mermaid
 graph TD
     A[Scheduled Job Trigger] --> B[Job Executor w/ Concurrency Controls]
-    subgraph Concurrency Gates
-        B -- Acquires Lock --► B1[Domain Semaphore (max: 2)]
-        B -- Acquires Lock --► B2[Group Semaphore (max: 1)]
-    end
-    B --► C[NodeFetchService (JDBC Streaming)]
-    C --► D[GraphPreProcessor]
-    D -- Chooses Strategy --► E{Symmetric or Bipartite?}
-
-    subgraph "Symmetric (LSH) Path"
-        E --► F[LSHIndex: Build In-Memory Hash Buckets]
-        F --► G[EdgeProcessor: Query Buckets & Score Metadata]
+    
+    subgraph Concurrency_Gates [Concurrency Gates]
+        B -->|"Acquires Lock"| B1["Domain Semaphore<br/>max: 2"]
+        B -->|"Acquires Lock"| B2["Group Semaphore<br/>max: 1"]
     end
 
-    subgraph "Bipartite (Pairwise) Path"
-        E --► H[BipartiteGraphBuilder: Process Left/Right Chunks]
+    B --> C["NodeFetchService<br/>JDBC Streaming"]
+    C --> D[GraphPreProcessor]
+    D -->|"Chooses Strategy"| E{Symmetric or Bipartite?}
+
+    subgraph Symmetric_Path ["Symmetric LSH Path"]
+        E --> F["LSHIndex<br/>Build In-Memory Hash Buckets"]
+        F --> G["EdgeProcessor<br/>Query Buckets & Score Metadata"]
     end
 
-    subgraph "Two-Tier Storage Strategy"
-        G & H -- High-Volume Edges --► I[QueueManager (In-Memory Buffer)]
-        I -- Async Flush --► J[GraphStore (Disk-Backed MapDB Staging)]
-        J -- Final Stream on Completion --► K[PotentialMatchSaver (Bulk COPY to PostgreSQL)]
+    subgraph Bipartite_Path ["Bipartite Pairwise Path"]
+        E --> H["BipartiteGraphBuilder<br/>Process Left/Right Chunks"]
     end
+
+    subgraph Two_Tier_Storage ["Two-Tier Storage Strategy"]
+        G & H -->|"High-Volume Edges"| I["QueueManager<br/>In-Memory Buffer"]
+        I -->|"Async Flush"| J["GraphStore<br/>Disk-Backed MapDB Staging"]
+        J -->|"Final Stream on Completion"| K["PotentialMatchSaver<br/>Bulk COPY to PostgreSQL"]
+    end
+
 ```
 
 ### **3.2. Granular Discussion & Key Design Decisions**
