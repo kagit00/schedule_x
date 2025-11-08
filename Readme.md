@@ -1,5 +1,7 @@
+# Graph Matching Platform
+**High-throughput, fault-tolerant pipeline** that ingests millions of user nodes daily, computes **potential & perfect matches** using LSH and graph algorithms, and delivers results to clients via S3/Kafka.
 
-# **The Graph Matching Platform (Detailed Technical Overview)**
+**Tech**: Java, Spring Boot, PostgreSQL, Kafka, MapDB, LSH, Hopcroft-Karp, Mermaid
 
 
 ## **1. System Architecture: A Multi-Stage Pipeline**
@@ -241,6 +243,8 @@ graph TB
     C -->|"After file is written"| E
 
 ```
+---
+
 
 ### **4.2. Granular Discussion & Key Design Decisions**
 
@@ -249,6 +253,8 @@ graph TB
 2.  **Parallelism**: It allows I/O operations (reading from DB, writing to file) to happen concurrently, maximizing throughput.
 3.  **Backpressure**: The `LinkedBlockingQueue` is the key. If the consumer (file writing) is slow, the queue fills up, and the producers (DB readers) will naturally block. This prevents the application from reading an unbounded amount of data from the database into memory.
 
+---
+
 #### **Termination Logic: A Classic Concurrency Problem**
 Ensuring the consumer shuts down correctly without losing data is non-trivial.
 1.  **Producer Completion**: Both producer tasks are wrapped in `CompletableFuture`s.
@@ -256,3 +262,14 @@ Ensuring the consumer shuts down correctly without losing data is non-trivial.
 3.  **`done` Flag**: An `AtomicBoolean done` flag is set to `true` once `allOf` completes.
 4.  **Consumer Loop Condition**: The consumer's loop is `while (!done || !queue.isEmpty())`. This elegant condition means: "Keep running as long as the producers are not done, OR as long as there is still data in the queue to process."
 5.  **Result**: This guarantees that the consumer will process every last item placed in the queue before shutting down, ensuring zero data loss.
+
+
+---
+
+
+### Design Trade-offs
+| Challenge | Solution | Trade-off |
+|---------|----------|---------|
+| N² matching too slow | LSH for high-recall candidates | Probabilistic (not 100% recall) |
+| DB write amplification | Two-tier storage (MapDB) | Extra disk I/O, but 10x faster |
+| OOM on large graphs | Memory budgeting + sub-batching | Slightly more jobs, but stable |
