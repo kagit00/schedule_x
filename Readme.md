@@ -1,68 +1,61 @@
-```markdown
-<div style="font-family: 'Consolas', 'Lato', monospace; font-size: 10pt; line-height: 1.8; max-width: 1200px; margin: 0 auto;">
+# Graph Matching Platform (ScheduleX)
 
-<h1 style="font-weight: 200; margin-top: 2em; margin-bottom: 1em; letter-spacing: 0.5px;">Graph Matching Platform (ScheduleX)</h1>
+<br>
 
-<p style="margin-bottom: 1.5em;">
-A high-throughput <strong>matching engine</strong> built for large-scale graph-based pairing — powering systems like dating, job, or ride-sharing platforms.<br/>
-It processes millions of nodes, generates <strong>potential matches</strong> using <strong>Locality-Sensitive Hashing (LSH)</strong> and <strong>bipartite pairing</strong>, and finalizes <strong>perfect matches</strong> through algorithmic selection (Hungarian, Hopcroft–Karp, Auction, or Greedy).<br/>
-Designed for <strong>scalability, resilience, and precision</strong>, the system emphasizes idempotent ingestion, adaptive concurrency, and fault-tolerant pipelines.
-</p>
+A high-throughput **matching engine** built for large-scale graph-based pairing — powering systems like dating, job, or ride-sharing platforms.
 
-<hr style="margin: 3em 0; border: none; border-top: 1px solid #ddd;"/>
+It processes millions of nodes, generates **potential matches** using **Locality-Sensitive Hashing (LSH)** and **bipartite pairing**, and finalizes **perfect matches** through algorithmic selection (Hungarian, Hopcroft–Karp, Auction, or Greedy).
 
-<h2 style="font-weight: 200; margin-top: 2.5em; margin-bottom: 1.2em; letter-spacing: 0.5px;">At a Glance</h2>
+Designed for **scalability, resilience, and precision**, the system emphasizes idempotent ingestion, adaptive concurrency, and fault-tolerant pipelines.
 
-<table style="width: 100%; border-collapse: collapse; margin-bottom: 2em;">
-<thead>
-<tr style="background-color: #f5f5f5;">
-<th style="padding: 12px; text-align: left; border: 1px solid #ddd; font-weight: 400;">Feature</th>
-<th style="padding: 12px; text-align: left; border: 1px solid #ddd; font-weight: 400;">Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td style="padding: 10px; border: 1px solid #ddd;"><strong>Architecture</strong></td>
-<td style="padding: 10px; border: 1px solid #ddd;">Modular microservice pipeline — Ingestion → Matching → Distribution</td>
-</tr>
-<tr style="background-color: #fafafa;">
-<td style="padding: 10px; border: 1px solid #ddd;"><strong>Tech Stack</strong></td>
-<td style="padding: 10px; border: 1px solid #ddd;">Java, PostgreSQL, Kafka, MapDB, CopyManager, Docker</td>
-</tr>
-<tr>
-<td style="padding: 10px; border: 1px solid #ddd;"><strong>Core Algorithms</strong></td>
-<td style="padding: 10px; border: 1px solid #ddd;">LSH (Symmetric), Hopcroft–Karp, Hungarian, Auction, Greedy Top-K</td>
-</tr>
-<tr style="background-color: #fafafa;">
-<td style="padding: 10px; border: 1px solid #ddd;"><strong>Performance Highlights</strong></td>
-<td style="padding: 10px; border: 1px solid #ddd;">PostgreSQL COPY for bulk ingest, two-tier storage (in-memory + MapDB), bounded queues for backpressure</td>
-</tr>
-<tr>
-<td style="padding: 10px; border: 1px solid #ddd;"><strong>Reliability</strong></td>
-<td style="padding: 10px; border: 1px solid #ddd;">Idempotent writes, DLQ, retry/backoff, semaphore-based concurrency gating</td>
-</tr>
-<tr style="background-color: #fafafa;">
-<td style="padding: 10px; border: 1px solid #ddd;"><strong>Use Cases</strong></td>
-<td style="padding: 10px; border: 1px solid #ddd;">Dating (symmetric), Freelance/job (bipartite), Rider-driver, Mentorship</td>
-</tr>
-</tbody>
-</table>
+<br>
 
-<hr style="margin: 3em 0; border: none; border-top: 1px solid #ddd;"/>
+---
 
-<h2 style="font-weight: 200; margin-top: 2.5em; margin-bottom: 1.2em; letter-spacing: 0.5px;">My Role</h2>
+<br>
 
-<ul style="margin-bottom: 2em; line-height: 2;">
-<li style="margin-bottom: 0.8em;">Architected the full matching pipeline (nodes import → candidate generation → final match export).</li>
-<li style="margin-bottom: 0.8em;">Implemented <strong>high-throughput ingestion</strong> via PostgreSQL CopyManager.</li>
-<li style="margin-bottom: 0.8em;">Designed <strong>two-tier storage strategy</strong> (MapDB staging + bulk COPY) to isolate DB load.</li>
-<li style="margin-bottom: 0.8em;">Developed the <strong>PerfectMatchEngine</strong> with <strong>dynamic algorithm selection</strong> based on graph characteristics.</li>
-<li style="margin-bottom: 0.8em;">Implemented concurrency control, DLQ handling, and backpressure across modules.</li>
-</ul>
+## At a Glance
 
-<hr style="margin: 3em 0; border: none; border-top: 1px solid #ddd;"/>
+<br>
 
-<h2 style="font-weight: 200; margin-top: 2.5em; margin-bottom: 1.2em; letter-spacing: 0.5px;">Repo Structure</h2>
+| Feature | Description |
+|---------|-------------|
+| **Architecture** | Modular microservice pipeline — Ingestion → Matching → Distribution |
+| **Tech Stack** | Java, PostgreSQL, Kafka, MapDB, CopyManager, Docker |
+| **Core Algorithms** | LSH (Symmetric), Hopcroft–Karp, Hungarian, Auction, Greedy Top-K |
+| **Performance Highlights** | PostgreSQL COPY for bulk ingest, two-tier storage (in-memory + MapDB), bounded queues for backpressure |
+| **Reliability** | Idempotent writes, DLQ, retry/backoff, semaphore-based concurrency gating |
+| **Use Cases** | Dating (symmetric), Freelance/job (bipartite), Rider-driver, Mentorship |
+
+<br>
+
+---
+
+<br>
+
+## My Role
+
+<br>
+
+- Architected the full matching pipeline (nodes import → candidate generation → final match export).
+
+- Implemented **high-throughput ingestion** via PostgreSQL CopyManager.
+
+- Designed **two-tier storage strategy** (MapDB staging + bulk COPY) to isolate DB load.
+
+- Developed the **PerfectMatchEngine** with **dynamic algorithm selection** based on graph characteristics.
+
+- Implemented concurrency control, DLQ handling, and backpressure across modules.
+
+<br>
+
+---
+
+<br>
+
+## Repo Structure
+
+<br>
 
 ```
 /src               → Service code (modules 1–4)
@@ -71,19 +64,27 @@ Designed for <strong>scalability, resilience, and precision</strong>, the system
 README.md          → Overview (this file)
 ```
 
-<p style="margin: 2em 0;">
+<br>
+
 For full internal flow and design reasoning, see the deep dive below 👇
-</p>
 
-<hr style="margin: 3em 0; border: none; border-top: 1px solid #ddd;"/>
+<br>
 
-<h1 style="font-weight: 200; margin-top: 3em; margin-bottom: 1.5em; letter-spacing: 0.5px;">The Graph Matching Platform (Detailed Technical Overview)</h1>
+---
 
-<h2 style="font-weight: 200; margin-top: 2.5em; margin-bottom: 1.2em; letter-spacing: 0.5px;">1. System Architecture: A Multi-Stage Pipeline</h2>
+<br>
 
-<p style="margin-bottom: 2em;">
+# The Graph Matching Platform (Detailed Technical Overview)
+
+<br>
+
+## 1. System Architecture: A Multi-Stage Pipeline
+
+<br>
+
 The platform operates as a sequential pipeline where data is progressively refined at each stage. Each module is an independently deployable microservice or a distinct logical component within a monolith, designed with clear boundaries and contracts.
-</p>
+
+<br>
 
 ```mermaid
 graph TD
@@ -116,19 +117,27 @@ graph TD
     F -- "7. Exports & Publishes Notification" --> G & H
 ```
 
-<hr style="margin: 3em 0; border: none; border-top: 1px solid #ddd;"/>
+<br>
 
-<h2 style="font-weight: 200; margin-top: 2.5em; margin-bottom: 1.2em; letter-spacing: 0.5px;">2. Module 1: Nodes Import Module</h2>
+---
 
-<p style="margin-bottom: 1.5em;">
-<strong>Core Responsibility</strong>: To consume node data from Kafka at scale and persist it idempotently into PostgreSQL, providing a reliable foundation for all downstream processing.
-</p>
+<br>
 
-<h3 style="font-weight: 300; margin-top: 2em; margin-bottom: 1em; letter-spacing: 0.3px;">2.1. Architectural Deep Dive</h3>
+## 2. Module 1: Nodes Import Module
 
-<p style="margin-bottom: 2em;">
+<br>
+
+**Core Responsibility**: To consume node data from Kafka at scale and persist it idempotently into PostgreSQL, providing a reliable foundation for all downstream processing.
+
+<br>
+
+### 2.1. Architectural Deep Dive
+
+<br>
+
 The module is architected around a staged, asynchronous processing model to decouple Kafka consumption from database I/O, allowing each to operate at its own optimal pace under a unified backpressure system.
-</p>
+
+<br>
 
 ```mermaid
 graph TD
@@ -150,77 +159,102 @@ graph TD
     D -->|"6. Atomically Updates Job Stats"| F
 ```
 
-<h3 style="font-weight: 300; margin-top: 2em; margin-bottom: 1em; letter-spacing: 0.3px;">2.2. Granular Discussion & Key Design Decisions</h3>
+<br>
 
-<h4 style="font-weight: 300; margin-top: 1.5em; margin-bottom: 0.8em;">High-Throughput Persistence: The <code>COPY</code> Command</h4>
+### 2.2. Granular Discussion & Key Design Decisions
 
-<p style="margin-bottom: 1.5em;">
-Instead of using standard JDBC batch inserts, this module leverages PostgreSQL's <code>COPY</code> command via the <code>CopyManager</code> API. This decision was driven by performance benchmarks:
-</p>
+<br>
 
-<ul style="margin-bottom: 2em; line-height: 2;">
-<li style="margin-bottom: 0.8em;"><strong>Standard JDBC Batch Insert</strong>: ~5,000 rows/second</li>
-<li style="margin-bottom: 0.8em;"><strong>COPY Command</strong>: ~50,000 rows/second (10x improvement)</li>
-</ul>
+#### **High-Throughput Persistence: The `COPY` Command**
 
-<p style="margin-bottom: 1.5em;"><strong>How It Works</strong>:</p>
+<br>
 
-<ol style="margin-bottom: 2em; line-height: 2;">
-<li style="margin-bottom: 0.8em;">Data is buffered in memory as a CSV-formatted <code>StringWriter</code>.</li>
-<li style="margin-bottom: 0.8em;">When the buffer reaches a threshold (e.g., 10,000 rows), it's flushed to a temporary staging table via <code>COPY temp_staging FROM STDIN WITH (FORMAT CSV)</code>.</li>
-<li style="margin-bottom: 0.8em;">A single SQL statement then performs: <code>INSERT INTO nodes SELECT * FROM temp_staging ON CONFLICT (external_id) DO UPDATE SET ...</code></li>
-<li style="margin-bottom: 0.8em;">The staging table is truncated for the next batch.</li>
-</ol>
+Instead of using standard JDBC batch inserts, this module leverages PostgreSQL's `COPY` command via the `CopyManager` API. This decision was driven by performance benchmarks:
 
-<p style="margin-bottom: 2em;">
-<strong>Rationale</strong>: This approach combines the speed of <code>COPY</code> with the idempotency of <code>ON CONFLICT</code>. It's the fastest way to achieve upsert semantics in PostgreSQL at scale.
-</p>
+<br>
 
-<h4 style="font-weight: 300; margin-top: 1.5em; margin-bottom: 0.8em;">Backpressure: The Bounded Executor Queue</h4>
+- **Standard JDBC Batch Insert**: ~5,000 rows/second
+- **COPY Command**: ~50,000 rows/second (10x improvement)
 
-<p style="margin-bottom: 1.5em;">
-The <code>nodesImportExecutor</code> is configured with a <code>LinkedBlockingQueue</code> of capacity 100. When the queue is full:
-</p>
+<br>
 
-<ul style="margin-bottom: 2em; line-height: 2;">
-<li style="margin-bottom: 0.8em;">The submitting thread (Kafka consumer) will block on <code>executor.submit(task)</code>.</li>
-<li style="margin-bottom: 0.8em;">Kafka's <code>max.poll.interval.ms</code> is set to 5 minutes, giving ample time for the queue to drain.</li>
-<li style="margin-bottom: 0.8em;">If the queue doesn't drain in time, the consumer group will rebalance, and the partition will be reassigned to another consumer.</li>
-</ul>
+**How It Works**:
 
-<p style="margin-bottom: 2em;">
-<strong>Rationale</strong>: This design ensures that the application never consumes more data from Kafka than it can process, preventing memory exhaustion. The bounded queue acts as a pressure valve, naturally throttling the ingest rate to match the database's write capacity.
-</p>
+<br>
 
-<h4 style="font-weight: 300; margin-top: 1.5em; margin-bottom: 0.8em;">Idempotency: Handling Duplicate Messages</h4>
+1. Data is buffered in memory as a CSV-formatted `StringWriter`.
 
-<p style="margin-bottom: 1.5em;">
+2. When the buffer reaches a threshold (e.g., 10,000 rows), it's flushed to a temporary staging table via `COPY temp_staging FROM STDIN WITH (FORMAT CSV)`.
+
+3. A single SQL statement then performs: `INSERT INTO nodes SELECT * FROM temp_staging ON CONFLICT (external_id) DO UPDATE SET ...`
+
+4. The staging table is truncated for the next batch.
+
+<br>
+
+**Rationale**: This approach combines the speed of `COPY` with the idempotency of `ON CONFLICT`. It's the fastest way to achieve upsert semantics in PostgreSQL at scale.
+
+<br>
+
+#### **Backpressure: The Bounded Executor Queue**
+
+<br>
+
+The `nodesImportExecutor` is configured with a `LinkedBlockingQueue` of capacity 100. When the queue is full:
+
+<br>
+
+- The submitting thread (Kafka consumer) will block on `executor.submit(task)`.
+
+- Kafka's `max.poll.interval.ms` is set to 5 minutes, giving ample time for the queue to drain.
+
+- If the queue doesn't drain in time, the consumer group will rebalance, and the partition will be reassigned to another consumer.
+
+<br>
+
+**Rationale**: This design ensures that the application never consumes more data from Kafka than it can process, preventing memory exhaustion. The bounded queue acts as a pressure valve, naturally throttling the ingest rate to match the database's write capacity.
+
+<br>
+
+#### **Idempotency: Handling Duplicate Messages**
+
+<br>
+
 Kafka does not guarantee exactly-once delivery in all failure scenarios. To ensure data integrity:
-</p>
 
-<ul style="margin-bottom: 2em; line-height: 2;">
-<li style="margin-bottom: 0.8em;">Each node has a unique <code>external_id</code> (e.g., <code>user_12345</code>).</li>
-<li style="margin-bottom: 0.8em;">The <code>nodes</code> table has a unique constraint on <code>external_id</code>.</li>
-<li style="margin-bottom: 0.8em;">The upsert logic is: <code>ON CONFLICT (external_id) DO UPDATE SET updated_at = NOW(), ...</code></li>
-</ul>
+<br>
 
-<p style="margin-bottom: 2em;">
-<strong>Result</strong>: If the same Kafka message is processed twice (e.g., due to a rebalance), the second processing will simply update the existing row with the same data, resulting in a no-op. This makes the entire ingestion pipeline idempotent.
-</p>
+- Each node has a unique `external_id` (e.g., `user_12345`).
 
-<hr style="margin: 3em 0; border: none; border-top: 1px solid #ddd;"/>
+- The `nodes` table has a unique constraint on `external_id`.
 
-<h2 style="font-weight: 200; margin-top: 2.5em; margin-bottom: 1.2em; letter-spacing: 0.5px;">3. Module 2: Potential Matches Module</h2>
+- The upsert logic is: `ON CONFLICT (external_id) DO UPDATE SET updated_at = NOW(), ...`
 
-<p style="margin-bottom: 1.5em;">
-<strong>Core Responsibility</strong>: To generate a list of candidate matches for each node, filtering the search space from millions to thousands using efficient approximation techniques.
-</p>
+<br>
 
-<h3 style="font-weight: 300; margin-top: 2em; margin-bottom: 1em; letter-spacing: 0.3px;">3.1. Architectural Deep Dive</h3>
+**Result**: If the same Kafka message is processed twice (e.g., due to a rebalance), the second processing will simply update the existing row with the same data, resulting in a no-op. This makes the entire ingestion pipeline idempotent.
 
-<p style="margin-bottom: 2em;">
+<br>
+
+---
+
+<br>
+
+## 3. Module 2: Potential Matches Module
+
+<br>
+
+**Core Responsibility**: To generate a list of candidate matches for each node, filtering the search space from millions to thousands using efficient approximation techniques.
+
+<br>
+
+### 3.1. Architectural Deep Dive
+
+<br>
+
 This module is the computational workhorse of the platform. It must process millions of nodes and generate billions of potential edges, all while staying within memory and time constraints.
-</p>
+
+<br>
 
 ```mermaid
 graph TD
@@ -252,98 +286,119 @@ graph TD
     N -->|"Final Insert"| O["DB: potential_matches Table"]
 ```
 
-<h3 style="font-weight: 300; margin-top: 2em; margin-bottom: 1em; letter-spacing: 0.3px;">3.2. Granular Discussion & Key Design Decisions</h3>
+<br>
 
-<h4 style="font-weight: 300; margin-top: 1.5em; margin-bottom: 0.8em;">Why LSH? (Locality-Sensitive Hashing)</h4>
+### 3.2. Granular Discussion & Key Design Decisions
 
-<p style="margin-bottom: 1.5em;">
+<br>
+
+#### **Why LSH? (Locality-Sensitive Hashing)**
+
+<br>
+
 A naive approach to matching would compute the similarity between every pair of nodes: O(n²). For 1 million nodes, that's 1 trillion comparisons — computationally infeasible.
-</p>
 
-<p style="margin-bottom: 1.5em;">
-<strong>LSH reduces this to O(n)</strong> by using a probabilistic data structure:
-</p>
+<br>
 
-<ol style="margin-bottom: 2em; line-height: 2;">
-<li style="margin-bottom: 0.8em;"><strong>MinHash</strong>: Each node's feature set (interests, skills, etc.) is hashed into a fixed-size signature (e.g., 128 integers).</li>
-<li style="margin-bottom: 0.8em;"><strong>Banding</strong>: The signature is split into bands (e.g., 16 bands of 8 hashes each). Each band is hashed into a bucket.</li>
-<li style="margin-bottom: 0.8em;"><strong>Collision = Candidate</strong>: If two nodes hash to the same bucket in any band, they're considered candidates.</li>
-</ol>
+**LSH reduces this to O(n)** by using a probabilistic data structure:
 
-<p style="margin-bottom: 2em;">
-<strong>Guarantees</strong>: LSH is tuned such that:
-</p>
+<br>
 
-<ul style="margin-bottom: 2em; line-height: 2;">
-<li style="margin-bottom: 0.8em;">Nodes with >70% similarity have a 90% chance of being retrieved.</li>
-<li style="margin-bottom: 0.8em;">Nodes with <30% similarity have a <5% chance of being retrieved.</li>
-</ul>
+1. **MinHash**: Each node's feature set (interests, skills, etc.) is hashed into a fixed-size signature (e.g., 128 integers).
 
-<p style="margin-bottom: 2em;">
+2. **Banding**: The signature is split into bands (e.g., 16 bands of 8 hashes each). Each band is hashed into a bucket.
+
+3. **Collision = Candidate**: If two nodes hash to the same bucket in any band, they're considered candidates.
+
+<br>
+
+**Guarantees**: LSH is tuned such that:
+
+<br>
+
+- Nodes with >70% similarity have a 90% chance of being retrieved.
+- Nodes with <30% similarity have a <5% chance of being retrieved.
+
+<br>
+
 This dramatically reduces the search space while maintaining high recall for relevant matches.
-</p>
 
-<h4 style="font-weight: 300; margin-top: 1.5em; margin-bottom: 0.8em;">Two-Tier Storage: Decoupling Speed from Durability</h4>
+<br>
 
-<p style="margin-bottom: 1.5em;">
+#### **Two-Tier Storage: Decoupling Speed from Durability**
+
+<br>
+
 Writing matches directly to PostgreSQL during generation would create a bottleneck:
-</p>
 
-<ul style="margin-bottom: 2em; line-height: 2;">
-<li style="margin-bottom: 0.8em;">Each INSERT requires a network round-trip + disk I/O.</li>
-<li style="margin-bottom: 0.8em;">This would slow down the matching loop, causing the in-memory LSH index to grow unbounded.</li>
-</ul>
+<br>
 
-<p style="margin-bottom: 1.5em;"><strong>Solution: Staged Writes</strong></p>
+- Each INSERT requires a network round-trip + disk I/O.
+- This would slow down the matching loop, causing the in-memory LSH index to grow unbounded.
 
-<ol style="margin-bottom: 2em; line-height: 2;">
-<li style="margin-bottom: 0.8em;"><strong>Tier 1 (Fast)</strong>: Matches are immediately written to a <code>MapDB</code> instance, which is a memory-mapped file. This is an append-only operation, taking ~1 microsecond.</li>
-<li style="margin-bottom: 0.8em;"><strong>Tier 2 (Durable)</strong>: Every 10,000 matches, a background thread reads from MapDB, formats the data as CSV, and flushes it to PostgreSQL via <code>COPY</code>.</li>
-</ol>
+<br>
 
-<p style="margin-bottom: 2em;">
-<strong>Benefits</strong>:
-</p>
+**Solution: Staged Writes**
 
-<ul style="margin-bottom: 2em; line-height: 2;">
-<li style="margin-bottom: 0.8em;">The matching loop runs at in-memory speeds.</li>
-<li style="margin-bottom: 0.8em;">Database writes are batched and optimized.</li>
-<li style="margin-bottom: 0.8em;">If the process crashes, MapDB can be replayed (it's crash-safe).</li>
-</ul>
+<br>
 
-<h4 style="font-weight: 300; margin-top: 1.5em; margin-bottom: 0.8em;">Concurrency Control: The Semaphore Pattern</h4>
+1. **Tier 1 (Fast)**: Matches are immediately written to a `MapDB` instance, which is a memory-mapped file. This is an append-only operation, taking ~1 microsecond.
 
-<p style="margin-bottom: 1.5em;">
+2. **Tier 2 (Durable)**: Every 10,000 matches, a background thread reads from MapDB, formats the data as CSV, and flushes it to PostgreSQL via `COPY`.
+
+<br>
+
+**Benefits**:
+
+<br>
+
+- The matching loop runs at in-memory speeds.
+- Database writes are batched and optimized.
+- If the process crashes, MapDB can be replayed (it's crash-safe).
+
+<br>
+
+#### **Concurrency Control: The Semaphore Pattern**
+
+<br>
+
 Processing multiple groups concurrently improves throughput, but each group's processing is memory-intensive (building an LSH index for millions of nodes).
-</p>
 
-<p style="margin-bottom: 1.5em;">
-<strong>Mechanism</strong>: A <code>Semaphore(2)</code> limits the number of concurrent group-processing jobs to 2.
-</p>
+<br>
 
-<ul style="margin-bottom: 2em; line-height: 2;">
-<li style="margin-bottom: 0.8em;">When a new group is scheduled, the orchestrator calls <code>semaphore.tryAcquire()</code>.</li>
-<li style="margin-bottom: 0.8em;">If the semaphore is exhausted (2 groups already processing), the new group waits in a queue.</li>
-<li style="margin-bottom: 0.8em;">When a group finishes, it calls <code>semaphore.release()</code>, allowing the next group to start.</li>
-</ul>
+**Mechanism**: A `Semaphore(2)` limits the number of concurrent group-processing jobs to 2.
 
-<p style="margin-bottom: 2em;">
-<strong>Rationale</strong>: This prevents memory thrashing. On a machine with 16GB RAM, processing 3+ groups simultaneously would cause excessive GC pauses or OOM errors. By limiting to 2, we ensure each job has ~6-7GB of working memory.
-</p>
+<br>
 
-<hr style="margin: 3em 0; border: none; border-top: 1px solid #ddd;"/>
+- When a new group is scheduled, the orchestrator calls `semaphore.tryAcquire()`.
+- If the semaphore is exhausted (2 groups already processing), the new group waits in a queue.
+- When a group finishes, it calls `semaphore.release()`, allowing the next group to start.
 
-<h2 style="font-weight: 200; margin-top: 2.5em; margin-bottom: 1.2em; letter-spacing: 0.5px;">4. Module 3: Perfect Matches Module</h2>
+<br>
 
-<p style="margin-bottom: 1.5em;">
-<strong>Core Responsibility</strong>: To refine the list of potential matches into a final set of perfect matches using graph-theoretic algorithms, optimizing for global match quality.
-</p>
+**Rationale**: This prevents memory thrashing. On a machine with 16GB RAM, processing 3+ groups simultaneously would cause excessive GC pauses or OOM errors. By limiting to 2, we ensure each job has ~6-7GB of working memory.
 
-<h3 style="font-weight: 300; margin-top: 2em; margin-bottom: 1em; letter-spacing: 0.3px;">3.3. Architectural Deep Dive</h3>
+<br>
 
-<p style="margin-bottom: 2em;">
+---
+
+<br>
+
+## 4. Module 3: Perfect Matches Module
+
+<br>
+
+**Core Responsibility**: To refine the list of potential matches into a final set of perfect matches using graph-theoretic algorithms, optimizing for global match quality.
+
+<br>
+
+### 4.1. Architectural Deep Dive
+
+<br>
+
 This module treats the match problem as a graph optimization task. The choice of algorithm depends on the structure of the graph and the business requirements.
-</p>
+
+<br>
 
 ```mermaid
 graph TD
@@ -369,49 +424,63 @@ graph TD
     J -->|"Bulk Insert via COPY"| L["DB: perfect_matches Table"]
 ```
 
-<h3 style="font-weight: 300; margin-top: 2em; margin-bottom: 1em; letter-spacing: 0.3px;">3.4. Granular Discussion & Key Design Decisions</h3>
+<br>
 
-<h4 style="font-weight: 300; margin-top: 1.5em; margin-bottom: 0.8em;">Dynamic Algorithm Selection</h4>
+### 4.2. Granular Discussion & Key Design Decisions
 
-<p style="margin-bottom: 1.5em;">
+<br>
+
+#### **Dynamic Algorithm Selection**
+
+<br>
+
 There is no single "best" algorithm for graph matching; the optimal choice depends on the graph's structure and the desired outcome. This module codifies that domain knowledge.
-</p>
 
-<ul style="margin-bottom: 2em; line-height: 2;">
-<li style="margin-bottom: 0.8em;"><strong>Rationale</strong>: By creating a <code>MatchingStrategySelector</code>, we make the system extensible and intelligent. Adding a new algorithm is as simple as implementing the <code>MatchingStrategy</code> interface and adding a rule to the selector. This avoids a one-size-fits-all approach that would be inefficient or incorrect for certain use cases.</li>
-<li style="margin-bottom: 0.8em;"><strong>Example</strong>: Using the <code>Hungarian</code> algorithm on a 100,000-node graph would run for days. The selector correctly routes this to the <code>Auction</code> or <code>Hopcroft-Karp</code> algorithm, ensuring the job completes in a reasonable timeframe.</li>
-</ul>
+<br>
 
-<h4 style="font-weight: 300; margin-top: 1.5em; margin-bottom: 0.8em;">Memory-Aware Processing</h4>
+- **Rationale**: By creating a `MatchingStrategySelector`, we make the system extensible and intelligent. Adding a new algorithm is as simple as implementing the `MatchingStrategy` interface and adding a rule to the selector. This avoids a one-size-fits-all approach that would be inefficient or incorrect for certain use cases.
 
-<p style="margin-bottom: 1.5em;">
+- **Example**: Using the `Hungarian` algorithm on a 100,000-node graph would run for days. The selector correctly routes this to the `Auction` or `Hopcroft-Karp` algorithm, ensuring the job completes in a reasonable timeframe.
+
+<br>
+
+#### **Memory-Aware Processing**
+
+<br>
+
 Executing graph algorithms on large datasets is extremely memory-intensive.
-</p>
 
-<ul style="margin-bottom: 2em; line-height: 2;">
-<li style="margin-bottom: 0.8em;"><strong>Mechanism</strong>: The service is configured with a maximum memory budget (e.g., <code>1024MB</code>). Before processing a large batch, it checks <code>Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()</code>.</li>
-<li style="margin-bottom: 0.8em;"><strong>Action</strong>: If current usage exceeds a threshold (e.g., 80% of the budget), the service will either:
-  <ol style="margin-top: 0.5em; line-height: 1.8;">
-    <li>Reduce the size of the next processing sub-batch.</li>
-    <li>Gracefully fail the job with a clear "Memory limit exceeded" error.</li>
-  </ol>
-</li>
-<li style="margin-bottom: 0.8em;"><strong>Rationale</strong>: This proactive monitoring prevents the JVM from throwing an <code>OutOfMemoryError</code>, which is an unrecoverable state. It ensures the service fails cleanly and predictably.</li>
-</ul>
+<br>
 
-<hr style="margin: 3em 0; border: none; border-top: 1px solid #ddd;"/>
+- **Mechanism**: The service is configured with a maximum memory budget (e.g., `1024MB`). Before processing a large batch, it checks `Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()`.
 
-<h2 style="font-weight: 200; margin-top: 2.5em; margin-bottom: 1.2em; letter-spacing: 0.5px;">5. Module 4: Match Transfer to Client</h2>
+- **Action**: If current usage exceeds a threshold (e.g., 80% of the budget), the service will either:
+    1. Reduce the size of the next processing sub-batch.
+    2. Gracefully fail the job with a clear "Memory limit exceeded" error.
 
-<p style="margin-bottom: 1.5em;">
-<strong>Core Responsibility</strong>: To reliably export the full set of matches (both potential and perfect) and notify the client.
-</p>
+- **Rationale**: This proactive monitoring prevents the JVM from throwing an `OutOfMemoryError`, which is an unrecoverable state. It ensures the service fails cleanly and predictably.
 
-<h3 style="font-weight: 300; margin-top: 2em; margin-bottom: 1em; letter-spacing: 0.3px;">4.1. Architecture: The Producer-Consumer Pattern</h3>
+<br>
 
-<p style="margin-bottom: 2em;">
+---
+
+<br>
+
+## 5. Module 4: Match Transfer to Client
+
+<br>
+
+**Core Responsibility**: To reliably export the full set of matches (both potential and perfect) and notify the client.
+
+<br>
+
+### 5.1. Architecture: The Producer-Consumer Pattern
+
+<br>
+
 This module is a textbook implementation of the Producer-Consumer pattern, designed for high I/O throughput and decoupled processing.
-</p>
+
+<br>
 
 ```mermaid
 graph TB
@@ -443,37 +512,50 @@ graph TB
     C -->|"After file is written"| E
 ```
 
-<h3 style="font-weight: 300; margin-top: 2em; margin-bottom: 1em; letter-spacing: 0.3px;">4.2. Granular Discussion & Key Design Decisions</h3>
+<br>
 
-<h4 style="font-weight: 300; margin-top: 1.5em; margin-bottom: 0.8em;">Why Producer-Consumer?</h4>
+### 5.2. Granular Discussion & Key Design Decisions
 
-<ol style="margin-bottom: 2em; line-height: 2;">
-<li style="margin-bottom: 0.8em;"><strong>Decoupling</strong>: It separates the concern of <em>reading</em> data from the database from the concern of <em>writing</em> data to a file/Kafka. The database streaming can run at full speed while the file I/O or Kafka producer handles its own latency.</li>
-<li style="margin-bottom: 0.8em;"><strong>Parallelism</strong>: It allows I/O operations (reading from DB, writing to file) to happen concurrently, maximizing throughput.</li>
-<li style="margin-bottom: 0.8em;"><strong>Backpressure</strong>: The <code>LinkedBlockingQueue</code> is the key. If the consumer (file writing) is slow, the queue fills up, and the producers (DB readers) will naturally block. This prevents the application from reading an unbounded amount of data from the database into memory.</li>
-</ol>
+<br>
 
-<h4 style="font-weight: 300; margin-top: 1.5em; margin-bottom: 0.8em;">Termination Logic: A Classic Concurrency Problem</h4>
+#### **Why Producer-Consumer?**
 
-<p style="margin-bottom: 1.5em;">
+<br>
+
+1. **Decoupling**: It separates the concern of *reading* data from the database from the concern of *writing* data to a file/Kafka. The database streaming can run at full speed while the file I/O or Kafka producer handles its own latency.
+
+2. **Parallelism**: It allows I/O operations (reading from DB, writing to file) to happen concurrently, maximizing throughput.
+
+3. **Backpressure**: The `LinkedBlockingQueue` is the key. If the consumer (file writing) is slow, the queue fills up, and the producers (DB readers) will naturally block. This prevents the application from reading an unbounded amount of data from the database into memory.
+
+<br>
+
+#### **Termination Logic: A Classic Concurrency Problem**
+
+<br>
+
 Ensuring the consumer shuts down correctly without losing data is non-trivial.
-</p>
 
-<ol style="margin-bottom: 2em; line-height: 2;">
-<li style="margin-bottom: 0.8em;"><strong>Producer Completion</strong>: Both producer tasks are wrapped in <code>CompletableFuture</code>s.</li>
-<li style="margin-bottom: 0.8em;"><strong><code>CompletableFuture.allOf(...)</code></strong>: The main thread waits for both producers to finish.</li>
-<li style="margin-bottom: 0.8em;"><strong><code>done</code> Flag</strong>: An <code>AtomicBoolean done</code> flag is set to <code>true</code> once <code>allOf</code> completes.</li>
-<li style="margin-bottom: 0.8em;"><strong>Consumer Loop Condition</strong>: The consumer's loop is <code>while (!done || !queue.isEmpty())</code>. This elegant condition means: "Keep running as long as the producers are not done, OR as long as there is still data in the queue to process."</li>
-<li style="margin-bottom: 0.8em;"><strong>Result</strong>: This guarantees that the consumer will process every last item placed in the queue before shutting down, ensuring zero data loss.</li>
-</ol>
+<br>
 
-<hr style="margin: 3em 0; border: none; border-top: 1px solid #ddd;"/>
+1. **Producer Completion**: Both producer tasks are wrapped in `CompletableFuture`s.
 
-<div style="margin-top: 4em; padding: 2em; background-color: #f9f9f9; border-left: 4px solid #0066cc;">
-<p style="margin: 0; font-style: italic;">
-This architecture represents a production-grade system designed for scale, reliability, and maintainability. Every design decision is a deliberate trade-off between competing concerns: speed vs. durability, simplicity vs. flexibility, memory vs. throughput.
-</p>
-</div>
+2. **`CompletableFuture.allOf(...)`**: The main thread waits for both producers to finish.
 
-</div>
-```
+3. **`done` Flag**: An `AtomicBoolean done` flag is set to `true` once `allOf` completes.
+
+4. **Consumer Loop Condition**: The consumer's loop is `while (!done || !queue.isEmpty())`. This elegant condition means: "Keep running as long as the producers are not done, OR as long as there is still data in the queue to process."
+
+5. **Result**: This guarantees that the consumer will process every last item placed in the queue before shutting down, ensuring zero data loss.
+
+<br>
+
+---
+
+<br>
+
+> **Note**: This architecture represents a production-grade system designed for scale, reliability, and maintainability. Every design decision is a deliberate trade-off between competing concerns: speed vs. durability, simplicity vs. flexibility, memory vs. throughput.
+
+<br>
+
+---
