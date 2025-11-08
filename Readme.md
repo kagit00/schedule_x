@@ -204,30 +204,33 @@ This module is a textbook implementation of the Producer-Consumer pattern, desig
 
 ```mermaid
 graph TB
-    A[MatchTransferProcessor] -- Starts Job for a Group --> X
-    subgraph "Producer Threads (2 per Group)"
-        X --► P1[PotentialMatchStreamingService<br>Streams from `potential_matches` table]
-        X --► P2[PerfectMatchStreamingService<br>Streams from `perfect_matches` table]
+    A["MatchTransferProcessor"] -->|"Starts Job for a Group"| X
+
+    subgraph Producer_Threads ["Producer Threads (2 per Group)"]
+        X -->|"Streams from potential_matches table"| P1["PotentialMatchStreamingService"]
+        X -->|"Streams from perfect_matches table"| P2["PerfectMatchStreamingService"]
     end
 
-    subgraph "Bounded In-Memory Buffer"
-        B[LinkedBlockingQueue<br>Capacity: 100 Batches<br>Acts as a shock absorber]
+    subgraph InMemory_Buffer ["Bounded In-Memory Buffer"]
+        B["LinkedBlockingQueue<br/>Capacity: 100 Batches<br/>Acts as a shock absorber"]
     end
 
-    subgraph "Consumer Thread (1 per Group)"
-        C[Export & Publish Service]
+    subgraph Consumer_Thread ["Consumer Thread (1 per Group)"]
+        C["Export & Publish Service"]
     end
 
-    P1 -- `queue.put(batch)`<br>(Blocks if full) --► B
-    P2 -- `queue.put(batch)`<br>(Blocks if full) --► B
-    C -- `queue.poll(300ms)`<br>(Waits if empty) --► B
+    P1 -->|"queue.put(batch)<br/>Blocks if full"| B
+    P2 -->|"queue.put(batch)<br/>Blocks if full"| B
+    C -->|"queue.poll(300ms)<br/>Waits if empty"| B
 
-    subgraph "Output Sinks"
-        D[ExportService: Writes to File]
-        E[ScheduleXProducer: Sends Kafka Notification]
+    subgraph Output_Sinks ["Output Sinks"]
+        D["ExportService<br/>Writes to File"]
+        E["ScheduleXProducer<br/>Sends Kafka Notification"]
     end
-    C -- Lazily consumes stream --► D
-    C -- After file is written --► E
+
+    C -->|"Lazily consumes stream"| D
+    C -->|"After file is written"| E
+
 ```
 
 ### **4.2. Granular Discussion & Key Design Decisions**
