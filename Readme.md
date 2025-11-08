@@ -1,4 +1,4 @@
-
+```markdown
 <div style="font-family: 'Consolas', 'Lato', monospace; font-size: 10pt; line-height: 1.8; max-width: 1200px; margin: 0 auto;">
 
 <h1 style="font-weight: 200; margin-top: 2em; margin-bottom: 1em; letter-spacing: 0.5px;">Graph Matching Platform (ScheduleX)</h1>
@@ -475,5 +475,5 @@ This architecture represents a production-grade system designed for scale, relia
 </p>
 </div>
 
-
 </div>
+```
