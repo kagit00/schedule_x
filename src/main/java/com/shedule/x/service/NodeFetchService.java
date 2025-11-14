@@ -11,6 +11,7 @@ import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -137,5 +138,66 @@ public class NodeFetchService {
         } finally {
             sample.stop(meterRegistry.timer("node_mark_processed_duration", Tags.of("groupId", groupId.toString())));
         }
+    }
+
+    public CompletableFuture<List<UUID>> fetchNodeIdsByOffsetAsync(UUID groupId, UUID domainId, int startOffset, int limit, LocalDateTime createdAfter) {
+        Timer.Sample sample = Timer.start(meterRegistry);
+        if (groupId == null || domainId == null) {
+            log.error("Invalid input: groupId={}, domainId={}", groupId, domainId);
+            return CompletableFuture.completedFuture(Collections.emptyList());
+        }
+
+        // Normalize inputs and create effectively final variables
+        final int normalizedStartOffset = Math.max(startOffset, 0);
+        final int pageSize = Math.max(limit, 1);
+        final int pageIndex = normalizedStartOffset / pageSize;
+        final int inPageOffset = normalizedStartOffset % pageSize;
+        final LocalDateTime filterCreatedAfter = createdAfter; // Ensure it's captured safely
+
+        return CompletableFuture.supplyAsync(() ->
+                        transactionTemplate.execute(status -> {
+                            try {
+                                // Fetch first page
+                                Pageable firstPageable = PageRequest.of(pageIndex, pageSize);
+                                List<UUID> first = nodeRepository.findIdsByGroupIdAndDomainId(groupId, domainId, firstPageable, filterCreatedAfter);
+
+                                List<UUID> combined = new ArrayList<>();
+                                if (first != null) {
+                                    combined.addAll(first);
+                                }
+
+                                // If we need more items
+                                int required = inPageOffset + pageSize; // We want at least this many
+                                if (inPageOffset > 0 || combined.size() < required) {
+                                    Pageable secondPageable = PageRequest.of(pageIndex + 1, pageSize);
+                                    List<UUID> second = nodeRepository.findIdsByGroupIdAndDomainId(groupId, domainId, secondPageable, filterCreatedAfter);
+                                    if (second != null) {
+                                        combined.addAll(second);
+                                    }
+                                }
+
+                                // Trim to [inPageOffset, inPageOffset + limit)
+                                int from = Math.min(inPageOffset, combined.size());
+                                int to = Math.min(from + pageSize, combined.size());
+                                List<UUID> result = combined.subList(from, to);
+
+                                log.info("Fetched {} node IDs for groupId={}, startOffset={}, limit={} (pageIndex={}, inPageOffset={})",
+                                        result.size(), groupId, normalizedStartOffset, pageSize, pageIndex, inPageOffset);
+                                meterRegistry.counter("node_ids_fetched_total", Tags.of("groupId", groupId.toString())).increment(result.size());
+                                return result;
+                            } catch (Exception e) {
+                                meterRegistry.counter("node_fetch_ids_errors", Tags.of("groupId", groupId.toString())).increment();
+                                log.error("Failed to fetch node IDs by offset for groupId={}, startOffset={}", groupId, normalizedStartOffset, e);
+                                throw e;
+                            }
+                        }), executor)
+                .orTimeout(futureTimeoutSeconds, TimeUnit.SECONDS)
+                .exceptionally(throwable -> {
+                    log.error("Async fetchNodeIdsByOffset failed for groupId={}, startOffset={}", groupId, normalizedStartOffset, throwable);
+                    meterRegistry.counter("node_fetch_ids_errors", Tags.of("groupId", groupId.toString())).increment();
+                    return Collections.emptyList();
+                })
+                .whenComplete((result, throwable) ->
+                        sample.stop(meterRegistry.timer("node_fetch_ids_duration", Tags.of("groupId", groupId.toString()))));
     }
 }

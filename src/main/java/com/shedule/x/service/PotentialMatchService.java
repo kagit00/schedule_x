@@ -6,5 +6,5 @@ import com.shedule.x.dto.NodesCount;
 import java.util.concurrent.CompletableFuture;
 
 public interface PotentialMatchService {
-    CompletableFuture<NodesCount> matchByGroup(MatchingRequest request, int page, String cycleId);
+    CompletableFuture<NodesCount> matchByGroup(MatchingRequest request, int startOffset, int limit, String cycleId);
 }

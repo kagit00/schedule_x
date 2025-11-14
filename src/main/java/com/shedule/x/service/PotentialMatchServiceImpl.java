@@ -11,6 +11,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -42,6 +43,7 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
     private final MatchParticipationHistoryRepository matchParticipationHistoryRepository;
     private final ConcurrentLinkedQueue<MatchParticipationHistory> historyBuffer = new ConcurrentLinkedQueue<>();
     private final AtomicInteger pageCounter = new AtomicInteger(0);
+    @Value("${match.batch-overlap:200}") private int batchOverlap;
 
     public PotentialMatchServiceImpl(
             NodeFetchService nodeFetchService,
@@ -64,41 +66,41 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
     }
 
     @Override
-    public CompletableFuture<NodesCount> matchByGroup(MatchingRequest request, int page, String cycleId) {
-        int limit = getLimitValue(request);
-        Pageable pageable = PageRequest.of(page, limit);
-        request.setPage(page);
-        return processMatching(request, pageable, limit, cycleId);
+    public CompletableFuture<NodesCount> matchByGroup(MatchingRequest request, int startOffset, int limit, String cycleId) {
+        request.setLimit(limit);
+        return processMatching(request, startOffset, limit, cycleId);
     }
 
     private CompletableFuture<NodesCount> processMatching(
-            MatchingRequest request, Pageable pageable, int limit, String cycleId) {
+            MatchingRequest request, int startOffset, int limit, String cycleId) {
         Timer.Sample sample = Timer.start(meterRegistry);
         UUID groupId = request.getGroupId();
         UUID domainId = request.getDomainId();
-        int page = pageable.getPageNumber();
 
-        return nodeFetchService.fetchNodeIdsAsync(groupId, domainId, pageable, request.getCreatedAfter())
+        return nodeFetchService.fetchNodeIdsByOffsetAsync(groupId, domainId, startOffset, limit, request.getCreatedAfter())
                 .thenComposeAsync(nodeIds -> {
                     int numberOfNodes = nodeIds.size();
-                    log.info("Fetched {} node IDs for groupId={}, domainId={}, cycleId={}, page={}, createdAfter={}",
-                            numberOfNodes, groupId, domainId, cycleId, page, request.getCreatedAfter());
+                    log.info("Fetched {} node IDs for groupId={}, domainId={}, cycleId={}, startOffset={}, limit={}, createdAfter={}",
+                            numberOfNodes, groupId, domainId, cycleId, startOffset, limit, request.getCreatedAfter());
+
                     if (numberOfNodes > MAX_NODES) {
-                        log.warn("Node count {} exceeds maximum {} for groupId={}, domainId={}, cycleId={}, page={}",
-                                numberOfNodes, MAX_NODES, groupId, domainId, cycleId, page);
+                        log.warn("Node count {} exceeds maximum {} for groupId={}, domainId={}, cycleId={}, startOffset={}",
+                                numberOfNodes, MAX_NODES, groupId, domainId, cycleId, startOffset);
                         meterRegistry.counter("node_count_exceeded", "groupId", groupId.toString(), "domainId", domainId.toString(), "cycleId", cycleId).increment();
                         throw new IllegalStateException("Node count exceeds maximum limit");
                     }
+
                     if (nodeIds.isEmpty()) {
-                        log.warn("No node IDs for groupId={}, domainId={}, cycleId={}, page={}", groupId, domainId, cycleId, page);
+                        log.warn("No node IDs for groupId={}, domainId={}, cycleId={}, startOffset={}", groupId, domainId, cycleId, startOffset);
                         return CompletableFuture.completedFuture(NodesCount.builder().nodeCount(0).hasMoreNodes(false).build());
                     }
+
                     return fetchNodesInSubBatches(nodeIds, groupId, request.getCreatedAfter())
                             .thenComposeAsync(nodes -> {
-                                log.info("{} new nodes fetched for groupId={}, domainId={}, cycleId={}, page={}",
-                                        nodes.size(), groupId, domainId, cycleId, page);
+                                log.info("{} new nodes fetched for groupId={}, domainId={}, cycleId={}, startOffset={}",
+                                        nodes.size(), groupId, domainId, cycleId, startOffset);
                                 bufferMatchParticipationHistory(nodes, groupId, domainId, cycleId);
-                                return processGraphAndMatchesAsync(nodes, request, groupId, domainId, numberOfNodes, limit, cycleId)
+                                return processGraphAndMatches(nodes, request, groupId, domainId, numberOfNodes, limit, cycleId, startOffset)
                                         .thenApply(v -> NodesCount.builder()
                                                 .nodeCount(numberOfNodes)
                                                 .hasMoreNodes(numberOfNodes >= limit)
@@ -106,8 +108,8 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
                             }, batchExecutor);
                 }, batchExecutor)
                 .exceptionally(throwable -> {
-                    log.error("Matching failed for groupId={}, domainId={}, cycleId={}, page={}: {}",
-                            groupId, domainId, cycleId, page, throwable.getMessage());
+                    log.error("Matching failed for groupId={}, domainId={}, cycleId={}, startOffset={}: {}",
+                            groupId, domainId, cycleId, startOffset, throwable.getMessage());
                     meterRegistry.counter("matching_errors", "groupId", groupId.toString(), "domainId", domainId.toString(),
                             "cycleId", cycleId, "numberOfNodes", "0").increment();
                     return NodesCount.builder().nodeCount(0).hasMoreNodes(false).build();
@@ -171,25 +173,43 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
         return resultFuture;
     }
 
-    private CompletableFuture<Void> processGraphAndMatchesAsync(
-            List<Node> nodes, MatchingRequest request, UUID groupId, UUID domainId, int numberOfNodes, int limit, String cycleId) {
+    private CompletableFuture<Void> processGraphAndMatches(
+            List<Node> nodes, MatchingRequest request, UUID groupId, UUID domainId,
+            int numberOfNodes, int limit, String cycleId, int startOffset) {
         if (nodes.isEmpty()) {
-            log.warn("No nodes fetched for groupId={}, domainId={}, cycleId={}", groupId, domainId, cycleId);
+            log.warn("No nodes fetched for groupId={}, domainId={}, cycleId={}, startOffset={}", groupId, domainId, cycleId, startOffset);
             return CompletableFuture.completedFuture(null);
         }
+
         request.setNumberOfNodes(nodes.size());
         String weightFunctionKey = weightFunctionResolver.resolveWeightFunctionKey(groupId);
         request.setWeightFunctionKey(weightFunctionKey);
 
         return graphPreProcessor.buildGraph(nodes, request)
                 .thenAcceptAsync(graphResult -> {
-                    log.info("Processed graph for groupId={}, domainId={}, cycleId={}, page={}, numberOfNodes={}", groupId, domainId, cycleId, request.getPage(), numberOfNodes);
-                    List<UUID> nodeIds = nodes.stream().map(Node::getId).filter(Objects::nonNull).collect(Collectors.toList());
-                    nodeFetchService.markNodesAsProcessed(nodeIds, groupId);
+                    log.info("Processed graph for groupId={}, domainId={}, cycleId={}, startOffset={}, numberOfNodes={}",
+                            groupId, domainId, cycleId, startOffset, numberOfNodes);
+
+                    // Only mark non-overlap prefix as processed
+                    int cutoff = Math.max(0, nodes.size() - batchOverlap);
+                    List<UUID> nodeIdsToMark = nodes.stream()
+                            .map(Node::getId)
+                            .filter(Objects::nonNull)
+                            .limit(cutoff)
+                            .collect(Collectors.toList());
+
+                    if (!nodeIdsToMark.isEmpty()) {
+                        nodeFetchService.markNodesAsProcessed(nodeIdsToMark, groupId);
+                        log.debug("Marked {} nodes as processed (overlap={}, total={}) for groupId={}, startOffset={}",
+                                nodeIdsToMark.size(), batchOverlap, nodes.size(), groupId, startOffset);
+                    } else {
+                        log.debug("No nodes to mark for startOffset={} (nodes={} overlap={})",
+                                startOffset, nodes.size(), batchOverlap);
+                    }
                 }, graphExecutor)
                 .exceptionally(throwable -> {
-                    log.error("Graph processing failed for groupId={}, domainId={}, cycleId={}, page={}, numberOfNodes={}: {}",
-                            groupId, domainId, cycleId, request.getPage(), numberOfNodes, throwable.getMessage());
+                    log.error("Graph processing failed for groupId={}, domainId={}, cycleId={}, startOffset={}, numberOfNodes={}: {}",
+                            groupId, domainId, cycleId, startOffset, numberOfNodes, throwable.getMessage());
                     meterRegistry.counter("graph_processing_errors", "groupId", groupId.toString(), "domainId", domainId.toString(),
                             "cycleId", cycleId, "numberOfNodes", String.valueOf(numberOfNodes)).increment();
                     throw new CompletionException("Graph processing failed", throwable);
@@ -226,11 +246,5 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
                 }
             }, ioExecutor);
         }
-    }
-
-    private int getLimitValue(MatchingRequest request) {
-        return request.getLimit() != null
-                ? Math.min(Math.max(request.getLimit(), MIN_LIMIT), MAX_LIMIT)
-                : PotentialMatchServiceImpl.BATCH_DEFAULT_LIMIT;
     }
 }

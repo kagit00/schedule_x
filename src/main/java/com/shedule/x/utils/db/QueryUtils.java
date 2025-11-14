@@ -5,77 +5,69 @@ import lombok.experimental.UtilityClass;
 @UtilityClass
 public final class QueryUtils {
 
-    private static final String UPSERT_POTENTIAL_MATCHES_SQL =
-            "INSERT INTO public.potential_matches (\n" +
-                    "    id,\n" +
-                    "    group_id,\n" +
-                    "    domain_id,\n" +
-                    "    processing_cycle_id,\n" +
-                    "    reference_id,\n" +
-                    "    matched_reference_id,\n" +
-                    "    compatibility_score,\n" +
-                    "    matched_at\n" +
-                    ")\n" +
-                    "SELECT\n" +
-                    "    id,\n" +
-                    "    group_id,\n" +
-                    "    domain_id,\n" +
-                    "    processing_cycle_id,\n" +
-                    "    reference_id,\n" +
-                    "    matched_reference_id,\n" +
-                    "    compatibility_score,\n" +
-                    "    matched_at\n" +
-                    "FROM (\n" +
-                    "    SELECT DISTINCT ON (match_id)\n" +
-                    "           id,\n" +
-                    "           group_id,\n" +
-                    "           domain_id,\n" +
-                    "           processing_cycle_id,\n" +
-                    "           reference_id,\n" +
-                    "           matched_reference_id,\n" +
-                    "           compatibility_score,\n" +
-                    "           matched_at,\n" +
-                    "           LEAST(reference_id, matched_reference_id) || '_' || GREATEST(reference_id, matched_reference_id) AS match_id,\n" +
-                    "           ROW_NUMBER() OVER (\n" +
-                    "               PARTITION BY group_id, reference_id\n" +
-                    "               ORDER BY compatibility_score DESC\n" +
-                    "           ) AS rn\n" +
-                    "    FROM temp_potential_matches\n" +
-                    "    WHERE group_id = ?\n" +
-                    "      AND processing_cycle_id = ?\n" +
-                    ") ranked\n" +
-                    "WHERE rn <= 500\n" +
-                    "ON CONFLICT (group_id, reference_id, matched_reference_id)\n" +
-                    "DO UPDATE SET\n" +
-                    "    compatibility_score = EXCLUDED.compatibility_score,\n" +
-                    "    matched_at = EXCLUDED.matched_at";
-
-    private static final String POTENTIAL_MATCHES_DROP_TEMP_TABLE_SQL =
-            "DROP TABLE IF EXISTS temp_potential_matches";
-
+    private static final String ACQUIRE_GROUP_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext(? )::int8)";
     private static final String POTENTIAL_MATCHES_TEMP_TABLE_SQL =
-            "CREATE TEMPORARY TABLE IF NOT EXISTS temp_potential_matches (\n" +
-                    "    id UUID NOT NULL,\n" +
-                    "    group_id UUID,\n" +
-                    "    domain_id UUID,\n" +
-                    "    processing_cycle_id VARCHAR(50),\n" +
-                    "    reference_id VARCHAR(50),\n" +
-                    "    matched_reference_id VARCHAR(50),\n" +
-                    "    compatibility_score DOUBLE PRECISION,\n" +
-                    "    matched_at TIMESTAMP\n" +
-                    ") ";
-
-    public static String getUpsertPotentialMatchesSql() {
-        return UPSERT_POTENTIAL_MATCHES_SQL;
-    }
-
-    public static String getPotentialMatchesDropTempTableSql() {
-        return POTENTIAL_MATCHES_DROP_TEMP_TABLE_SQL;
-    }
+            """
+            CREATE TEMP TABLE IF NOT EXISTS temp_potential_matches (
+                id UUID NOT NULL,
+                group_id UUID,
+                domain_id UUID,
+                processing_cycle_id VARCHAR(50),
+                reference_id VARCHAR(50),
+                matched_reference_id VARCHAR(50),
+                compatibility_score DOUBLE PRECISION,
+                matched_at TIMESTAMP
+            ) ON COMMIT DROP
+            """;
+    private static final String MERGE_POTENTIAL_MATCHES_SQL = """
+    /* ---- 2.1 delete obsolete ---- */
+    WITH del AS (
+        DELETE FROM public.potential_matches pm
+        USING   temp_potential_matches tmp
+        WHERE   pm.group_id = ?
+          AND   pm.group_id = tmp.group_id
+          AND   pm.reference_id = tmp.reference_id
+          AND   pm.matched_reference_id = tmp.matched_reference_id
+          AND   pm.processing_cycle_id <> tmp.processing_cycle_id
+    )
+    /* ---- 2.2 upsert new/updated (top-500 per reference_id) ---- */
+    INSERT INTO public.potential_matches (
+       id, group_id, domain_id, processing_cycle_id,
+       reference_id, matched_reference_id,
+       compatibility_score, matched_at
+    )
+    SELECT DISTINCT ON (match_id)
+           id, group_id, domain_id, processing_cycle_id,
+           reference_id, matched_reference_id,
+           compatibility_score, matched_at
+    FROM (
+           SELECT *,
+                  LEAST(reference_id, matched_reference_id)
+                  || '_' ||
+                  GREATEST(reference_id, matched_reference_id) AS match_id,
+                  ROW_NUMBER() OVER (
+                      PARTITION BY group_id, reference_id
+                      ORDER BY compatibility_score DESC
+                  ) AS rn
+           FROM   temp_potential_matches
+           WHERE  group_id = ?
+             AND  processing_cycle_id = ?
+         ) ranked
+    WHERE rn <= 500
+    ON CONFLICT (group_id, reference_id, matched_reference_id)
+    DO UPDATE SET
+         compatibility_score = EXCLUDED.compatibility_score,
+         matched_at         = EXCLUDED.matched_at;
+    """;
 
     public static String getPotentialMatchesTempTableSql() {
         return POTENTIAL_MATCHES_TEMP_TABLE_SQL;
     }
+
+    public static String getMergePotentialMatchesSql() {
+        return MERGE_POTENTIAL_MATCHES_SQL;
+    }
+
 
     public static String getAllPotentialMatchesStreamingSQL() {
         return """
@@ -142,5 +134,9 @@ public final class QueryUtils {
             WHERE group_id = ? AND domain_id = ?
             ORDER BY compatibility_score DESC
             """;
+    }
+
+    public static String getAcquireGroupLockSql() {
+        return ACQUIRE_GROUP_LOCK_SQL;
     }
 }

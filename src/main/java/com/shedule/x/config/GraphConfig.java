@@ -3,10 +3,7 @@ package com.shedule.x.config;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.shedule.x.builder.FlatEdgeBuildingStrategy;
 import com.shedule.x.builder.MetadataEdgeBuildingStrategy;
-import com.shedule.x.processors.EdgeProcessor;
-import com.shedule.x.processors.LSHIndexImpl;
-import com.shedule.x.processors.PotentialMatchSaver;
-import com.shedule.x.processors.MetadataEncoder;
+import com.shedule.x.processors.*;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -63,11 +60,13 @@ public class GraphConfig {
             @Value("${lsh.num-bands:16}") int numBands,
             @Value("${graph.builder.candidate.limit:1000}") int topK,
             MeterRegistry meterRegistry,
-            @Qualifier("lshExecutor") ExecutorService lshExecutor) {
+            @Qualifier("lshExecutor") ExecutorService lshExecutor,
+            GraphStore graphStore) {
         return new LSHIndexImpl(
                 LSHConfig.builder().numBands(numBands).numHashTables(numHashTables).topK(topK).build(),
                 meterRegistry,
-                lshExecutor
+                lshExecutor,
+                graphStore
         );
     }
 

@@ -4,6 +4,7 @@ import com.shedule.x.models.PotentialMatchEntity;
 import com.shedule.x.utils.db.QueryUtils;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -21,12 +22,17 @@ import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import javax.sql.DataSource;
 
+import static com.shedule.x.utils.monitoring.MemoryMonitoringUtility.logMemoryUsage;
+
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class PotentialMatchStreamingService {
 
     private final DataSource dataSource;
+    @PersistenceContext
+    private EntityManager entityManager;
+    @Value("${matching.max.memory.mb:1024}") private long maxMemoryMb;
 
     public void streamAllMatches(
             UUID groupId,
@@ -35,6 +41,7 @@ public class PotentialMatchStreamingService {
             int batchSize
     ) {
         final int maxRetries = 3;
+        final int memorySafeBatchSize = Math.min(batchSize, 1000);
         int retryCount = 0;
 
         while (retryCount <= maxRetries) {
@@ -45,15 +52,16 @@ public class PotentialMatchStreamingService {
                          ResultSet.CONCUR_READ_ONLY)) {
 
                 conn.setAutoCommit(false);
-                ps.setFetchSize(batchSize);
+                ps.setFetchSize(memorySafeBatchSize);
 
                 ps.setObject(1, groupId);
                 ps.setObject(2, domainId);
 
                 try (ResultSet rs = ps.executeQuery()) {
 
-                    List<PotentialMatchEntity> buffer = new ArrayList<>(batchSize);
+                    List<PotentialMatchEntity> buffer = new ArrayList<>(memorySafeBatchSize);
                     int totalRecords = 0;
+                    long lastMemoryLog = System.currentTimeMillis();
 
                     while (rs.next()) {
                         String referenceId = rs.getString("reference_id");
@@ -74,14 +82,27 @@ public class PotentialMatchStreamingService {
                         buffer.add(entity);
                         totalRecords++;
 
-                        if (buffer.size() == batchSize) {
-                            log.info("Streaming batch of {} records for groupId={}, domainId={}",
-                                    buffer.size(), groupId, domainId);
+                        // Flush when buffer reaches safe size
+                        if (buffer.size() >= memorySafeBatchSize) {
+                            log.debug("Streaming batch of {} records for groupId={}, domainId={}, total={}",
+                                    buffer.size(), groupId, domainId, totalRecords);
                             batchConsumer.accept(buffer);
-                            buffer = new ArrayList<>(batchSize);
+                            buffer = new ArrayList<>(memorySafeBatchSize);
+
+                            long currentTime = System.currentTimeMillis();
+                            if (currentTime - lastMemoryLog > 30000) {
+                                logMemoryUsage("Potential_Matches_Streaming", groupId, maxMemoryMb);
+                                lastMemoryLog = currentTime;
+
+                                // Suggest GC if processing large datasets
+                                if (totalRecords > 100000) {
+                                    System.gc();
+                                }
+                            }
                         }
                     }
 
+                    // Final batch
                     if (!buffer.isEmpty()) {
                         log.info("Streaming final batch of {} records for groupId={}, domainId={}",
                                 buffer.size(), groupId, domainId);
@@ -116,9 +137,6 @@ public class PotentialMatchStreamingService {
             }
         }
     }
-
-    @PersistenceContext
-    private EntityManager entityManager;
 
 
     @Transactional

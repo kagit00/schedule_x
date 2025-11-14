@@ -21,31 +21,23 @@ public class PotentialMatchesCreationJobExecutor {
     private final PotentialMatchService potentialMatchService;
     private final ExecutorService batchExecutor;
     private final MeterRegistry meterRegistry;
-    private final int batchLimit;
-    private final int nodesLimitForFullJob;
-    private final int maxRetries;
-    private final long retryDelayMillis;
-    private final int maxConcurrentPages;
+
     private final ConcurrentMap<UUID, Semaphore> pageSemaphores = new ConcurrentHashMap<>();
+    @Value("${match.batch-overlap:200}") private int batchOverlap;
+    @Value("${match.batch-limit:500}") private int batchLimit;
+    @Value("${nodes.limit.full.job:1000}") int nodesLimitForFullJob;
+    @Value("${match.max-retries:3}") int maxRetries;
+    @Value("${match.retry-delay-millis:1000}") long retryDelayMillis;
+    @Value("${match.max-concurrent-pages:1}") int maxConcurrentPages;
 
     public PotentialMatchesCreationJobExecutor(
             PotentialMatchService potentialMatchService,
             @Qualifier("matchCreationExecutorService") ExecutorService batchExecutor,
-            MeterRegistry meterRegistry,
-            @Value("${match.batch-limit:500}") int batchLimit,
-            @Value("${nodes.limit.full.job:1000}") int nodesLimitForFullJob,
-            @Value("${match.max-retries:3}") int maxRetries,
-            @Value("${match.retry-delay-millis:1000}") long retryDelayMillis,
-            @Value("${match.max-concurrent-pages:1}") int maxConcurrentPages
+            MeterRegistry meterRegistry
     ) {
         this.potentialMatchService = potentialMatchService;
         this.batchExecutor = batchExecutor;
         this.meterRegistry = meterRegistry;
-        this.batchLimit = batchLimit;
-        this.nodesLimitForFullJob = nodesLimitForFullJob;
-        this.maxRetries = maxRetries;
-        this.retryDelayMillis = retryDelayMillis;
-        this.maxConcurrentPages = maxConcurrentPages;
     }
 
 
@@ -56,7 +48,10 @@ public class PotentialMatchesCreationJobExecutor {
             AtomicBoolean pageAcquired = new AtomicBoolean(false);
             long totalProcessed = 0;
             int zeroNodeCount = 0;
-            int maxPages = (int) Math.ceil((double) nodesLimitForFullJob / batchLimit);
+
+            // Calculate sliding window parameters
+            int step = Math.max(1, batchLimit - batchOverlap);
+            int maxWindows = (int) Math.ceil((double) nodesLimitForFullJob / step);
 
             try {
                 if (!pageSemaphore.tryAcquire(60, TimeUnit.SECONDS)) {
@@ -66,13 +61,14 @@ public class PotentialMatchesCreationJobExecutor {
                 }
                 pageAcquired.set(true);
 
-                for (int page = 0; page < maxPages; page++) {
-                    log.info("Processing groupId={}, cycleId={}, page={}, permits left={}, activeThreads={}",
-                            groupId, cycleId, page, pageSemaphore.availablePermits(), getActiveThreads(batchExecutor));
+                for (int window = 0; window < maxWindows; window++) {
+                    int startOffset = window * step;
+                    log.info("Processing groupId={}, cycleId={}, window={}, startOffset={}, limit={}, overlap={}",
+                            groupId, cycleId, window, startOffset, batchLimit, batchOverlap);
 
-                    NodesCount nodesCount = processPageWithRetriesSync(groupId, domainId, cycleId, page, batchLimit);
+                    NodesCount nodesCount = processPageWithRetriesByOffsetSync(groupId, domainId, cycleId, startOffset, batchLimit);
                     if (nodesCount == null) {
-                        log.warn("Skipping page={} for groupId={} due to retries exhausted", page, groupId);
+                        log.warn("Skipping window={} for groupId={} due to retries exhausted", window, groupId);
                         continue;
                     }
 
@@ -81,19 +77,15 @@ public class PotentialMatchesCreationJobExecutor {
 
                     if (nodeCount == 0) {
                         if (++zeroNodeCount >= 1) {
-                            log.info("Early termination: page={} had no nodes (groupId={}, cycleId={})", page, groupId, cycleId);
+                            log.info("Early termination: window={} had no nodes (groupId={}, cycleId={})", window, groupId, cycleId);
                             break;
                         }
                     } else {
                         zeroNodeCount = 0;
                     }
 
-                    if (nodeCount > 0 && nodeCount < batchLimit) {
-                        log.warn("Partial page detected: groupId={}, cycleId={}, page={}, nodes={}", groupId, cycleId, page, nodeCount);
-                    }
-
                     if (!nodesCount.hasMoreNodes()) {
-                        log.info("No more nodes: groupId={}, cycleId={}, page={}", groupId, cycleId, page);
+                        log.info("No more nodes: groupId={}, cycleId={}, window={}", groupId, cycleId, window);
                         break;
                     }
                 }
@@ -128,7 +120,7 @@ public class PotentialMatchesCreationJobExecutor {
         }, batchExecutor);
     }
 
-    private NodesCount processPageWithRetriesSync(UUID groupId, UUID domainId, String cycleId, int page, int limit) {
+    private NodesCount processPageWithRetriesByOffsetSync(UUID groupId, UUID domainId, String cycleId, int startOffset, int limit) {
         for (int attempt = 1; attempt <= maxRetries; attempt++) {
             try {
                 MatchingRequest request = MatchingRequest.builder()
@@ -136,22 +128,26 @@ public class PotentialMatchesCreationJobExecutor {
                         .domainId(domainId)
                         .processingCycleId(cycleId)
                         .limit(limit)
-                        .page(page)
                         .isRealTime(false)
                         .build();
 
-                NodesCount result = potentialMatchService.matchByGroup(request, page, cycleId).get(600, TimeUnit.SECONDS);
-                log.info("Success: groupId={}, page={}, nodeCount={}", groupId, page, result.nodeCount());
+                NodesCount result = potentialMatchService.matchByGroup(request, startOffset, limit, cycleId)
+                        .get(600, TimeUnit.SECONDS);
+
+                log.info("Success: groupId={}, startOffset={}, nodeCount={}", groupId, startOffset, result.nodeCount());
                 request.setNumberOfNodes(result.nodeCount());
                 return result;
 
             } catch (Exception e) {
-                log.warn("Retry {}/{} failed for groupId={}, page={}, cycleId={}: {}", attempt, maxRetries, groupId, page, cycleId, e.getMessage());
-                meterRegistry.counter("match.retry.attempts", "groupId", groupId.toString(), "domainId", domainId.toString(), "cycleId", cycleId, "page", String.valueOf(page)).increment();
+                log.warn("Retry {}/{} failed for groupId={}, startOffset={}, cycleId={}: {}",
+                        attempt, maxRetries, groupId, startOffset, cycleId, e.getMessage());
+                meterRegistry.counter("match.retry.attempts", "groupId", groupId.toString(), "domainId", domainId.toString(),
+                        "cycleId", cycleId, "startOffset", String.valueOf(startOffset)).increment();
 
                 if (attempt == maxRetries) {
-                    log.error("Max retries reached: groupId={}, page={}, cycleId={}", groupId, page, cycleId);
-                    meterRegistry.counter("match.retries.exhausted", "groupId", groupId.toString(), "cycleId", cycleId, "page", String.valueOf(page)).increment();
+                    log.error("Max retries reached: groupId={}, startOffset={}, cycleId={}", groupId, startOffset, cycleId);
+                    meterRegistry.counter("match.retries.exhausted", "groupId", groupId.toString(), "cycleId", cycleId,
+                            "startOffset", String.valueOf(startOffset)).increment();
                     return null;
                 }
 
@@ -159,17 +155,11 @@ public class PotentialMatchesCreationJobExecutor {
                     Thread.sleep(retryDelayMillis * (1L << (attempt - 1)));
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
-                    log.error("Interrupted during backoff sleep for groupId={}, cycleId={}, page={}", groupId, cycleId, page);
+                    log.error("Interrupted during backoff sleep for groupId={}, cycleId={}, startOffset={}", groupId, cycleId, startOffset);
                     return null;
                 }
             }
         }
         return null;
-    }
-
-    private long getActiveThreads(ExecutorService executor) {
-        return (executor instanceof ThreadPoolExecutor)
-                ? ((ThreadPoolExecutor) executor).getActiveCount()
-                : -1;
     }
 }

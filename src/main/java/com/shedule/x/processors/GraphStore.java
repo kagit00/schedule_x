@@ -6,7 +6,6 @@ import com.esotericsoftware.kryo.kryo5.io.Output;
 import com.shedule.x.config.factory.SerializerContext;
 import com.shedule.x.config.factory.AutoCloseableStream;
 import com.shedule.x.config.factory.GraphRequestFactory;
-import com.shedule.x.exceptions.InternalServerErrorException;
 import com.shedule.x.models.Edge;
 import com.shedule.x.service.GraphRecords;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -25,57 +24,75 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
+import java.util.concurrent.atomic.AtomicLong;
 import java.io.File;
 import java.io.IOException;
+import org.mapdb.DB;
+import org.mapdb.DBMaker;
+import org.mapdb.HTreeMap;
+import org.mapdb.Serializer;
+
+import java.io.*;
+import java.util.*;
+import java.util.concurrent.*;
+import org.mapdb.*;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
+
+
+import org.mapdb.*;
+import java.util.*;
+import java.util.concurrent.*;
+import org.mapdb.*;
+import java.nio.charset.StandardCharsets;
+
+import java.util.*;
+import java.util.concurrent.*;
+import static com.shedule.x.utils.basic.ByteUtils.*;
 
 
 @Slf4j
 @Component
 public class GraphStore implements AutoCloseable {
+
+    final int LSH_MAGIC = 0x4C534800;
+    private static final int MAX_BUCKET_DATA_SIZE = 10 * 1024 * 1024; // 10MB
+    private static final int MAX_REMAINING_DATA_SIZE = 5 * 1024 * 1024; // 5MB
+    private static final int MAX_STRING_LENGTH = 65535;
+
     private DB db;
-    private HTreeMap<String, byte[]> map;
+    private HTreeMap<byte[], byte[]> map;
     private final ExecutorService mapdbExecutor;
-    private final ExecutorService commitExecutor;
-    private final ExecutorService cleanupExecutor;
     private final MeterRegistry meterRegistry;
     private final AtomicInteger pendingCommits = new AtomicInteger(0);
-
     private final String dbPath;
     private final int batchSize;
+
+    private static final int BUCKET_SIZE_LIMIT = 50_000;
+    private static final int BUCKET_TRIM_TO = 45_000;
+    private static final long MAX_TOTAL_BUCKETS = 5_000_000L;
+    private static final long BUCKET_TTL_MS = 24 * 60 * 60 * 1000L;
+
+    private final AtomicLong totalBucketEntries = new AtomicLong(0);
 
     public GraphStore(
             @Qualifier("persistenceExecutor") ExecutorService mapdbExecutor,
             MeterRegistry meterRegistry,
-            @Value("${mapdb.path:d:/web_dev/schedulex/graphstore}") String dbPath,
-            @Value("${mapdb.batch-size:500}") int batchSize,
-            @Value("${mapdb.commit-queue-max:1}") int commitQueueMax,
-            @Value("${mapdb.commit-threads:2}") int commitThreads
-    ) {
+            @Value("${graph.store.path:/app/graph-store}") String dbPath,
+            @Value("${mapdb.batch-size:500}") int batchSize) {
         this.mapdbExecutor = mapdbExecutor;
         this.meterRegistry = meterRegistry;
         this.dbPath = dbPath;
         this.batchSize = batchSize;
-
-        this.commitExecutor = Executors.newFixedThreadPool(commitThreads, r -> {
-            Thread t = new Thread(r, "mapdb-commit");
-            t.setDaemon(true);
-            return t;
-        });
-
-        this.cleanupExecutor = Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, "mapdb-cleanup");
-            t.setDaemon(true);
-            return t;
-        });
     }
 
     @PostConstruct
     public void init() {
         try {
             if (dbPath == null || dbPath.trim().isEmpty()) {
-                throw new IllegalArgumentException("mapdb.path is null or empty");
+                throw new IllegalArgumentException("graph.store.path is null or empty");
             }
             File dbFile = new File(dbPath, "graphstore.db");
             File parentDir = dbFile.getParentFile();
@@ -99,37 +116,142 @@ public class GraphStore implements AutoCloseable {
                     .transactionEnable()
                     .concurrencyScale(32)
                     .make();
+
             this.map = db.hashMap("graph-store")
-                    .keySerializer(Serializer.STRING)
+                    .keySerializer(Serializer.BYTE_ARRAY)
                     .valueSerializer(Serializer.BYTE_ARRAY)
                     .createOrOpen();
 
             meterRegistry.gauge("mapdb_map_size", map, m -> (long) m.size());
-            meterRegistry.gauge("mapdb_executor_queue", mapdbExecutor, exec -> ((ThreadPoolExecutor) exec).getQueue().size());
-            meterRegistry.gauge("mapdb_executor_active", mapdbExecutor, exec -> ((ThreadPoolExecutor) exec).getActiveCount());
-            meterRegistry.gauge("mapdb_commit_executor_queue", commitExecutor, exec -> ((ThreadPoolExecutor) exec).getQueue().size());
+            meterRegistry.gauge("mapdb_executor_queue", mapdbExecutor,
+                    exec -> ((ThreadPoolExecutor) exec).getQueue().size());
+            meterRegistry.gauge("mapdb_executor_active", mapdbExecutor,
+                    exec -> ((ThreadPoolExecutor) exec).getActiveCount());
             meterRegistry.gauge("mapdb_pending_commits", pendingCommits, AtomicInteger::get);
+            meterRegistry.gauge("lsh_total_bucket_entries", totalBucketEntries, AtomicLong::get);
 
             new JvmMemoryMetrics().bindTo(meterRegistry);
             new JvmGcMetrics().bindTo(meterRegistry);
 
-            log.info("Initialized MapDB at path={}", dbFile.getAbsolutePath());
+            log.info("Initialized MapDB with variable-length binary keys at path={}", dbFile.getAbsolutePath());
         } catch (Exception e) {
             log.error("Failed to initialize MapDB at path={}: {}", dbPath, e.getMessage(), e);
-            throw new InternalServerErrorException("Failed to initialize MapDB");
+            throw new RuntimeException(e);
         }
     }
 
-    public CompletableFuture<Void> persistEdgesAsyncFallback(List<GraphRecords.PotentialMatch> matches, String groupId, int chunkIndex, Throwable t) {
+    @PreDestroy
+    @Override
+    public void close() {
+        try {
+            if (map != null && !map.isClosed()) {
+                map.close();
+            }
+            if (db != null && !db.isClosed()) {
+                db.commit();
+                db.close();
+            }
+            log.info("Closed MapDB");
+        } catch (Exception e) {
+            log.error("Failed to close MapDB: {}", e.getMessage(), e);
+        }
+    }
+
+    public CompletableFuture<Void> persistEdgesAsync(List<GraphRecords.PotentialMatch> matches,
+                                                     UUID groupId, int chunkIndex) {
+        if (matches.isEmpty()) {
+            log.debug("No matches to persist for groupId={}, chunkIndex={}", groupId, chunkIndex);
+            return CompletableFuture.completedFuture(null);
+        }
+
+        Instant submitStart = Instant.now();
+        int dynamicBatchSize = adjustBatchSize(matches.size());
+        List<CompletableFuture<Void>> batchFutures = new ArrayList<>();
+
+        for (List<GraphRecords.PotentialMatch> subBatch : ListUtils.partition(matches, dynamicBatchSize)) {
+            batchFutures.add(CompletableFuture.runAsync(
+                    () -> persistBatchWithCommit(subBatch, groupId, chunkIndex),
+                    mapdbExecutor).whenComplete((v, e) -> {
+                if (e != null) {
+                    log.error("Failed to persist batch for groupId={}, chunkIndex={}: {}",
+                            groupId, chunkIndex, e, e);
+                    meterRegistry.counter("mapdb_persist_batch_errors",
+                            "groupId", groupId.toString()).increment(subBatch.size());
+                }
+            }));
+        }
+
+        return CompletableFuture.allOf(batchFutures.toArray(new CompletableFuture[0]))
+                .whenComplete((v, e) -> {
+                    meterRegistry.timer("mapdb_persist_submit_latency",
+                                    "groupId", groupId.toString())
+                            .record(Duration.between(submitStart, Instant.now()));
+                    if (e == null) {
+                        meterRegistry.counter("mapdb_edges_persisted",
+                                "groupId", groupId.toString()).increment(matches.size());
+                    } else {
+                        meterRegistry.counter("mapdb_persist_errors",
+                                "groupId", groupId.toString()).increment(matches.size());
+                    }
+                });
+    }
+
+    private void persistBatchWithCommit(List<GraphRecords.PotentialMatch> subBatch,
+                                        UUID groupId, int chunkIndex) {
+        try {
+            Instant writeStart = Instant.now();
+            for (GraphRecords.PotentialMatch match : subBatch) {
+                byte[] key = compactKey(groupId, chunkIndex, match);
+                map.put(key, serializeMatch(match));
+            }
+            db.commit();
+            pendingCommits.set(0);
+
+            long durationMs = Duration.between(writeStart, Instant.now()).toMillis();
+            meterRegistry.timer("mapdb_persist_latency", "groupId", groupId.toString())
+                    .record(Duration.ofMillis(durationMs));
+            meterRegistry.counter("mapdb_edges_persisted", "groupId", groupId.toString())
+                    .increment(subBatch.size());
+            meterRegistry.counter("mapdb_commits", "groupId", groupId.toString()).increment();
+
+            log.debug("Persisted & committed {} edges for groupId={}, chunkIndex={} in {} ms",
+                    subBatch.size(), groupId, chunkIndex, durationMs);
+            if (durationMs > 10_000) {
+                log.warn("Slow persist+commit: {} edges, {} ms, groupId={}",
+                        subBatch.size(), durationMs, groupId);
+            }
+        } catch (Exception e) {
+            log.error("Failed to persist batch for groupId={}, chunkIndex={}: {}",
+                    groupId, chunkIndex, e, e);
+            meterRegistry.counter("mapdb_persist_errors", "groupId", groupId.toString())
+                    .increment(subBatch.size());
+            throw new RuntimeException(e);
+        }
+    }
+
+    private int adjustBatchSize(int totalEdges) {
+        int queueSize = ((ThreadPoolExecutor) mapdbExecutor).getQueue().size();
+        int base = batchSize;
+        if (queueSize > 200) {
+            base = Math.max(50, base / 4);
+        } else if (queueSize > 100) {
+            base = Math.max(100, base / 2);
+        }
+        return Math.min(base, totalEdges);
+    }
+
+    public CompletableFuture<Void> persistEdgesAsyncFallback(List<GraphRecords.PotentialMatch> matches,
+                                                             String groupId, int chunkIndex, Throwable t) {
         log.warn("Persist failed for groupId={}, chunkIndex={}: {}", groupId, chunkIndex, t.getMessage());
         meterRegistry.counter("mapdb_persist_fallbacks", "groupId", groupId).increment(matches.size());
         return CompletableFuture.completedFuture(null);
     }
 
-    public AutoCloseableStream<Edge> streamEdgesFallback(UUID domainId, UUID groupId, int topK, Throwable t) {
+    public AutoCloseableStream<Edge> streamEdgesFallback(UUID domainId, UUID groupId,
+                                                         int topK, Throwable t) {
         log.warn("Stream failed for groupId={}: {}", groupId, t.getMessage());
         meterRegistry.counter("mapdb_stream_fallbacks", "groupId", groupId.toString()).increment();
-        return new AutoCloseableStream<>(Stream.empty());
+        return new AutoCloseableStream<>(java.util.stream.Stream.empty());
     }
 
     public void cleanEdgesFallback(UUID groupId, Throwable t) {
@@ -139,163 +261,74 @@ public class GraphStore implements AutoCloseable {
 
     public List<UUID> listGroupIds() {
         try {
-            return map.keySet().stream()
-                    .map(key -> key.split(":")[0])
-                    .distinct()
-                    .map(UUID::fromString)
-                    .collect(Collectors.toList());
+            Set<UUID> groups = new HashSet<>();
+            for (Map.Entry<byte[], byte[]> entry : map.getEntries()) {
+                byte[] key = entry.getKey();
+                if (key.length >= 16) {
+                    long msb = getLong(key, 0);
+                    long lsb = getLong(key, 8);
+                    groups.add(new UUID(msb, lsb));
+                }
+            }
+            return new ArrayList<>(groups);
         } catch (Exception e) {
             log.error("Failed to list groupIds: {}", e.getMessage(), e);
-            throw new InternalServerErrorException("Failed to list groupIds");
-        }
-    }
-
-    @PreDestroy
-    @Override
-    public void close() {
-        try {
-            cleanupExecutor.shutdown();
-            commitExecutor.shutdown();
-            mapdbExecutor.shutdown();
-            if (!cleanupExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
-                cleanupExecutor.shutdownNow();
-            }
-            if (!commitExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
-                commitExecutor.shutdownNow();
-            }
-            if (!mapdbExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
-                mapdbExecutor.shutdownNow();
-            }
-            if (map != null && !map.isClosed()) {
-                map.close();
-            }
-            if (db != null && !db.isClosed()) {
-                db.close();
-            }
-            log.info("Closed MapDB");
-        } catch (Exception e) {
-            log.error("Failed to close MapDB: {}", e.getMessage());
-        }
-    }
-
-    private Edge toEdge(GraphRecords.PotentialMatch match) {
-        return GraphRequestFactory.toEdge(match);
-    }
-
-    public CompletableFuture<Void> persistEdgesAsync(List<GraphRecords.PotentialMatch> matches, UUID groupId, int chunkIndex) {
-        if (matches.isEmpty()) {
-            log.debug("No matches to persist for groupId={}, chunkIndex={}", groupId, chunkIndex);
-            return CompletableFuture.completedFuture(null);
-        }
-
-        Instant submitStart = Instant.now();
-        int dynamicBatchSize = adjustBatchSize(matches.size());
-        List<CompletableFuture<Void>> batchFutures = new ArrayList<>();
-        for (List<GraphRecords.PotentialMatch> chunk : ListUtils.partition(matches, dynamicBatchSize)) {
-            batchFutures.add(CompletableFuture.runAsync(() -> persistBatchAsync(chunk, groupId, chunkIndex), mapdbExecutor)
-                    .orTimeout(1000, TimeUnit.SECONDS)
-                    .whenComplete((v, e) -> {
-                        if (e != null) {
-                            log.error("Failed to persist batch for groupId={}, chunkIndex={}: {}",
-                                    groupId, chunkIndex, e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName(), e);
-                            meterRegistry.counter("mapdb_persist_batch_errors", "groupId", groupId.toString()).increment(chunk.size());
-                        }
-                    }));
-        }
-
-        return CompletableFuture.allOf(batchFutures.toArray(new CompletableFuture[0]))
-                .thenRunAsync(() -> {
-                    try {
-                        Instant commitStart = Instant.now();
-                        db.commit();
-                        pendingCommits.set(0);
-                        long durationMs = Duration.between(commitStart, Instant.now()).toMillis();
-                        meterRegistry.timer("mapdb_commit_latency", "groupId", groupId.toString()).record(Duration.ofMillis(durationMs));
-                        meterRegistry.counter("mapdb_commits", "groupId", groupId.toString()).increment();
-                        log.info("Committed {} edges for groupId={}, chunkIndex={} in {} ms",
-                                matches.size(), groupId, chunkIndex, durationMs);
-                        if (durationMs > 1000) {
-                            log.warn("Commit for groupId={}, chunkIndex={} took {} ms", groupId, chunkIndex, durationMs);
-                        }
-                    } catch (Exception e) {
-                        log.error("Failed to commit for groupId={}, chunkIndex={}: {}",
-                                groupId, chunkIndex, e.getMessage(), e);
-                        meterRegistry.counter("mapdb_commit_errors", "groupId", groupId.toString()).increment();
-                        throw new InternalServerErrorException("Failed to commit batch");
-                    }
-                }, commitExecutor)
-                .whenComplete((v, e) -> {
-                    meterRegistry.timer("mapdb_persist_submit_latency", "groupId", groupId.toString())
-                            .record(Duration.between(submitStart, Instant.now()));
-                    if (e != null) {
-                        log.error("Failed to persist edges for groupId={}, chunkIndex={}: {}",
-                                groupId, chunkIndex, e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName(), e);
-                        meterRegistry.counter("mapdb_persist_errors", "groupId", groupId.toString()).increment(matches.size());
-                    } else {
-                        meterRegistry.counter("mapdb_edges_persisted", "groupId", groupId.toString()).increment(matches.size());
-                    }
-                });
-    }
-
-    private int adjustBatchSize(int totalEdges) {
-        return Math.min(batchSize, totalEdges > 100_000 ? batchSize / 2 : batchSize);
-    }
-
-    private void persistBatchAsync(List<GraphRecords.PotentialMatch> subBatch, UUID groupId, int chunkIndex) {
-        try {
-            Instant writeStart = Instant.now();
-            for (GraphRecords.PotentialMatch match : subBatch) {
-                String key = compactKey(groupId, chunkIndex, match);
-                map.put(key, serializeMatch(match));
-            }
-            long durationMs = Duration.between(writeStart, Instant.now()).toMillis();
-            meterRegistry.timer("mapdb_persist_latency", "groupId", groupId.toString()).record(Duration.ofMillis(durationMs));
-            meterRegistry.counter("mapdb_edges_persisted", "groupId", groupId.toString()).increment(subBatch.size());
-            log.debug("Persisted {} edges for groupId={}, chunkIndex={} in {} ms",
-                    subBatch.size(), groupId, chunkIndex, durationMs);
-            if (durationMs > 1000) {
-                log.warn("Batch persist of {} edges for groupId={}, chunkIndex={} took {} ms",
-                        subBatch.size(), groupId, chunkIndex, durationMs);
-            }
-        } catch (Exception e) {
-            log.error("Failed to persist batch for groupId={}, chunkIndex={}: {}",
-                    groupId, chunkIndex, e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName(), e);
-            meterRegistry.counter("mapdb_persist_errors", "groupId", groupId.toString()).increment(subBatch.size());
-            throw new InternalServerErrorException("Failed to persist batch to MapDB");
+            throw new RuntimeException(e);
         }
     }
 
     public AutoCloseableStream<Edge> streamEdges(UUID domainId, UUID groupId) {
-        if (domainId == null) {
-            log.error("Invalid domainId for groupId={}", groupId);
-            throw new IllegalArgumentException("domainId must not be null");
-        }
+        if (domainId == null) throw new IllegalArgumentException("domainId must not be null");
 
-        Instant streamStart = Instant.now();
-        Stream<Edge> stream = map.keySet().stream()
-                .filter(k -> k != null && k.startsWith(groupId + ":"))
-                .map(key -> {
-                    byte[] data = map.get(key);
-                    if (data != null) {
-                        try {
-                            GraphRecords.PotentialMatch match = deserializeMatch(data, groupId, domainId);
-                            meterRegistry.counter("mapdb_edges_streamed", "groupId", groupId.toString()).increment();
-                            return toEdge(match);
-                        } catch (Exception e) {
-                            log.error("Failed to deserialize match for key={} in groupId={}: {}",
-                                    key, groupId, e.getMessage(), e);
-                            meterRegistry.counter("mapdb_deserialize_errors", "groupId", groupId.toString()).increment();
-                            return null;
-                        } finally {
-                            SerializerContext.release();
-                        }
-                    }
-                    return null;
-                })
-                .filter(Objects::nonNull)
+        Instant start = Instant.now();
+        long groupMsb = groupId.getMostSignificantBits();
+        long groupLsb = groupId.getLeastSignificantBits();
+
+        java.util.stream.Stream<Edge> stream = StreamSupport.stream(
+                        Spliterators.spliteratorUnknownSize(
+                                new Iterator<Edge>() {
+                                    private final Iterator<HTreeMap.Entry<byte[], byte[]>> iter = map.getEntries().iterator();
+                                    private Edge nextEdge = null;
+
+                                    @Override
+                                    public boolean hasNext() {
+                                        if (nextEdge != null) return true;
+                                        while (iter.hasNext()) {
+                                            HTreeMap.Entry<byte[], byte[]> entry = iter.next();
+                                            byte[] key = entry.getKey();
+                                            if (key.length < 20) continue;
+
+                                            long msb = getLong(key, 0);
+                                            long lsb = getLong(key, 8);
+                                            if (msb != groupMsb || lsb != groupLsb) continue;
+
+                                            try {
+                                                GraphRecords.PotentialMatch match = deserializeMatch(entry.getValue(), groupId, domainId);
+                                                if (!domainId.equals(match.getDomainId())) continue;
+
+                                                nextEdge = toEdge(match);
+                                                meterRegistry.counter("mapdb_edges_streamed", "groupId", groupId.toString()).increment();
+                                                return true;
+                                            } catch (Exception e) {
+                                                log.error("Failed to deserialize during stream", e);
+                                                meterRegistry.counter("mapdb_deserialize_errors", "groupId", groupId.toString()).increment();
+                                            }
+                                        }
+                                        return false;
+                                    }
+
+                                    @Override
+                                    public Edge next() {
+                                        if (!hasNext()) throw new NoSuchElementException();
+                                        Edge result = nextEdge;
+                                        nextEdge = null;
+                                        return result;
+                                    }
+                                }, Spliterator.NONNULL), false)
                 .onClose(() -> {
-                    long durationMs = Duration.between(streamStart, Instant.now()).toMillis();
-                    meterRegistry.timer("mapdb_stream_latency", "groupId", groupId.toString()).record(Duration.ofMillis(durationMs));
+                    long durationMs = Duration.between(start, Instant.now()).toMillis();
+                    meterRegistry.timer("mapdb_stream_latency", "groupId", groupId.toString())
+                            .record(Duration.ofMillis(durationMs));
                     log.info("Streamed edges for groupId={} in {} ms", groupId, durationMs);
                 });
 
@@ -303,42 +336,43 @@ public class GraphStore implements AutoCloseable {
     }
 
     public void cleanEdges(UUID groupId) {
-        try {
-            Instant cleanStart = Instant.now();
-            Iterator<String> keyIterator = map.keySet().iterator();
-            List<String> batch = new ArrayList<>(batchSize / 2);
-            int removedCount = 0;
+        Instant start = Instant.now();
+        long msb = groupId.getMostSignificantBits();
+        long lsb = groupId.getLeastSignificantBits();
 
-            while (keyIterator.hasNext()) {
-                String key = keyIterator.next();
-                if (key != null && key.startsWith(groupId + ":")) {
-                    batch.add(key);
-                    if (batch.size() >= batchSize / 2) {
-                        batch.forEach(map::remove);
-                        db.commit();
-                        removedCount += batch.size();
-                        batch.clear();
-                    }
+        Iterator<HTreeMap.Entry<byte[], byte[]>> iter = map.getEntries().iterator();
+        List<byte[]> batch = new ArrayList<>(batchSize / 2);
+        int removed = 0;
+
+        while (iter.hasNext()) {
+            HTreeMap.Entry<byte[], byte[]> entry = iter.next();
+            byte[] key = entry.getKey();
+            if (key.length >= 16 &&
+                    getLong(key, 0) == msb &&
+                    getLong(key, 8) == lsb) {
+                batch.add(key);
+                if (batch.size() >= batchSize / 2) {
+                    batch.forEach(map::remove);
+                    db.commit();
+                    removed += batch.size();
+                    batch.clear();
                 }
             }
-
-            if (!batch.isEmpty()) {
-                batch.forEach(map::remove);
-                db.commit();
-                removedCount += batch.size();
-            }
-
-            long durationMs = Duration.between(cleanStart, Instant.now()).toMillis();
-            meterRegistry.timer("mapdb_clean_latency", "groupId", groupId.toString()).record(Duration.ofMillis(durationMs));
-            meterRegistry.counter("mapdb_edges_cleaned", "groupId", groupId.toString()).increment(removedCount);
-            if (durationMs > 1000) {
-                log.warn("Cleaning {} edges for groupId={} took {} ms", removedCount, groupId, durationMs);
-            }
-        } catch (Exception e) {
-            log.error("Clean failed for groupId={}: {}", groupId, e.getMessage(), e);
-            meterRegistry.counter("mapdb_clean_errors", "groupId", groupId.toString()).increment();
-            throw new InternalServerErrorException("Failed to clean edges in MapDB");
         }
+        if (!batch.isEmpty()) {
+            batch.forEach(map::remove);
+            db.commit();
+            removed += batch.size();
+        }
+
+        long durationMs = Duration.between(start, Instant.now()).toMillis();
+        meterRegistry.timer("mapdb_clean_latency", "groupId", groupId.toString())
+                .record(Duration.ofMillis(durationMs));
+        meterRegistry.counter("mapdb_edges_cleaned", "groupId", groupId.toString()).increment(removed);
+    }
+
+    private Edge toEdge(GraphRecords.PotentialMatch match) {
+        return GraphRequestFactory.toEdge(match);
     }
 
     private byte[] serializeMatch(GraphRecords.PotentialMatch match) {
@@ -346,10 +380,6 @@ public class GraphStore implements AutoCloseable {
         try (Output output = new Output(64, 512)) {
             kryo.writeObject(output, match);
             return output.toBytes();
-        } catch (Exception e) {
-            log.error("Serialization failed: referenceId={}, matchedReferenceId={}, cause={}",
-                    match.getReferenceId(), match.getMatchedReferenceId(), e.getMessage(), e);
-            throw new InternalServerErrorException("Failed to serialize PotentialMatch");
         } finally {
             SerializerContext.release();
         }
@@ -366,34 +396,269 @@ public class GraphStore implements AutoCloseable {
                     groupId,
                     domainId
             );
-        } catch (Exception e) {
-            log.error("Deserialization failed: groupId={}, domainId={}, cause={}", groupId, domainId, e.getMessage(), e);
-            throw new InternalServerErrorException("Failed to deserialize PotentialMatch");
         } finally {
             SerializerContext.release();
         }
     }
 
-    public Set<String> getKeysByGroupAndDomain(UUID groupId, UUID domainId) {
-        return map.keySet().stream()
-                .filter(k -> k.startsWith(groupId + ":"))
-                .filter(k -> {
-                    byte[] value = map.get(k);
-                    if (value == null) return false;
-                    try {
-                        GraphRecords.PotentialMatch match = deserializeMatch(value, groupId, domainId);
-                        return domainId.equals(match.getDomainId());
-                    } catch (Exception e) {
-                        log.warn("Skipping invalid match for key={}: {}", k, e.getMessage());
-                        return false;
-                    } finally {
-                        SerializerContext.release();
-                    }
-                })
-                .collect(Collectors.toSet());
+    private byte[] compactKey(UUID groupId, int chunkIndex, GraphRecords.PotentialMatch match) {
+        String refId = match.getReferenceId();
+        String matchedId = match.getMatchedReferenceId();
+
+        if (refId == null || matchedId == null) {
+            throw new IllegalArgumentException("referenceId and matchedReferenceId must not be null");
+        }
+
+        byte[] refBytes = refId.getBytes(StandardCharsets.UTF_8);
+        byte[] matchedBytes = matchedId.getBytes(StandardCharsets.UTF_8);
+
+        int refLen = refBytes.length;
+        int matchedLen = matchedBytes.length;
+
+        if (refLen > MAX_STRING_LENGTH || matchedLen > MAX_STRING_LENGTH) {
+            throw new IllegalArgumentException("String too long: max " + MAX_STRING_LENGTH + " bytes");
+        }
+
+        int totalLen = 8 + 8 + 4 + 2 + refLen + 2 + matchedLen;
+        byte[] key = new byte[totalLen];
+        int p = 0;
+
+        putLong(key, p, groupId.getMostSignificantBits()); p += 8;
+        putLong(key, p, groupId.getLeastSignificantBits()); p += 8;
+        putInt(key, p, chunkIndex); p += 4;
+        putShort(key, p, (short) refLen); p += 2;
+        System.arraycopy(refBytes, 0, key, p, refLen); p += refLen;
+        putShort(key, p, (short) matchedLen); p += 2;
+        System.arraycopy(matchedBytes, 0, key, p, matchedLen);
+
+        return key;
     }
 
-    private String compactKey(UUID groupId, int chunkIndex, GraphRecords.PotentialMatch match) {
-        return groupId.toString() + ":" + chunkIndex + ":" + match.getReferenceId() + ":" + match.getMatchedReferenceId();
+    public Set<String> getKeysByGroupAndDomain(UUID groupId, UUID domainId) {
+        Set<String> keys = new HashSet<>();
+        long msb = groupId.getMostSignificantBits();
+        long lsb = groupId.getLeastSignificantBits();
+
+        for (HTreeMap.Entry<byte[], byte[]> entry : map.getEntries()) {
+            byte[] key = entry.getKey();
+            if (key.length >= 20 &&
+                    getLong(key, 0) == msb &&
+                    getLong(key, 8) == lsb) {
+                try {
+                    GraphRecords.PotentialMatch match = deserializeMatch(entry.getValue(), groupId, domainId);
+                    if (domainId.equals(match.getDomainId())) {
+                        keys.add(Base64.getEncoder().encodeToString(key));
+                    }
+                } catch (Exception e) {
+                    log.warn("Skipping invalid match during key scan", e);
+                } finally {
+                    SerializerContext.release();
+                }
+            }
+        }
+        return keys;
+    }
+
+    private Set<UUID> safeDeserializeBucket(byte[] data, String key) {
+        if (data == null || data.length == 0 || data.length > MAX_BUCKET_DATA_SIZE) {
+            log.warn("Invalid bucket size: {} bytes for key {}", data == null ? 0 : data.length, key);
+            return ConcurrentHashMap.newKeySet();
+        }
+
+        try {
+            DataInput2 in = new DataInput2.ByteArray(data);
+
+            if (data.length >= 8) {
+                long timestamp = in.readLong();
+                if (System.currentTimeMillis() - timestamp > BUCKET_TTL_MS) {
+                    return ConcurrentHashMap.newKeySet();
+                }
+
+                int remaining = data.length - 8;
+                if (remaining <= 0 || remaining > MAX_REMAINING_DATA_SIZE) {
+                    log.warn("Invalid remaining data size: {} for key {}", remaining, key);
+                    return ConcurrentHashMap.newKeySet();
+                }
+
+                @SuppressWarnings("unchecked")
+                Set<UUID> set = (Set<UUID>) Serializer.JAVA.deserialize(in, remaining);
+                if (set.size() > BUCKET_SIZE_LIMIT * 2) {
+                    log.warn("Deserialized bucket too large: {} for key {}", set.size(), key);
+                    return ConcurrentHashMap.newKeySet();
+                }
+
+                Set<UUID> copy = ConcurrentHashMap.newKeySet(set.size());
+                copy.addAll(set);
+                return copy;
+            }
+
+            @SuppressWarnings("unchecked")
+            Set<UUID> set = (Set<UUID>) Serializer.JAVA.deserialize(in, data.length);
+
+            if (set.size() > BUCKET_SIZE_LIMIT * 2) {
+                log.warn("Old bucket too large: {} for key {}", set.size(), key);
+                return ConcurrentHashMap.newKeySet();
+            }
+
+            Set<UUID> copy = ConcurrentHashMap.newKeySet(set.size());
+            copy.addAll(set);
+
+            mapdbExecutor.submit(() -> {
+                try {
+                    byte[] newData = serializeBucketWithTTL(copy, System.currentTimeMillis());
+                    if (newData.length < MAX_BUCKET_DATA_SIZE) {
+                        map.put(key.getBytes(StandardCharsets.UTF_8), newData);
+                        db.commit();
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to migrate old bucket {}", key, e);
+                }
+            });
+
+            return copy;
+
+        } catch (Exception e) {
+            log.error("CRITICAL: Failed to deserialize bucket {} — possible corruption", key, e);
+            return ConcurrentHashMap.newKeySet();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private byte[] serializeBucketWithTTL(Set<UUID> bucket, long timestamp) {
+        DataOutput2 out = new DataOutput2();
+        try {
+            out.writeLong(timestamp);
+            Serializer.JAVA.serialize(out, new HashSet<>(bucket));
+            return out.copyBytes();
+        } catch (IOException e) {
+            throw new RuntimeException("Serialization failed", e);
+        }
+    }
+
+    public void addToBucket(int tableIdx, int band, Collection<UUID> nodeIds) {
+        if (nodeIds.isEmpty() || nodeIds.size() > BUCKET_SIZE_LIMIT) return;
+
+        byte[] key = getLSHKey(tableIdx, band);
+
+        map.compute(key, (k, existingBytes) -> {
+            Set<UUID> bucket = (existingBytes == null)
+                    ? ConcurrentHashMap.newKeySet()
+                    : safeDeserializeBucket(existingBytes, tableIdx, band);
+
+            int added = 0;
+            for (UUID id : nodeIds) {
+                if (bucket.add(id)) added++;
+            }
+
+            if (bucket.size() > BUCKET_SIZE_LIMIT) {
+                log.warn("LSH bucket overflow {}-{}: {} → trimming", tableIdx, band, bucket.size());
+                bucket = bucket.stream()
+                        .limit(BUCKET_TRIM_TO)
+                        .collect(Collectors.toCollection(ConcurrentHashMap::newKeySet));
+            }
+
+            long total = totalBucketEntries.addAndGet(added);
+            if (total > MAX_TOTAL_BUCKETS) {
+                log.error("Global LSH limit exceeded: {} > {}", total, MAX_TOTAL_BUCKETS);
+                totalBucketEntries.addAndGet(-added);
+                return existingBytes;
+            }
+
+            return serializeBucketWithTTL(bucket, System.currentTimeMillis());
+        });
+
+        if (pendingCommits.incrementAndGet() >= 100) {
+            db.commit();
+            pendingCommits.set(0);
+        }
+    }
+    public Set<UUID> getBucket(int tableIdx, int band) {
+        byte[] key = getLSHKey(tableIdx, band);
+        byte[] data = map.get(key);
+        if (data == null) return Collections.emptySet();
+        return safeDeserializeBucket(data, tableIdx, band);
+    }
+
+    public void clearAllBuckets() {
+        Iterator<HTreeMap.Entry<byte[], byte[]>> iter = map.getEntries().iterator();
+        List<byte[]> toRemove = new ArrayList<>();
+        byte[] magicPrefix = new byte[4];
+        putInt(magicPrefix, 0, LSH_MAGIC);
+
+        while (iter.hasNext()) {
+            byte[] key = iter.next().getKey();
+            if (key.length == 8 && Arrays.equals(Arrays.copyOf(key, 4), magicPrefix)) {
+                toRemove.add(key);
+            }
+        }
+        toRemove.forEach(map::remove);
+        db.commit();
+        totalBucketEntries.set(0);
+        log.info("Cleared all LSH buckets ({} removed)", toRemove.size());
+    }
+
+    private Set<UUID> safeDeserializeBucket(byte[] data, int tableIdx, int band) {
+        if (data == null || data.length == 0 || data.length > MAX_BUCKET_DATA_SIZE) {
+            log.warn("Invalid LSH bucket size: {} bytes for {}-{}",
+                    data == null ? 0 : data.length, tableIdx, band);
+            return ConcurrentHashMap.newKeySet();
+        }
+
+        try {
+            DataInput2 in = new DataInput2.ByteArray(data);
+
+            if (data.length >= 8) {
+                long timestamp = in.readLong();
+                if (System.currentTimeMillis() - timestamp > BUCKET_TTL_MS) {
+                    return ConcurrentHashMap.newKeySet();
+                }
+
+                int remaining = data.length - 8;
+                if (remaining <= 0 || remaining > MAX_REMAINING_DATA_SIZE) {
+                    log.warn("Invalid remaining data: {} bytes for LSH {}-{}", remaining, tableIdx, band);
+                    return ConcurrentHashMap.newKeySet();
+                }
+
+                @SuppressWarnings("unchecked")
+                Set<UUID> set = (Set<UUID>) Serializer.JAVA.deserialize(in, remaining);
+                if (set.size() > BUCKET_SIZE_LIMIT * 2) {
+                    log.warn("Deserialized LSH bucket too large: {} for {}-{}", set.size(), tableIdx, band);
+                    return ConcurrentHashMap.newKeySet();
+                }
+
+                Set<UUID> copy = ConcurrentHashMap.newKeySet(set.size());
+                copy.addAll(set);
+                return copy;
+            }
+
+            @SuppressWarnings("unchecked")
+            Set<UUID> set = (Set<UUID>) Serializer.JAVA.deserialize(in, data.length);
+
+            if (set.size() > BUCKET_SIZE_LIMIT * 2) {
+                log.warn("Old LSH bucket too large: {} for {}-{}", set.size(), tableIdx, band);
+                return ConcurrentHashMap.newKeySet();
+            }
+
+            Set<UUID> copy = ConcurrentHashMap.newKeySet(set.size());
+            copy.addAll(set);
+
+            mapdbExecutor.submit(() -> {
+                try {
+                    byte[] newData = serializeBucketWithTTL(copy, System.currentTimeMillis());
+                    if (newData.length < MAX_BUCKET_DATA_SIZE) {
+                        map.put(getLSHKey(tableIdx, band), newData);
+                        db.commit();
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to migrate LSH bucket {}-{}", tableIdx, band, e);
+                }
+            });
+
+            return copy;
+
+        } catch (Exception e) {
+            log.error("CRITICAL: Failed to deserialize LSH bucket {}-{} — possible corruption", tableIdx, band, e);
+            return ConcurrentHashMap.newKeySet();
+        }
     }
 }

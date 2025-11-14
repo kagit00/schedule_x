@@ -71,9 +71,7 @@ public final class IndexUtils {
             tempEncodedNodesCache.put(entry.getValue(), entry.getKey());
         }
 
-        CompletableFuture<Void> indexFuture = page == 0
-                ? lshIndex.prepareAsync(encodedEntries)
-                : lshIndex.insertBatch(encodedEntries);
+        CompletableFuture<Void> indexFuture = lshIndex.insertBatch(encodedEntries);
 
         return indexFuture.thenRun(() -> {
             if (!Objects.isNull(currentSnapshotRef.get())) {
@@ -96,5 +94,4 @@ public final class IndexUtils {
         // Placeholder for preparation state check
         return true;
     }
-
 }
