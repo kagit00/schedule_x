@@ -1,13 +1,16 @@
 package com.shedule.x.processors;
 
-import com.esotericsoftware.kryo.kryo5.Kryo;
-import com.esotericsoftware.kryo.kryo5.io.Input;
-import com.esotericsoftware.kryo.kryo5.io.Output;
-import com.shedule.x.config.factory.SerializerContext;
+import static com.shedule.x.utils.graph.StoreUtility.matchesGroupPrefix;
+import static org.lmdbjava.DbiFlags.MDB_CREATE;
+import static org.lmdbjava.EnvFlags.MDB_NOSYNC;
+import static org.lmdbjava.EnvFlags.MDB_WRITEMAP;
 import com.shedule.x.config.factory.AutoCloseableStream;
 import com.shedule.x.config.factory.GraphRequestFactory;
+import com.shedule.x.exceptions.InternalServerErrorException;
 import com.shedule.x.models.Edge;
 import com.shedule.x.service.GraphRecords;
+import com.shedule.x.utils.AlgorithmUtils;
+import com.shedule.x.utils.basic.Murmur3;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.binder.jvm.JvmGcMetrics;
 import io.micrometer.core.instrument.binder.jvm.JvmMemoryMetrics;
@@ -15,650 +18,488 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.ListUtils;
-import org.mapdb.*;
+import org.lmdbjava.*;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
-import java.time.Duration;
-import java.time.Instant;
-import java.util.*;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
+
 import java.io.File;
 import java.io.IOException;
-import org.mapdb.DB;
-import org.mapdb.DBMaker;
-import org.mapdb.HTreeMap;
-import org.mapdb.Serializer;
-
-import java.io.*;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.*;
 import java.util.concurrent.*;
-import org.mapdb.*;
-import java.util.*;
-import java.util.concurrent.*;
-import java.util.stream.Collectors;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.StampedLock;
 import java.util.stream.StreamSupport;
-
-
-import org.mapdb.*;
-import java.util.*;
-import java.util.concurrent.*;
-import org.mapdb.*;
-import java.nio.charset.StandardCharsets;
-
-import java.util.*;
-import java.util.concurrent.*;
-import static com.shedule.x.utils.basic.ByteUtils.*;
-
 
 @Slf4j
 @Component
 public class GraphStore implements AutoCloseable {
+    @Value("${graph.store.map-size:68719476736}") // 64 GB default
+    private long maxDbSize;
 
-    final int LSH_MAGIC = 0x4C534800;
-    private static final int MAX_BUCKET_DATA_SIZE = 10 * 1024 * 1024; // 10MB
-    private static final int MAX_REMAINING_DATA_SIZE = 5 * 1024 * 1024; // 5MB
-    private static final int MAX_STRING_LENGTH = 65535;
+    private static final int BATCH_BASE = 1_000;
+    private static final int LOCK_STRIPES = 16_384; // 2^14
+    private static final int MAX_KEY_BUF = 128;
+    private static final int MAX_VAL_BUF = 512;
+    private static final long BUCKET_TTL_NS = 86_400_000_000_000L; // 24h
+    private static final int MAX_BUCKET_IDS = 40_000;
 
-    private DB db;
-    private HTreeMap<byte[], byte[]> map;
-    private final ExecutorService mapdbExecutor;
+    // ====================== LMDB ======================
+    private Env<ByteBuffer> env;
+    private Dbi<ByteBuffer> edgeDbi;
+    private Dbi<ByteBuffer> lshDbi;
+
+    // ====================== THREADING ======================
+    private final ExecutorService asyncPool;
     private final MeterRegistry meterRegistry;
-    private final AtomicInteger pendingCommits = new AtomicInteger(0);
     private final String dbPath;
-    private final int batchSize;
-
-    private static final int BUCKET_SIZE_LIMIT = 50_000;
-    private static final int BUCKET_TRIM_TO = 45_000;
-    private static final long MAX_TOTAL_BUCKETS = 5_000_000L;
-    private static final long BUCKET_TTL_MS = 24 * 60 * 60 * 1000L;
-
     private final AtomicLong totalBucketEntries = new AtomicLong(0);
+    private final StampedLock[] stripeLocks = new StampedLock[LOCK_STRIPES];
+
+    // ====================== BUFFER POOLS ======================
+    private final ThreadLocal<ByteBuffer> keyBuf = ThreadLocal.withInitial(() ->
+            ByteBuffer.allocateDirect(MAX_KEY_BUF));
+    private final ThreadLocal<ByteBuffer> valBuf = ThreadLocal.withInitial(() ->
+            ByteBuffer.allocateDirect(MAX_VAL_BUF));
+    private final ThreadLocal<ByteBuffer> tmpBuf = ThreadLocal.withInitial(() ->
+            ByteBuffer.allocateDirect(64));
+    private final ThreadLocal<ByteBuffer> lshKeyBuf =
+            ThreadLocal.withInitial(() -> ByteBuffer.allocateDirect(12).order(ByteOrder.BIG_ENDIAN));
+    private final ThreadLocal<long[]> mergeBuf =
+            ThreadLocal.withInitial(() -> new long[MAX_BUCKET_IDS * 4]);
+    private final ThreadLocal<ByteBuffer> bucketBuf =
+            ThreadLocal.withInitial(() -> ByteBuffer.allocateDirect(MAX_BUCKET_IDS * 16 + 64));
+    private final ThreadLocal<long[]> radixTmp =
+            ThreadLocal.withInitial(() -> new long[MAX_BUCKET_IDS * 2]);
+
+
+
+    private final Semaphore writeSemaphore = new Semaphore(1);
+    private static final int KEY_REF_OFFSET = 20;   // group(16) + chunk(4)
+    private static final int KEY_MAT_OFFSET = 36;   // group(16) + chunk(4) + ref(16)
+
+    private final ThreadLocal<byte[]> tmp16Bytes = ThreadLocal.withInitial(() -> new byte[16]);
+
+    private final ScheduledExecutorService syncScheduler =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "lmdb-sync-thread");
+                t.setDaemon(true);
+                return t;
+            });
+
+
+    private ByteBuffer lshKeyBuffer(int table, int band) {
+        ByteBuffer b = lshKeyBuf.get();
+        b.clear();
+        b.putInt(0x4C534800).putInt(table).putInt(band);
+        b.flip();
+        return b;
+    }
 
     public GraphStore(
-            @Qualifier("persistenceExecutor") ExecutorService mapdbExecutor,
+            @Qualifier("persistenceExecutor") ExecutorService asyncPool,
             MeterRegistry meterRegistry,
-            @Value("${graph.store.path:/app/graph-store}") String dbPath,
-            @Value("${mapdb.batch-size:500}") int batchSize) {
-        this.mapdbExecutor = mapdbExecutor;
+            @Value("${graph.store.path:/app/graph-store}") String dbPath) {
+        this.asyncPool = asyncPool;
         this.meterRegistry = meterRegistry;
         this.dbPath = dbPath;
-        this.batchSize = batchSize;
     }
 
     @PostConstruct
-    public void init() {
-        try {
-            if (dbPath == null || dbPath.trim().isEmpty()) {
-                throw new IllegalArgumentException("graph.store.path is null or empty");
+    public void init() throws IOException {
+        validateAndCreatePath();
+        initLocks();
+        initLMDB();
+        bindMetrics();
+        log.info("GraphStore ready at {}", new File(dbPath).getAbsolutePath());
+
+        syncScheduler.scheduleAtFixedRate(() -> {
+            try {
+                env.sync(false);
+            } catch (Exception e) {
+                log.warn("LMDB periodic sync failed", e);
             }
-            File dbFile = new File(dbPath, "graphstore.db");
-            File parentDir = dbFile.getParentFile();
+        }, 30, 30, TimeUnit.SECONDS);
 
-            if (parentDir == null) {
-                throw new IOException("Invalid dbPath, no parent directory: " + dbPath);
-            }
-            if (!parentDir.exists() && !parentDir.mkdirs()) {
-                throw new IOException("Failed to create directory: " + parentDir.getAbsolutePath());
-            }
-            if (!parentDir.canWrite()) {
-                throw new IOException("No write permission for directory: " + parentDir.getAbsolutePath());
-            }
-
-            this.db = DBMaker.fileDB(dbFile)
-                    .fileMmapEnable()
-                    .fileMmapPreclearDisable()
-                    .cleanerHackEnable()
-                    .allocateStartSize(512 * 1024 * 1024L)
-                    .allocateIncrement(256 * 1024 * 1024L)
-                    .transactionEnable()
-                    .concurrencyScale(32)
-                    .make();
-
-            this.map = db.hashMap("graph-store")
-                    .keySerializer(Serializer.BYTE_ARRAY)
-                    .valueSerializer(Serializer.BYTE_ARRAY)
-                    .createOrOpen();
-
-            meterRegistry.gauge("mapdb_map_size", map, m -> (long) m.size());
-            meterRegistry.gauge("mapdb_executor_queue", mapdbExecutor,
-                    exec -> ((ThreadPoolExecutor) exec).getQueue().size());
-            meterRegistry.gauge("mapdb_executor_active", mapdbExecutor,
-                    exec -> ((ThreadPoolExecutor) exec).getActiveCount());
-            meterRegistry.gauge("mapdb_pending_commits", pendingCommits, AtomicInteger::get);
-            meterRegistry.gauge("lsh_total_bucket_entries", totalBucketEntries, AtomicLong::get);
-
-            new JvmMemoryMetrics().bindTo(meterRegistry);
-            new JvmGcMetrics().bindTo(meterRegistry);
-
-            log.info("Initialized MapDB with variable-length binary keys at path={}", dbFile.getAbsolutePath());
-        } catch (Exception e) {
-            log.error("Failed to initialize MapDB at path={}: {}", dbPath, e.getMessage(), e);
-            throw new RuntimeException(e);
-        }
+        log.info("GraphStore ready at {}", new File(dbPath).getAbsolutePath());
     }
 
     @PreDestroy
     @Override
     public void close() {
+        syncScheduler.shutdownNow();
+        asyncPool.shutdownNow();
         try {
-            if (map != null && !map.isClosed()) {
-                map.close();
-            }
-            if (db != null && !db.isClosed()) {
-                db.commit();
-                db.close();
-            }
-            log.info("Closed MapDB");
-        } catch (Exception e) {
-            log.error("Failed to close MapDB: {}", e.getMessage(), e);
-        }
+            if (env != null) env.sync(true);
+        } catch (Exception ignored) {}
+        if (edgeDbi != null) edgeDbi.close();
+        if (lshDbi != null) lshDbi.close();
+        if (env != null) env.close();
     }
+
+
+    private void validateAndCreatePath() throws IOException {
+        File dir = new File(dbPath);
+        if (!dir.exists() && !dir.mkdirs()) {
+            throw new IOException("Cannot create " + dir);
+        }
+        if (!dir.canWrite()) throw new IOException("No write on " + dir);
+    }
+
+    private void initLocks() {
+        for (int i = 0; i < LOCK_STRIPES; i++) stripeLocks[i] = new StampedLock();
+    }
+
+    private void initLMDB() {
+        env = Env.create()
+                .setMapSize(maxDbSize)
+                .setMaxDbs(2)
+                .setMaxReaders(4096)
+                .open(new File(dbPath), EnvFlags.MDB_MAPASYNC, EnvFlags.MDB_NOSYNC);
+
+        edgeDbi = env.openDbi("edges", MDB_CREATE);
+        lshDbi = env.openDbi("lsh", MDB_CREATE);
+    }
+
+    private void bindMetrics() {
+        meterRegistry.gauge("lmdb_map_size_bytes", this, gs -> env.stat().entries * 64L);
+        new JvmMemoryMetrics().bindTo(meterRegistry);
+        new JvmGcMetrics().bindTo(meterRegistry);
+    }
+
 
     public CompletableFuture<Void> persistEdgesAsync(List<GraphRecords.PotentialMatch> matches,
                                                      UUID groupId, int chunkIndex) {
-        if (matches.isEmpty()) {
-            log.debug("No matches to persist for groupId={}, chunkIndex={}", groupId, chunkIndex);
-            return CompletableFuture.completedFuture(null);
+        if (matches.isEmpty()) return CompletableFuture.completedFuture(null);
+        int batch = Math.min(BATCH_BASE, matches.size());
+        List<CompletableFuture<Void>> subs = new ArrayList<>();
+        for (List<GraphRecords.PotentialMatch> part : ListUtils.partition(matches, batch)) {
+            subs.add(CompletableFuture.runAsync(() ->
+                    writeEdgeBatch(part, groupId, chunkIndex), asyncPool));
         }
-
-        Instant submitStart = Instant.now();
-        int dynamicBatchSize = adjustBatchSize(matches.size());
-        List<CompletableFuture<Void>> batchFutures = new ArrayList<>();
-
-        for (List<GraphRecords.PotentialMatch> subBatch : ListUtils.partition(matches, dynamicBatchSize)) {
-            batchFutures.add(CompletableFuture.runAsync(
-                    () -> persistBatchWithCommit(subBatch, groupId, chunkIndex),
-                    mapdbExecutor).whenComplete((v, e) -> {
-                if (e != null) {
-                    log.error("Failed to persist batch for groupId={}, chunkIndex={}: {}",
-                            groupId, chunkIndex, e, e);
-                    meterRegistry.counter("mapdb_persist_batch_errors",
-                            "groupId", groupId.toString()).increment(subBatch.size());
-                }
-            }));
-        }
-
-        return CompletableFuture.allOf(batchFutures.toArray(new CompletableFuture[0]))
-                .whenComplete((v, e) -> {
-                    meterRegistry.timer("mapdb_persist_submit_latency",
-                                    "groupId", groupId.toString())
-                            .record(Duration.between(submitStart, Instant.now()));
-                    if (e == null) {
-                        meterRegistry.counter("mapdb_edges_persisted",
-                                "groupId", groupId.toString()).increment(matches.size());
-                    } else {
-                        meterRegistry.counter("mapdb_persist_errors",
-                                "groupId", groupId.toString()).increment(matches.size());
-                    }
-                });
+        return CompletableFuture.allOf(subs.toArray(new CompletableFuture[0]));
     }
 
-    private void persistBatchWithCommit(List<GraphRecords.PotentialMatch> subBatch,
-                                        UUID groupId, int chunkIndex) {
+    private void writeEdgeBatch(List<GraphRecords.PotentialMatch> batch, UUID groupId, int chunkIndex) {
         try {
-            Instant writeStart = Instant.now();
-            for (GraphRecords.PotentialMatch match : subBatch) {
-                byte[] key = compactKey(groupId, chunkIndex, match);
-                map.put(key, serializeMatch(match));
+            writeSemaphore.acquire();
+
+            try (Txn<ByteBuffer> txn = env.txnWrite()) {
+                ByteBuffer kb = keyBuf();
+                ByteBuffer vb = valBuf();
+
+                for (GraphRecords.PotentialMatch m : batch) {
+                    kb.clear();
+                    putUUID(kb, groupId);
+                    kb.putInt(chunkIndex);
+                    Murmur3.hash128To(kb, m.getReferenceId());
+                    Murmur3.hash128To(kb, m.getMatchedReferenceId());
+                    kb.flip();
+
+                    vb.clear();
+                    vb.putFloat((float) m.getCompatibilityScore());
+                    putUUID(vb, m.getDomainId());
+                    vb.flip();
+
+                    edgeDbi.put(txn, kb, vb);
+                }
+
+                txn.commit();
+                meterRegistry.counter("edges_written").increment(batch.size());
             }
-            db.commit();
-            pendingCommits.set(0);
 
-            long durationMs = Duration.between(writeStart, Instant.now()).toMillis();
-            meterRegistry.timer("mapdb_persist_latency", "groupId", groupId.toString())
-                    .record(Duration.ofMillis(durationMs));
-            meterRegistry.counter("mapdb_edges_persisted", "groupId", groupId.toString())
-                    .increment(subBatch.size());
-            meterRegistry.counter("mapdb_commits", "groupId", groupId.toString()).increment();
+        } catch (Exception e) {
+            meterRegistry.counter("edges_write_err").increment(batch.size());
+            log.warn("Edge batch fail", e);
 
-            log.debug("Persisted & committed {} edges for groupId={}, chunkIndex={} in {} ms",
-                    subBatch.size(), groupId, chunkIndex, durationMs);
-            if (durationMs > 10_000) {
-                log.warn("Slow persist+commit: {} edges, {} ms, groupId={}",
-                        subBatch.size(), durationMs, groupId);
+        } finally {
+            writeSemaphore.release();
+        }
+    }
+
+
+    public AutoCloseableStream<Edge> streamEdges(UUID domainId, UUID groupId) {
+        Txn<ByteBuffer> txn = env.txnRead();
+        ByteBuffer prefix = keyBuf().clear();
+        putUUID(prefix, groupId);
+        prefix.flip();
+        CursorIterable<ByteBuffer> iter = edgeDbi.iterate(txn, KeyRange.atLeast(prefix));
+        Iterator<CursorIterable.KeyVal<ByteBuffer>> it = iter.iterator();
+        java.util.stream.Stream<Edge> stream = StreamSupport.stream(
+                        Spliterators.spliteratorUnknownSize(new Iterator<Edge>() {
+                            Edge next = fetchNext(it, domainId, groupId);
+                            @Override public boolean hasNext() { return next != null; }
+                            @Override public Edge next() {
+                                if (next == null) throw new NoSuchElementException();
+                                Edge r = next;
+                                next = fetchNext(it, domainId, groupId);
+                                return r;
+                            }
+                        }, Spliterator.NONNULL), false)
+                .onClose(() -> { iter.close(); txn.close(); });
+        return new AutoCloseableStream<>(stream);
+    }
+
+    private Edge fetchNext(Iterator<CursorIterable.KeyVal<ByteBuffer>> it,
+                           UUID domainId, UUID groupId) {
+        byte[] tmp16 = tmp16Bytes.get();
+        while (it.hasNext()) {
+            CursorIterable.KeyVal<ByteBuffer> kv = it.next();
+            ByteBuffer k = kv.key();
+
+            if (k.getLong(0)  != groupId.getMostSignificantBits() ||
+                    k.getLong(8)  != groupId.getLeastSignificantBits()) {
+                return null;
+            }
+
+            ByteBuffer v = kv.val();
+            UUID dom = new UUID(v.getLong(4), v.getLong(12));
+            if (!dom.equals(domainId)) continue;
+
+            float score = v.getFloat(0);
+
+            ByteBuffer kd = k.duplicate().order(ByteOrder.BIG_ENDIAN);
+
+            kd.position(KEY_REF_OFFSET);
+            kd.get(tmp16, 0, 16);
+            String refHex = Murmur3.toHex(tmp16, 0, 16);
+
+            kd.position(KEY_MAT_OFFSET);
+            kd.get(tmp16, 0, 16);
+            String matHex = Murmur3.toHex(tmp16, 0, 16);
+
+            GraphRecords.PotentialMatch pm = new GraphRecords.PotentialMatch(
+                    refHex, matHex, score, groupId, domainId);
+            return GraphRequestFactory.toEdge(pm);
+        }
+        return null;
+    }
+
+    public void addToBucket(int tableIdx, int band, Collection<UUID> nodeIds) {
+        if (nodeIds.isEmpty() || nodeIds.size() > MAX_BUCKET_IDS) return;
+
+        long hash = ((long) tableIdx << 32) | (band & 0xFFFFFFFFL);
+        int stripe = stripe(hash);
+        StampedLock lock = stripeLocks[stripe];
+        long stamp = lock.writeLock();
+        try {
+            ByteBuffer keyBufDirect = lshKeyBuffer(tableIdx, band);
+
+            try (Txn<ByteBuffer> txn = env.txnWrite()) {
+                ByteBuffer existingVal = lshDbi.get(txn, keyBufDirect);
+                long[] existing = existingVal == null ? new long[0] : decodeBucket(existingVal);
+
+                long[] incoming = new long[nodeIds.size() * 2];
+                int pos = 0;
+                for (UUID id : nodeIds) {
+                    incoming[pos++] = id.getMostSignificantBits();
+                    incoming[pos++] = id.getLeastSignificantBits();
+                }
+
+                sortByPairs(incoming);
+
+                long[] merged = mergeAndDedupPairs(existing, incoming);
+                if (merged.length > MAX_BUCKET_IDS * 2) {
+                    merged = Arrays.copyOf(merged, MAX_BUCKET_IDS * 2);
+                }
+
+                ByteBuffer valDirect = encodeBucketDirect(merged);
+                keyBufDirect.rewind();
+                lshDbi.put(txn, keyBufDirect, valDirect);
+                txn.commit();
+
+                totalBucketEntries.addAndGet(merged.length / 2L - existing.length / 2L);
             }
         } catch (Exception e) {
-            log.error("Failed to persist batch for groupId={}, chunkIndex={}: {}",
-                    groupId, chunkIndex, e, e);
-            meterRegistry.counter("mapdb_persist_errors", "groupId", groupId.toString())
-                    .increment(subBatch.size());
-            throw new RuntimeException(e);
+            log.warn("LSH add fail {}-{}", tableIdx, band, e);
+        } finally {
+            lock.unlockWrite(stamp);
         }
     }
 
-    private int adjustBatchSize(int totalEdges) {
-        int queueSize = ((ThreadPoolExecutor) mapdbExecutor).getQueue().size();
-        int base = batchSize;
-        if (queueSize > 200) {
-            base = Math.max(50, base / 4);
-        } else if (queueSize > 100) {
-            base = Math.max(100, base / 2);
+    public Set<UUID> getBucket(int tableIdx, int band) {
+        ByteBuffer keyBufDirect = lshKeyBuffer(tableIdx, band);
+        try (Txn<ByteBuffer> txn = env.txnRead()) {
+            ByteBuffer val = lshDbi.get(txn, keyBufDirect);
+            if (val == null) return Set.of();
+            long[] raw = decodeBucket(val);
+            Set<UUID> set = new HashSet<>(raw.length / 2);
+            for (int i = 0; i < raw.length; i += 2) {
+                set.add(new UUID(raw[i], raw[i + 1]));
+            }
+            return Set.copyOf(set);
+        } catch (Exception e) {
+            log.warn("LSH get fail", e);
+            return Set.of();
         }
-        return Math.min(base, totalEdges);
+    }
+
+    private void sortByPairs(long[] pairs) {
+        int n = pairs.length;
+        if (n <= 2) return;
+        if ((n & 1) != 0) throw new IllegalArgumentException("pairs length must be even");
+
+        long[] tmp = radixTmp.get();
+        if (tmp.length < pairs.length) {
+            tmp = new long[pairs.length];
+            radixTmp.set(tmp);
+        }
+
+        AlgorithmUtils.radixSortPairs(pairs, tmp);
+    }
+
+
+    private static int comparePair(long aMsb, long aLsb, long bMsb, long bLsb) {
+        int c = Long.compare(aMsb, bMsb);
+        if (c != 0) return c;
+        return Long.compare(aLsb, bLsb);
+    }
+
+    private long[] mergeAndDedupPairs(long[] existing, long[] incoming) {
+        if ((existing.length & 1) != 0 || (incoming.length & 1) != 0)
+            throw new IllegalArgumentException("pair arrays must have even length");
+
+        int i = 0, j = 0;
+        int n1 = existing.length, n2 = incoming.length;
+
+        long[] tmp = mergeBuf.get();
+        int w = 0;
+
+        while (i < n1 && j < n2) {
+            long aMsb = existing[i], aLsb = existing[i + 1];
+            long bMsb = incoming[j], bLsb = incoming[j + 1];
+            int cmp = comparePair(aMsb, aLsb, bMsb, bLsb);
+            if (cmp < 0) {
+                tmp[w++] = aMsb; tmp[w++] = aLsb;
+                i += 2;
+            } else if (cmp > 0) {
+                tmp[w++] = bMsb; tmp[w++] = bLsb;
+                j += 2;
+            } else {
+                tmp[w++] = aMsb; tmp[w++] = aLsb;
+                i += 2; j += 2;
+            }
+        }
+        while (i < n1) {
+            tmp[w++] = existing[i++]; tmp[w++] = existing[i++];
+        }
+        while (j < n2) {
+            tmp[w++] = incoming[j++]; tmp[w++] = incoming[j++];
+        }
+
+        return w == tmp.length ? tmp : Arrays.copyOf(tmp, w);
+    }
+
+
+    private ByteBuffer encodeBucketDirect(long[] ids) {
+        ByteBuffer buf = bucketBuf.get();
+        buf.clear();
+        buf.putLong(System.nanoTime());
+        buf.putInt(ids.length / 2);
+        for (long l : ids) buf.putLong(l);
+        buf.flip();
+        return buf;
+    }
+
+
+    private long[] decodeBucket(ByteBuffer data) {
+        if (data.remaining() < 12) return new long[0];
+        ByteBuffer dup = data.duplicate().order(ByteOrder.BIG_ENDIAN);
+        long ts = dup.getLong(0);
+        if (System.nanoTime() - ts > BUCKET_TTL_NS) return new long[0];
+        int count = dup.getInt(8);
+        long[] arr = new long[count * 2];
+        dup.position(12);
+        for (int i = 0; i < arr.length; i++) arr[i] = dup.getLong();
+        return arr;
+    }
+
+
+    public void cleanEdges(UUID groupId) {
+        Txn<ByteBuffer> txn = null;
+        Cursor<ByteBuffer> cur = null;
+
+        try {
+            txn = env.txnWrite();
+            cur = edgeDbi.openCursor(txn);
+
+            ByteBuffer prefix = keyBuf().clear();
+            putUUID(prefix, groupId);
+            prefix.flip();
+
+            boolean found = cur.get(prefix, GetOp.MDB_SET_RANGE);
+            if (!found) {
+                cur.close();
+                txn.commit();
+                return;
+            }
+
+            int deleted = 0;
+
+            do {
+                ByteBuffer k = cur.key();
+
+                if (!matchesGroupPrefix(k, groupId)) break;
+
+                cur.delete();
+                deleted++;
+
+            } while (cur.next());
+
+            cur.close();
+            txn.commit();
+
+            meterRegistry.counter("edges_cleaned").increment(deleted);
+
+        } catch (Exception e) {
+            log.warn("Clean fail", e);
+            if (txn != null) {
+                try { txn.abort(); } catch (Exception ignore) {}
+            }
+        } finally {
+            if (cur != null) {
+                try {
+                    cur.close();
+                } catch (Exception ignore) {}
+            }
+            if (txn != null) {
+                try {
+                    txn.close();
+                } catch (Exception ignore) {}
+            }
+        }
+    }
+
+
+    public void clearAllBuckets() {
+        try (Txn<ByteBuffer> txn = env.txnWrite()) {
+            Cursor<ByteBuffer> cur = lshDbi.openCursor(txn);
+            if (!cur.first()) return;
+            int cleared = 0;
+            do {
+                cur.delete();
+                cleared++;
+            } while (cur.next());
+            txn.commit();
+            totalBucketEntries.set(0);
+            log.info("Cleared {} LSH buckets", cleared);
+        } catch (Exception e) {
+            log.warn("Clear buckets fail", e);
+        }
     }
 
     public CompletableFuture<Void> persistEdgesAsyncFallback(List<GraphRecords.PotentialMatch> matches,
                                                              String groupId, int chunkIndex, Throwable t) {
-        log.warn("Persist failed for groupId={}, chunkIndex={}: {}", groupId, chunkIndex, t.getMessage());
-        meterRegistry.counter("mapdb_persist_fallbacks", "groupId", groupId).increment(matches.size());
+        log.warn("Persist failed: {}", t.getMessage());
         return CompletableFuture.completedFuture(null);
     }
 
-    public AutoCloseableStream<Edge> streamEdgesFallback(UUID domainId, UUID groupId,
-                                                         int topK, Throwable t) {
-        log.warn("Stream failed for groupId={}: {}", groupId, t.getMessage());
-        meterRegistry.counter("mapdb_stream_fallbacks", "groupId", groupId.toString()).increment();
-        return new AutoCloseableStream<>(java.util.stream.Stream.empty());
-    }
-
-    public void cleanEdgesFallback(UUID groupId, Throwable t) {
-        log.warn("Clean failed for groupId={}: {}", groupId, t.getMessage());
-        meterRegistry.counter("mapdb_clean_fallbacks", "groupId", groupId.toString()).increment();
-    }
-
-    public List<UUID> listGroupIds() {
-        try {
-            Set<UUID> groups = new HashSet<>();
-            for (Map.Entry<byte[], byte[]> entry : map.getEntries()) {
-                byte[] key = entry.getKey();
-                if (key.length >= 16) {
-                    long msb = getLong(key, 0);
-                    long lsb = getLong(key, 8);
-                    groups.add(new UUID(msb, lsb));
-                }
-            }
-            return new ArrayList<>(groups);
-        } catch (Exception e) {
-            log.error("Failed to list groupIds: {}", e.getMessage(), e);
-            throw new RuntimeException(e);
-        }
-    }
-
-    public AutoCloseableStream<Edge> streamEdges(UUID domainId, UUID groupId) {
-        if (domainId == null) throw new IllegalArgumentException("domainId must not be null");
-
-        Instant start = Instant.now();
-        long groupMsb = groupId.getMostSignificantBits();
-        long groupLsb = groupId.getLeastSignificantBits();
-
-        java.util.stream.Stream<Edge> stream = StreamSupport.stream(
-                        Spliterators.spliteratorUnknownSize(
-                                new Iterator<Edge>() {
-                                    private final Iterator<HTreeMap.Entry<byte[], byte[]>> iter = map.getEntries().iterator();
-                                    private Edge nextEdge = null;
-
-                                    @Override
-                                    public boolean hasNext() {
-                                        if (nextEdge != null) return true;
-                                        while (iter.hasNext()) {
-                                            HTreeMap.Entry<byte[], byte[]> entry = iter.next();
-                                            byte[] key = entry.getKey();
-                                            if (key.length < 20) continue;
-
-                                            long msb = getLong(key, 0);
-                                            long lsb = getLong(key, 8);
-                                            if (msb != groupMsb || lsb != groupLsb) continue;
-
-                                            try {
-                                                GraphRecords.PotentialMatch match = deserializeMatch(entry.getValue(), groupId, domainId);
-                                                if (!domainId.equals(match.getDomainId())) continue;
-
-                                                nextEdge = toEdge(match);
-                                                meterRegistry.counter("mapdb_edges_streamed", "groupId", groupId.toString()).increment();
-                                                return true;
-                                            } catch (Exception e) {
-                                                log.error("Failed to deserialize during stream", e);
-                                                meterRegistry.counter("mapdb_deserialize_errors", "groupId", groupId.toString()).increment();
-                                            }
-                                        }
-                                        return false;
-                                    }
-
-                                    @Override
-                                    public Edge next() {
-                                        if (!hasNext()) throw new NoSuchElementException();
-                                        Edge result = nextEdge;
-                                        nextEdge = null;
-                                        return result;
-                                    }
-                                }, Spliterator.NONNULL), false)
-                .onClose(() -> {
-                    long durationMs = Duration.between(start, Instant.now()).toMillis();
-                    meterRegistry.timer("mapdb_stream_latency", "groupId", groupId.toString())
-                            .record(Duration.ofMillis(durationMs));
-                    log.info("Streamed edges for groupId={} in {} ms", groupId, durationMs);
-                });
-
-        return new AutoCloseableStream<>(stream);
-    }
-
-    public void cleanEdges(UUID groupId) {
-        Instant start = Instant.now();
-        long msb = groupId.getMostSignificantBits();
-        long lsb = groupId.getLeastSignificantBits();
-
-        Iterator<HTreeMap.Entry<byte[], byte[]>> iter = map.getEntries().iterator();
-        List<byte[]> batch = new ArrayList<>(batchSize / 2);
-        int removed = 0;
-
-        while (iter.hasNext()) {
-            HTreeMap.Entry<byte[], byte[]> entry = iter.next();
-            byte[] key = entry.getKey();
-            if (key.length >= 16 &&
-                    getLong(key, 0) == msb &&
-                    getLong(key, 8) == lsb) {
-                batch.add(key);
-                if (batch.size() >= batchSize / 2) {
-                    batch.forEach(map::remove);
-                    db.commit();
-                    removed += batch.size();
-                    batch.clear();
-                }
-            }
-        }
-        if (!batch.isEmpty()) {
-            batch.forEach(map::remove);
-            db.commit();
-            removed += batch.size();
-        }
-
-        long durationMs = Duration.between(start, Instant.now()).toMillis();
-        meterRegistry.timer("mapdb_clean_latency", "groupId", groupId.toString())
-                .record(Duration.ofMillis(durationMs));
-        meterRegistry.counter("mapdb_edges_cleaned", "groupId", groupId.toString()).increment(removed);
-    }
-
-    private Edge toEdge(GraphRecords.PotentialMatch match) {
-        return GraphRequestFactory.toEdge(match);
-    }
-
-    private byte[] serializeMatch(GraphRecords.PotentialMatch match) {
-        Kryo kryo = SerializerContext.get();
-        try (Output output = new Output(64, 512)) {
-            kryo.writeObject(output, match);
-            return output.toBytes();
-        } finally {
-            SerializerContext.release();
-        }
-    }
-
-    private GraphRecords.PotentialMatch deserializeMatch(byte[] data, UUID groupId, UUID domainId) {
-        Kryo kryo = SerializerContext.get();
-        try (Input input = new Input(data)) {
-            GraphRecords.PotentialMatch match = kryo.readObject(input, GraphRecords.PotentialMatch.class);
-            return new GraphRecords.PotentialMatch(
-                    match.getReferenceId(),
-                    match.getMatchedReferenceId(),
-                    match.getCompatibilityScore(),
-                    groupId,
-                    domainId
-            );
-        } finally {
-            SerializerContext.release();
-        }
-    }
-
-    private byte[] compactKey(UUID groupId, int chunkIndex, GraphRecords.PotentialMatch match) {
-        String refId = match.getReferenceId();
-        String matchedId = match.getMatchedReferenceId();
-
-        if (refId == null || matchedId == null) {
-            throw new IllegalArgumentException("referenceId and matchedReferenceId must not be null");
-        }
-
-        byte[] refBytes = refId.getBytes(StandardCharsets.UTF_8);
-        byte[] matchedBytes = matchedId.getBytes(StandardCharsets.UTF_8);
-
-        int refLen = refBytes.length;
-        int matchedLen = matchedBytes.length;
-
-        if (refLen > MAX_STRING_LENGTH || matchedLen > MAX_STRING_LENGTH) {
-            throw new IllegalArgumentException("String too long: max " + MAX_STRING_LENGTH + " bytes");
-        }
-
-        int totalLen = 8 + 8 + 4 + 2 + refLen + 2 + matchedLen;
-        byte[] key = new byte[totalLen];
-        int p = 0;
-
-        putLong(key, p, groupId.getMostSignificantBits()); p += 8;
-        putLong(key, p, groupId.getLeastSignificantBits()); p += 8;
-        putInt(key, p, chunkIndex); p += 4;
-        putShort(key, p, (short) refLen); p += 2;
-        System.arraycopy(refBytes, 0, key, p, refLen); p += refLen;
-        putShort(key, p, (short) matchedLen); p += 2;
-        System.arraycopy(matchedBytes, 0, key, p, matchedLen);
-
-        return key;
-    }
-
-    public Set<String> getKeysByGroupAndDomain(UUID groupId, UUID domainId) {
-        Set<String> keys = new HashSet<>();
-        long msb = groupId.getMostSignificantBits();
-        long lsb = groupId.getLeastSignificantBits();
-
-        for (HTreeMap.Entry<byte[], byte[]> entry : map.getEntries()) {
-            byte[] key = entry.getKey();
-            if (key.length >= 20 &&
-                    getLong(key, 0) == msb &&
-                    getLong(key, 8) == lsb) {
-                try {
-                    GraphRecords.PotentialMatch match = deserializeMatch(entry.getValue(), groupId, domainId);
-                    if (domainId.equals(match.getDomainId())) {
-                        keys.add(Base64.getEncoder().encodeToString(key));
-                    }
-                } catch (Exception e) {
-                    log.warn("Skipping invalid match during key scan", e);
-                } finally {
-                    SerializerContext.release();
-                }
-            }
-        }
-        return keys;
-    }
-
-    private Set<UUID> safeDeserializeBucket(byte[] data, String key) {
-        if (data == null || data.length == 0 || data.length > MAX_BUCKET_DATA_SIZE) {
-            log.warn("Invalid bucket size: {} bytes for key {}", data == null ? 0 : data.length, key);
-            return ConcurrentHashMap.newKeySet();
-        }
-
-        try {
-            DataInput2 in = new DataInput2.ByteArray(data);
-
-            if (data.length >= 8) {
-                long timestamp = in.readLong();
-                if (System.currentTimeMillis() - timestamp > BUCKET_TTL_MS) {
-                    return ConcurrentHashMap.newKeySet();
-                }
-
-                int remaining = data.length - 8;
-                if (remaining <= 0 || remaining > MAX_REMAINING_DATA_SIZE) {
-                    log.warn("Invalid remaining data size: {} for key {}", remaining, key);
-                    return ConcurrentHashMap.newKeySet();
-                }
-
-                @SuppressWarnings("unchecked")
-                Set<UUID> set = (Set<UUID>) Serializer.JAVA.deserialize(in, remaining);
-                if (set.size() > BUCKET_SIZE_LIMIT * 2) {
-                    log.warn("Deserialized bucket too large: {} for key {}", set.size(), key);
-                    return ConcurrentHashMap.newKeySet();
-                }
-
-                Set<UUID> copy = ConcurrentHashMap.newKeySet(set.size());
-                copy.addAll(set);
-                return copy;
-            }
-
-            @SuppressWarnings("unchecked")
-            Set<UUID> set = (Set<UUID>) Serializer.JAVA.deserialize(in, data.length);
-
-            if (set.size() > BUCKET_SIZE_LIMIT * 2) {
-                log.warn("Old bucket too large: {} for key {}", set.size(), key);
-                return ConcurrentHashMap.newKeySet();
-            }
-
-            Set<UUID> copy = ConcurrentHashMap.newKeySet(set.size());
-            copy.addAll(set);
-
-            mapdbExecutor.submit(() -> {
-                try {
-                    byte[] newData = serializeBucketWithTTL(copy, System.currentTimeMillis());
-                    if (newData.length < MAX_BUCKET_DATA_SIZE) {
-                        map.put(key.getBytes(StandardCharsets.UTF_8), newData);
-                        db.commit();
-                    }
-                } catch (Exception e) {
-                    log.warn("Failed to migrate old bucket {}", key, e);
-                }
-            });
-
-            return copy;
-
-        } catch (Exception e) {
-            log.error("CRITICAL: Failed to deserialize bucket {} — possible corruption", key, e);
-            return ConcurrentHashMap.newKeySet();
-        }
-    }
-
-    @SuppressWarnings("unchecked")
-    private byte[] serializeBucketWithTTL(Set<UUID> bucket, long timestamp) {
-        DataOutput2 out = new DataOutput2();
-        try {
-            out.writeLong(timestamp);
-            Serializer.JAVA.serialize(out, new HashSet<>(bucket));
-            return out.copyBytes();
-        } catch (IOException e) {
-            throw new RuntimeException("Serialization failed", e);
-        }
-    }
-
-    public void addToBucket(int tableIdx, int band, Collection<UUID> nodeIds) {
-        if (nodeIds.isEmpty() || nodeIds.size() > BUCKET_SIZE_LIMIT) return;
-
-        byte[] key = getLSHKey(tableIdx, band);
-
-        map.compute(key, (k, existingBytes) -> {
-            Set<UUID> bucket = (existingBytes == null)
-                    ? ConcurrentHashMap.newKeySet()
-                    : safeDeserializeBucket(existingBytes, tableIdx, band);
-
-            int added = 0;
-            for (UUID id : nodeIds) {
-                if (bucket.add(id)) added++;
-            }
-
-            if (bucket.size() > BUCKET_SIZE_LIMIT) {
-                log.warn("LSH bucket overflow {}-{}: {} → trimming", tableIdx, band, bucket.size());
-                bucket = bucket.stream()
-                        .limit(BUCKET_TRIM_TO)
-                        .collect(Collectors.toCollection(ConcurrentHashMap::newKeySet));
-            }
-
-            long total = totalBucketEntries.addAndGet(added);
-            if (total > MAX_TOTAL_BUCKETS) {
-                log.error("Global LSH limit exceeded: {} > {}", total, MAX_TOTAL_BUCKETS);
-                totalBucketEntries.addAndGet(-added);
-                return existingBytes;
-            }
-
-            return serializeBucketWithTTL(bucket, System.currentTimeMillis());
-        });
-
-        if (pendingCommits.incrementAndGet() >= 100) {
-            db.commit();
-            pendingCommits.set(0);
-        }
-    }
-    public Set<UUID> getBucket(int tableIdx, int band) {
-        byte[] key = getLSHKey(tableIdx, band);
-        byte[] data = map.get(key);
-        if (data == null) return Collections.emptySet();
-        return safeDeserializeBucket(data, tableIdx, band);
-    }
-
-    public void clearAllBuckets() {
-        Iterator<HTreeMap.Entry<byte[], byte[]>> iter = map.getEntries().iterator();
-        List<byte[]> toRemove = new ArrayList<>();
-        byte[] magicPrefix = new byte[4];
-        putInt(magicPrefix, 0, LSH_MAGIC);
-
-        while (iter.hasNext()) {
-            byte[] key = iter.next().getKey();
-            if (key.length == 8 && Arrays.equals(Arrays.copyOf(key, 4), magicPrefix)) {
-                toRemove.add(key);
-            }
-        }
-        toRemove.forEach(map::remove);
-        db.commit();
-        totalBucketEntries.set(0);
-        log.info("Cleared all LSH buckets ({} removed)", toRemove.size());
-    }
-
-    private Set<UUID> safeDeserializeBucket(byte[] data, int tableIdx, int band) {
-        if (data == null || data.length == 0 || data.length > MAX_BUCKET_DATA_SIZE) {
-            log.warn("Invalid LSH bucket size: {} bytes for {}-{}",
-                    data == null ? 0 : data.length, tableIdx, band);
-            return ConcurrentHashMap.newKeySet();
-        }
-
-        try {
-            DataInput2 in = new DataInput2.ByteArray(data);
-
-            if (data.length >= 8) {
-                long timestamp = in.readLong();
-                if (System.currentTimeMillis() - timestamp > BUCKET_TTL_MS) {
-                    return ConcurrentHashMap.newKeySet();
-                }
-
-                int remaining = data.length - 8;
-                if (remaining <= 0 || remaining > MAX_REMAINING_DATA_SIZE) {
-                    log.warn("Invalid remaining data: {} bytes for LSH {}-{}", remaining, tableIdx, band);
-                    return ConcurrentHashMap.newKeySet();
-                }
-
-                @SuppressWarnings("unchecked")
-                Set<UUID> set = (Set<UUID>) Serializer.JAVA.deserialize(in, remaining);
-                if (set.size() > BUCKET_SIZE_LIMIT * 2) {
-                    log.warn("Deserialized LSH bucket too large: {} for {}-{}", set.size(), tableIdx, band);
-                    return ConcurrentHashMap.newKeySet();
-                }
-
-                Set<UUID> copy = ConcurrentHashMap.newKeySet(set.size());
-                copy.addAll(set);
-                return copy;
-            }
-
-            @SuppressWarnings("unchecked")
-            Set<UUID> set = (Set<UUID>) Serializer.JAVA.deserialize(in, data.length);
-
-            if (set.size() > BUCKET_SIZE_LIMIT * 2) {
-                log.warn("Old LSH bucket too large: {} for {}-{}", set.size(), tableIdx, band);
-                return ConcurrentHashMap.newKeySet();
-            }
-
-            Set<UUID> copy = ConcurrentHashMap.newKeySet(set.size());
-            copy.addAll(set);
-
-            mapdbExecutor.submit(() -> {
-                try {
-                    byte[] newData = serializeBucketWithTTL(copy, System.currentTimeMillis());
-                    if (newData.length < MAX_BUCKET_DATA_SIZE) {
-                        map.put(getLSHKey(tableIdx, band), newData);
-                        db.commit();
-                    }
-                } catch (Exception e) {
-                    log.warn("Failed to migrate LSH bucket {}-{}", tableIdx, band, e);
-                }
-            });
-
-            return copy;
-
-        } catch (Exception e) {
-            log.error("CRITICAL: Failed to deserialize LSH bucket {}-{} — possible corruption", tableIdx, band, e);
-            return ConcurrentHashMap.newKeySet();
-        }
+    private int stripe(long hash) { return (int) ((hash >>> 16) & (LOCK_STRIPES - 1)); }
+    private ByteBuffer keyBuf() { ByteBuffer b = keyBuf.get(); b.clear(); return b; }
+    private ByteBuffer valBuf() { ByteBuffer b = valBuf.get(); b.clear(); return b; }
+    private void putUUID(ByteBuffer buf, UUID id) {
+        buf.putLong(id.getMostSignificantBits()).putLong(id.getLeastSignificantBits());
     }
 }

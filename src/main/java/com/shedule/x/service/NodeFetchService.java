@@ -1,9 +1,15 @@
 package com.shedule.x.service;
 
 import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
 import java.util.*;
+
+import com.shedule.x.dto.CursorPage;
 import com.shedule.x.models.Node;
+import com.shedule.x.models.NodesCursor;
+import com.shedule.x.models.NodesCursorId;
 import com.shedule.x.repo.NodeRepository;
+import com.shedule.x.repo.NodesCursorRepository;
 import com.shedule.x.utils.db.BatchUtils;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
@@ -11,7 +17,6 @@ import io.micrometer.core.instrument.Timer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -29,7 +34,10 @@ public class NodeFetchService {
     private final MeterRegistry meterRegistry;
     private final Executor executor;
     private final TransactionTemplate transactionTemplate;
-    private final long futureTimeoutSeconds;
+    private final NodesCursorRepository nodesCursorRepository;
+    private final long futureTimeoutSeconds = 30;
+
+
 
     @Value("${node-fetch.batch-size:1000}")
     private int batchSize;
@@ -38,16 +46,16 @@ public class NodeFetchService {
             NodeRepository nodeRepository,
             MeterRegistry meterRegistry,
             @Qualifier("nodesFetchExecutor") Executor executor,
-            @Value("${node-fetch.future-timeout-seconds:30}") long futureTimeoutSeconds,
-            PlatformTransactionManager transactionManager
+            PlatformTransactionManager transactionManager,
+            NodesCursorRepository nodesCursorRepository
     ) {
         this.nodeRepository = nodeRepository;
         this.meterRegistry = meterRegistry;
         this.executor = executor;
-        this.futureTimeoutSeconds = futureTimeoutSeconds;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.transactionTemplate.setReadOnly(true);
         this.transactionTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.nodesCursorRepository = nodesCursorRepository;
     }
 
     public CompletableFuture<List<UUID>> fetchNodeIdsAsync(UUID groupId, UUID domainId, Pageable pageable, LocalDateTime createdAfter) {
@@ -140,64 +148,59 @@ public class NodeFetchService {
         }
     }
 
-    public CompletableFuture<List<UUID>> fetchNodeIdsByOffsetAsync(UUID groupId, UUID domainId, int startOffset, int limit, LocalDateTime createdAfter) {
+    public CompletableFuture<CursorPage> fetchNodeIdsByCursor(
+            UUID groupId, UUID domainId, int limit, String cycleId) {
+
         Timer.Sample sample = Timer.start(meterRegistry);
-        if (groupId == null || domainId == null) {
-            log.error("Invalid input: groupId={}, domainId={}", groupId, domainId);
-            return CompletableFuture.completedFuture(Collections.emptyList());
-        }
 
-        // Normalize inputs and create effectively final variables
-        final int normalizedStartOffset = Math.max(startOffset, 0);
-        final int pageSize = Math.max(limit, 1);
-        final int pageIndex = normalizedStartOffset / pageSize;
-        final int inPageOffset = normalizedStartOffset % pageSize;
-        final LocalDateTime filterCreatedAfter = createdAfter; // Ensure it's captured safely
+        return CompletableFuture.supplyAsync(() -> {
+                    NodesCursor cursor = nodesCursorRepository
+                            .findByIdGroupIdAndIdDomainId(groupId, domainId)
+                            .orElse(new NodesCursor(
+                                    NodesCursorId.builder().groupId(groupId).domainId(domainId).build(),
+                                    null, null, null));
 
-        return CompletableFuture.supplyAsync(() ->
-                        transactionTemplate.execute(status -> {
-                            try {
-                                // Fetch first page
-                                Pageable firstPageable = PageRequest.of(pageIndex, pageSize);
-                                List<UUID> first = nodeRepository.findIdsByGroupIdAndDomainId(groupId, domainId, firstPageable, filterCreatedAfter);
+                    List<UUID> ids = nodeRepository.findUnprocessedNodeIdsByCursor(
+                            groupId,
+                            domainId,
+                            cursor.getCursorCreatedAt() != null ? cursor.getCursorCreatedAt().toLocalDateTime() : null,
+                            cursor.getCursorId(),
+                            limit
+                    );
 
-                                List<UUID> combined = new ArrayList<>();
-                                if (first != null) {
-                                    combined.addAll(first);
-                                }
+                    boolean hasMore = !ids.isEmpty();
+                    LocalDateTime lastCreatedAt = null;
+                    UUID lastId = null;
 
-                                // If we need more items
-                                int required = inPageOffset + pageSize; // We want at least this many
-                                if (inPageOffset > 0 || combined.size() < required) {
-                                    Pageable secondPageable = PageRequest.of(pageIndex + 1, pageSize);
-                                    List<UUID> second = nodeRepository.findIdsByGroupIdAndDomainId(groupId, domainId, secondPageable, filterCreatedAfter);
-                                    if (second != null) {
-                                        combined.addAll(second);
-                                    }
-                                }
+                    if (!ids.isEmpty()) {
+                        lastId = ids.get(ids.size() - 1);
+                        lastCreatedAt = nodeRepository.findCreatedAtById(lastId)
+                                .orElseThrow(() -> new IllegalStateException("Missing createdAt for node: "));
+                    }
 
-                                // Trim to [inPageOffset, inPageOffset + limit)
-                                int from = Math.min(inPageOffset, combined.size());
-                                int to = Math.min(from + pageSize, combined.size());
-                                List<UUID> result = combined.subList(from, to);
-
-                                log.info("Fetched {} node IDs for groupId={}, startOffset={}, limit={} (pageIndex={}, inPageOffset={})",
-                                        result.size(), groupId, normalizedStartOffset, pageSize, pageIndex, inPageOffset);
-                                meterRegistry.counter("node_ids_fetched_total", Tags.of("groupId", groupId.toString())).increment(result.size());
-                                return result;
-                            } catch (Exception e) {
-                                meterRegistry.counter("node_fetch_ids_errors", Tags.of("groupId", groupId.toString())).increment();
-                                log.error("Failed to fetch node IDs by offset for groupId={}, startOffset={}", groupId, normalizedStartOffset, e);
-                                throw e;
-                            }
-                        }), executor)
+                    return new CursorPage(ids, hasMore, lastCreatedAt, lastId);
+                }, executor)
                 .orTimeout(futureTimeoutSeconds, TimeUnit.SECONDS)
-                .exceptionally(throwable -> {
-                    log.error("Async fetchNodeIdsByOffset failed for groupId={}, startOffset={}", groupId, normalizedStartOffset, throwable);
-                    meterRegistry.counter("node_fetch_ids_errors", Tags.of("groupId", groupId.toString())).increment();
-                    return Collections.emptyList();
-                })
-                .whenComplete((result, throwable) ->
-                        sample.stop(meterRegistry.timer("node_fetch_ids_duration", Tags.of("groupId", groupId.toString()))));
+                .whenComplete((r, t) -> sample.stop(meterRegistry.timer(
+                        "node_fetch_cursor_duration",
+                        Tags.of("groupId", groupId.toString(), "cycleId", cycleId))));
+    }
+
+    @Transactional
+    public void persistCursor(UUID groupId, UUID domainId, OffsetDateTime createdAt, UUID cursorId) {
+        NodesCursorId pk = NodesCursorId.builder()
+                .groupId(groupId)
+                .domainId(domainId)
+                .build();
+
+        NodesCursor cursor = nodesCursorRepository.findById(pk)
+                .orElse(new NodesCursor());
+
+        cursor.setId(pk);
+        cursor.setCursorCreatedAt(createdAt);
+        cursor.setCursorId(cursorId);
+        cursor.setUpdatedAt(OffsetDateTime.now());
+
+        nodesCursorRepository.save(cursor);
     }
 }

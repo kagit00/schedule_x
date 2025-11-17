@@ -1,0 +1,103 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    mem_limit: 6g
+    cpus: 4.0
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: schedulex
+    ports:
+      - "5433:5432"
+    command: [
+      "postgres",
+
+      "-c", "fsync=off",
+      "-c", "synchronous_commit=off",
+      "-c", "full_page_writes=off",
+
+      "-c", "shared_buffers=1GB",
+      "-c", "work_mem=32MB",
+      "-c", "maintenance_work_mem=512MB",
+      "-c", "temp_buffers=64MB",
+
+      "-c", "wal_buffers=64MB",
+      "-c", "checkpoint_completion_target=0.9",
+      "-c", "max_wal_size=16GB",
+      "-c", "min_wal_size=2GB",
+
+      "-c", "max_connections=300"
+    ]
+    volumes:
+      - /home/kaustav/schedulex/schedule_x/pgdata:/var/lib/postgresql/data
+    networks:
+      - kafka-network
+
+  redis:
+    image: redis:7
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - schedulex_redis_data:/data
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    networks:
+      - kafka-network
+
+  schedulex:
+    mem_limit: 2g
+    build: .
+    container_name: schedulex
+    volumes:
+      - /home/kaustav/schedulex/schedule_x/graph-store:/app/graph-store
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      JAVA_OPTS: "-Xmx1200m -Xms512m --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED"
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/schedulex
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgres
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: flairbit-exports
+      GRAPH_STORE_PATH: /app/graph-store
+    ports:
+      - "8080:8080"
+    networks:
+      - kafka-network
+    restart: always
+
+  schedulex-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        RUN_TESTGEN: "true"
+    container_name: schedulex-test
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/schedulex
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgres
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    command: >
+      sh -c "echo 'Test-generation image built. Use docker cp to extract generated tests from the image/container.'; sleep 5"
+    networks:
+      - kafka-network
+
+volumes:
+  schedulex_redis_data:
+
+networks:
+  kafka-network:
+    external: true

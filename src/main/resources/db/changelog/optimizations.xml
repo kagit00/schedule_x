@@ -166,4 +166,15 @@
         </createIndex>
     </changeSet>
 
+    <changeSet id="create-idx-nodes-cursor" author="kaustav">
+        <createIndex indexName="idx_nodes_cursor" tableName="nodes">
+            <column name="group_id"/>
+            <column name="domain_id"/>
+            <column name="is_processed"/>
+            <column name="created_at"/>
+            <column name="id"/>
+        </createIndex>
+    </changeSet>
+
+
 </databaseChangeLog>

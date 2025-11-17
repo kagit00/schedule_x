@@ -511,5 +511,27 @@
                 newDataType="UUID" />
     </changeSet>
 
+    <changeSet id="create-nodes-cursor-table" author="kaustav">
+        <createTable tableName="nodes_cursor">
+            <column name="group_id" type="UUID"/>
+            <column name="domain_id" type="UUID"/>
+            <column name="cursor_created_at" type="TIMESTAMP WITH TIME ZONE"/>
+            <column name="cursor_id" type="UUID"/>
+            <column name="updated_at" type="TIMESTAMP WITH TIME ZONE" defaultValueComputed="NOW()"/>
+        </createTable>
+
+        <addNotNullConstraint tableName="nodes_cursor"
+                              columnName="group_id"
+                              columnDataType="UUID"/>
+
+        <addNotNullConstraint tableName="nodes_cursor"
+                              columnName="domain_id"
+                              columnDataType="UUID"/>
+
+        <addPrimaryKey tableName="nodes_cursor"
+                       columnNames="group_id,domain_id"
+                       constraintName="pk_nodes_cursor"/>
+    </changeSet>
+
 
 </databaseChangeLog>

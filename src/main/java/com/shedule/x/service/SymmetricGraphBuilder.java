@@ -58,7 +58,7 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
     @Value("${graph.top-k:200}")
     private int topK;
 
-    @Value("${graph.chunk-processing-timeout-seconds:300}")
+    @Value("${graph.chunk-processing-timeout-seconds:1800}")
     private int chunkProcessingTimeoutSeconds;
 
     @Value("${graph.chunk-retry.max-attempts:3}")
@@ -170,7 +170,7 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
         }
 
         return processChunk(nodeChunk, strategy, request, chunkIndex, processingCycleId)
-                .orTimeout(30, TimeUnit.SECONDS)
+                .orTimeout(1800, TimeUnit.SECONDS)
                 .exceptionallyCompose(e -> {
                     log.warn(
                             "Chunk {} failed for groupId={}, processingCycleId={} (attempt {}/{}), retrying. Error: {}",
@@ -414,7 +414,7 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
             String processingCycleId) {
 
         return processChunk(nodeChunk, strategy, request, chunkIndex, processingCycleId)
-                .orTimeout(60, TimeUnit.SECONDS) // Increase from 30s
+                .orTimeout(1800, TimeUnit.SECONDS)
                 .exceptionally(e -> {
                     if (e.getCause() instanceof OutOfMemoryError) {
                         log.error("OOM processing chunk {} for groupId={}", chunkIndex, request.getGroupId());

@@ -13,7 +13,6 @@ public interface PotentialMatchComputationProcessor {
     CompletableFuture<Void> savePendingMatches(UUID groupId, UUID domainId, String processingCycleId, int batchSize);
     CompletableFuture<Void> saveFinalMatches(UUID groupId, UUID domainId, String processingCycleId, AutoCloseableStream<Edge> initialEdgeStream, int topK);
     long getFinalMatchCount(UUID groupId, UUID domainId, String processingCycleId);
-    Set<String> getCachedMatchKeysForDomainAndGroup(UUID groupId, UUID domainId);
     AutoCloseableStream<Edge> streamEdges(UUID groupId, UUID domainId, String processingCycleId, int topK);
     void cleanup(UUID groupId);
 }

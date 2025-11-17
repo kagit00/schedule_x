@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 @Slf4j
 @Component
@@ -168,44 +169,25 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
     }
 
     @Override
-    public Set<String> getCachedMatchKeysForDomainAndGroup(UUID groupId, UUID domainId) {
-        Instant start = Instant.now();
-        log.debug("Listing match keys for groupId={}, domainId={}", groupId, domainId);
-
-        try {
-            return graphStore.getKeysByGroupAndDomain(groupId, domainId);
-        } catch (Exception e) {
-            log.error("Failed to list match keys for groupId={}, domainId={}: {}", groupId, domainId, e.getMessage());
-            meterRegistry.counter("match_processor_list_keys_errors", "groupId", groupId.toString()).increment();
-            return Set.of();
-        }
-    }
-
-    @Override
     public AutoCloseableStream<Edge> streamEdges(UUID groupId, UUID domainId, String processingCycleId, int topK) {
         Instant start = Instant.now();
-        log.debug("Streaming edges for groupId={}, domainId={}, processingCycleId={}", groupId, domainId,
-                processingCycleId);
+        log.debug("Streaming edges for groupId={}, domainId={}, processingCycleId={}", groupId, domainId, processingCycleId);
 
         try {
-            AutoCloseableStream<Edge> edgeStream = new AutoCloseableStream<>(
-                    graphStore.streamEdges(domainId, groupId).getStream());
+            AutoCloseableStream<Edge> edgeStream = graphStore.streamEdges(domainId, groupId);
             long edgeCount = edgeStream.getStream().count();
-            edgeStream = new AutoCloseableStream<>(graphStore.streamEdges(domainId, groupId).getStream());
-            log.info("Streaming {} edges for groupId={}, domainId={}, processingCycleId={}", edgeCount, groupId,
-                    domainId, processingCycleId);
-            return new AutoCloseableStream<>(edgeStream.getStream().onClose(() -> {
+            log.info("Streaming {} edges for groupId={}, domainId={}, processingCycleId={}", edgeCount, groupId, domainId, processingCycleId);
+
+            AutoCloseableStream<Edge> resultStream = graphStore.streamEdges(domainId, groupId);
+            return new AutoCloseableStream<>(resultStream.getStream().onClose(() -> {
                 meterRegistry
-                        .timer("match_processor_stream_latency", "groupId", groupId.toString(), "processingCycleId",
-                                processingCycleId)
+                        .timer("match_processor_stream_latency", "groupId", groupId.toString(), "processingCycleId", processingCycleId)
                         .record(Duration.between(start, Instant.now()));
             }));
         } catch (Exception e) {
-            log.error("Failed to stream edges for groupId={}, domainId={}, processingCycleId={}: {}", groupId, domainId,
-                    processingCycleId, e.getMessage());
-            meterRegistry.counter("match_processor_stream_errors", "groupId", groupId.toString(), "processingCycleId",
-                    processingCycleId).increment();
-            return graphStore.streamEdgesFallback(domainId, groupId, topK, e);
+            log.error("Failed to stream edges for groupId={}, domainId={}, processingCycleId={}: {}", groupId, domainId, processingCycleId, e.getMessage());
+            meterRegistry.counter("match_processor_stream_errors", "groupId", groupId.toString(), "processingCycleId", processingCycleId).increment();
+            return new AutoCloseableStream<>(Stream.empty());
         }
     }
 
@@ -440,32 +422,27 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
     @Override
     public long getFinalMatchCount(UUID groupId, UUID domainId, String processingCycleId) {
         Instant start = Instant.now();
-        log.debug("Counting final matches for groupId={}, domainId={}, processingCycleId={}", groupId, domainId,
-                processingCycleId);
+        log.debug("Counting final matches for groupId={}, domainId={}, processingCycleId={}", groupId, domainId, processingCycleId);
 
         try (AutoCloseableStream<Edge> edgeStream = graphStore.streamEdges(domainId, groupId)) {
             long count = edgeStream.getStream().count();
+
             meterRegistry
-                    .timer("match_processor_count_latency", "groupId", groupId.toString(), "processingCycleId",
-                            processingCycleId)
+                    .timer("match_processor_count_latency", "groupId", groupId.toString(), "processingCycleId", processingCycleId)
                     .record(Duration.between(start, Instant.now()));
-            log.info("Final match count for groupId={}, domainId={}, processingCycleId={}: {}", groupId, domainId,
-                    processingCycleId, count);
+            log.info("Final match count for groupId={}, domainId={}, processingCycleId={}: {}", groupId, domainId, processingCycleId, count);
 
             try {
                 graphStore.cleanEdges(groupId);
                 log.info("Cleaned GraphStore edges for groupId={}", groupId);
             } catch (Exception e) {
                 log.error("Failed to clean edges in GraphStore for groupId={}: {}", groupId, e.getMessage());
-                graphStore.cleanEdgesFallback(groupId, e);
             }
 
             return count;
         } catch (Exception e) {
-            log.error("Failed to count final matches for groupId={}, domainId={}, processingCycleId={}: {}",
-                    groupId, domainId, processingCycleId, e.getMessage());
-            meterRegistry.counter("match_processor_count_errors", "groupId", groupId.toString(), "processingCycleId",
-                    processingCycleId).increment();
+            log.error("Failed to count final matches for groupId={}, domainId={}, processingCycleId={}: {}", groupId, domainId, processingCycleId, e.getMessage());
+            meterRegistry.counter("match_processor_count_errors", "groupId", groupId.toString(), "processingCycleId", processingCycleId).increment();
             return 0;
         }
     }
@@ -524,8 +501,10 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
                                 .increment();
                     }
                 })
-                .exceptionallyCompose(throwable -> graphStore.persistEdgesAsyncFallback(matches, groupId.toString(),
-                        chunkIndex, throwable));
+                .exceptionallyCompose(throwable -> {
+                    log.warn("GraphStore save failed, using fallback for groupId={}: {}", groupId, throwable.getMessage());
+                    return graphStore.persistEdgesAsyncFallback(matches, groupId.toString(), chunkIndex, throwable);
+                });
 
         return CompletableFuture.allOf(dbSave, graphStoreSave);
     }
