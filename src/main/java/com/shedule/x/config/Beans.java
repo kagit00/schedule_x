@@ -311,4 +311,22 @@ public class Beans {
                 new ThreadFactoryBuilder().setNameFormat("match-pro-%d").build()
         );
     }
+
+    @Bean(name = "batchCopyExecutor")
+    public ExecutorService batchCopyExecutor() {
+        return Executors.newFixedThreadPool(
+                2,
+                new ThreadFactory() {
+                    private final ThreadFactory defaultFactory = Executors.defaultThreadFactory();
+
+                    @Override
+                    public Thread newThread(Runnable r) {
+                        Thread thread = defaultFactory.newThread(r);
+                        thread.setName("batch-copy-exec-" + thread.getId());
+                        thread.setDaemon(false);
+                        return thread;
+                    }
+                }
+        );
+    }
 }

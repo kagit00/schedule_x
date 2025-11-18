@@ -44,7 +44,8 @@ public class PotentialMatchStorageProcessor {
     private static final String PG_SESSION_SETUP_SQL =
             "SET LOCAL statement_timeout TO '1500000';" +
                     "SET LOCAL lock_timeout TO '10000';" +
-                    "SET LOCAL idle_in_transaction_session_timeout TO '60000';";
+                    "SET LOCAL idle_in_transaction_session_timeout TO '60000';" +
+                    "SET LOCAL synchronous_commit = off;";
 
     private final HikariDataSource dataSource;
     private final MeterRegistry meterRegistry;

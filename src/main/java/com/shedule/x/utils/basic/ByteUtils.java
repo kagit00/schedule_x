@@ -7,6 +7,7 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 @UtilityClass
 public final class ByteUtils {
+    private static final int LSH_MAGIC = 0x4C534800;
 
     public static long getLong(byte[] b, int offset) {
         return ((long) (b[offset]   & 0xFF) << 56) |
@@ -54,22 +55,4 @@ public final class ByteUtils {
     }
 
 
-    private static final int LSH_MAGIC = 0x4C534800;
-    private static final int MAX_TABLE_IDX = 0xFFFF_FFFF;
-    private static final int MAX_BAND      = 0xFFFF_FFFF;
-
-    public static byte[] getLSHKey(int tableIdx, int band) {
-        if (tableIdx < 0) {
-            throw new BadRequestException("tableIdx cannot be negative: " + tableIdx);
-        }
-        if (band < 0) {
-            throw new BadRequestException("band cannot be negative: " + band);
-        }
-
-        byte[] key = new byte[12];
-        putInt(key, 0, LSH_MAGIC);
-        putInt(key, 4, tableIdx);
-        putInt(key, 8, band);
-        return key;
-    }
 }

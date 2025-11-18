@@ -1,5 +1,6 @@
 package com.shedule.x.scheduler;
 
+import com.google.common.util.concurrent.Uninterruptibles;
 import com.shedule.x.config.QueueConfig;
 import com.shedule.x.config.QueueManagerConfig;
 import com.shedule.x.config.factory.GraphRequestFactory;
@@ -26,11 +27,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.*;
 import java.util.concurrent.*;
 
-
 @Slf4j
 @Component
 @Profile("!singleton")
 public class PotentialMatchesCreationScheduler {
+
     private final DomainService domainService;
     private final MatchingGroupRepository matchingGroupRepository;
     private final PotentialMatchesCreationJobExecutor jobExecutor;
@@ -56,11 +57,8 @@ public class PotentialMatchesCreationScheduler {
     @Value("${match.max-final-batch-size:50000}")
     private int maxFinalBatchSize;
 
-    @Value("${match.shutdown-limit-seconds:1800}")
+    @Value("${match.shutdown-limit-seconds:3600}")
     private int shutdownLimitSeconds;
-
-    @Value("${match.max-iterations:1000}")
-    private int maxIterations;
 
     public PotentialMatchesCreationScheduler(
             DomainService domainService,
@@ -83,7 +81,7 @@ public class PotentialMatchesCreationScheduler {
 
         if (batchExecutor instanceof ThreadPoolExecutor tpe) {
             int poolSize = tpe.getMaximumPoolSize();
-            int requiredSize = maxConcurrentDomains + 2;
+            int requiredSize = maxConcurrentDomains + 4;
             if (poolSize < requiredSize) {
                 throw new IllegalArgumentException(
                         "batchExecutor max pool size (" + poolSize + ") must be >= " + requiredSize);
@@ -91,202 +89,130 @@ public class PotentialMatchesCreationScheduler {
         }
     }
 
-    @Scheduled(fixedDelayString = "${match.save.delay:600000}")
+    @Scheduled(fixedDelayString = "${match.save.delay:300000}")
     public void processAllDomainsScheduled() {
         Timer.Sample sample = Timer.start(meterRegistry);
         String cycleId = DefaultValuesPopulator.getUid();
-        log.info("Starting batch matching at {}, cycleId={}", DefaultValuesPopulator.getCurrentTimestamp(), cycleId);
+        log.info("Starting batch matching cycleId={}", cycleId);
 
         List<Domain> domains = domainService.getActiveDomains();
         if (domains.isEmpty()) {
-            log.info("No active domains to process");
+            log.info("No active domains");
             sample.stop(meterRegistry.timer("batch_matches_total_duration"));
             return;
         }
 
-        List<CompletableFuture<Void>> batches = new ArrayList<>();
-        List<Map.Entry<Domain, UUID>> tasks = new ArrayList<>();
+        List<CompletableFuture<Void>> allTasks = new ArrayList<>();
+        List<Map.Entry<Domain, UUID>> taskList = new ArrayList<>();
+
         for (Domain domain : domains) {
             List<UUID> groupIds = matchingGroupRepository.findGroupIdsByDomainId(domain.getId());
             for (UUID groupId : groupIds) {
-                tasks.add(new AbstractMap.SimpleEntry<>(domain, groupId));
+                taskList.add(new AbstractMap.SimpleEntry<>(domain, groupId));
             }
         }
 
-        for (Map.Entry<Domain, UUID> task : tasks) {
-            Domain domain = task.getKey();
+        for (Map.Entry<Domain, UUID> task : taskList) {
+            UUID domainId = task.getKey().getId();
             UUID groupId = task.getValue();
-            batches.add(processGroupTask(groupId, domain.getId(), cycleId));
+            allTasks.add(processGroupTask(groupId, domainId, cycleId));
         }
 
-        CompletableFuture<Void> resultFuture = new CompletableFuture<>();
+        CompletableFuture.runAsync(() -> {
+            try {
+                CompletableFuture.allOf(allTasks.toArray(new CompletableFuture[0]))
+                        .get(3, TimeUnit.HOURS);
 
-        CompletableFuture.allOf(batches.toArray(new CompletableFuture[0]))
-                .thenAcceptAsync(v -> {
-                    log.info("Completed batch matching at {}, cycleId={}", DefaultValuesPopulator.getCurrentTimestamp(), cycleId);
-                    resultFuture.complete(null);
-                    tasks.forEach(task -> {
-                        matchesCreationFinalizer.finalize(true);
-                    });
-                }, batchExecutor)
-                .exceptionally(t -> {
-                    log.error("Batch processing failed, cycleId={}: {}", cycleId, t.getMessage(), t);
-                    resultFuture.completeExceptionally(t);
-                    return null;
-                });
+                log.info("BATCH CYCLE COMPLETED SUCCESSFULLY | cycleId={} | groups={}", cycleId, allTasks.size());
+                taskList.forEach(t -> matchesCreationFinalizer.finalize(true));
 
-        try {
-            resultFuture.get(60, TimeUnit.MINUTES);
-        } catch (Exception e) {
-            log.error("Error waiting for batch completion, cycleId={}: {}", cycleId, e.getMessage(), e);
-        }
+            } catch (TimeoutException te) {
+                log.error("BATCH CYCLE TIMEOUT AFTER 3 HOURS | cycleId={}. Killing all remaining tasks...", cycleId, te);
+                allTasks.forEach(f -> f.cancel(true));
+                meterRegistry.counter("batch_cycle_timeout_total").increment();
 
-        groupLocks.entrySet().removeIf(entry -> entry.getValue().availablePermits() == 1 && !entry.getValue().hasQueuedThreads());
-        sample.stop(meterRegistry.timer("batch_matches_total_duration"));
+            } catch (Exception e) {
+                log.error("BATCH CYCLE FAILED | cycleId={}", cycleId, e);
+                meterRegistry.counter("batch_cycle_failure_total").increment();
+
+            } finally {
+                sample.stop(meterRegistry.timer("batch_matches_total_duration"));
+                cleanupIdleGroupLocks();
+            }
+        }, batchExecutor);
+    }
+
+    private void cleanupIdleGroupLocks() {
+        groupLocks.entrySet().removeIf(entry -> {
+            Semaphore s = entry.getValue();
+            return s.availablePermits() == 1 && !s.hasQueuedThreads();
+        });
     }
 
     private CompletableFuture<Void> processGroupTask(UUID groupId, UUID domainId, String cycleId) {
-        Semaphore groupSemaphore = groupLocks.computeIfAbsent(groupId, id -> new Semaphore(1, true));
-        Timer.Sample batchTimer = Timer.start(meterRegistry);
-
-        AtomicBoolean domainAcquired = new AtomicBoolean(false);
-        AtomicBoolean groupAcquired = new AtomicBoolean(false);
+        Semaphore groupSemaphore = groupLocks.computeIfAbsent(groupId, k -> new Semaphore(1, true));
 
         return CompletableFuture.runAsync(() -> {
+                    domainSemaphore.acquireUninterruptibly();
                     try {
-                        boolean acquired = domainSemaphore.tryAcquire(30, TimeUnit.SECONDS);
-                        if (!acquired) {
-                            throw new TimeoutException("Timed out acquiring domainSemaphore for domainId=" + domainId);
+                        groupSemaphore.acquireUninterruptibly();
+                        try {
+                            log.info("START groupId={} domainId={} cycleId={}", groupId, domainId, cycleId);
+
+                            jobExecutor.processGroup(groupId, domainId, cycleId)
+                                    .thenRunAsync(() -> doFlushLoop(groupId, domainId, cycleId), batchExecutor)
+                                    .join();
+
+                            log.info("SUCCESS groupId={} domainId={} cycleId={}", groupId, domainId, cycleId);
+                        } finally {
+                            groupSemaphore.release();
                         }
-                        domainAcquired.set(true);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        throw new RuntimeException("Interrupted acquiring domainSemaphore", e);
-                    } catch (TimeoutException e) {
-                        throw new RuntimeException(e);
+                    } finally {
+                        domainSemaphore.release();
                     }
                 }, batchExecutor)
-                .thenCompose(v -> CompletableFuture.runAsync(() -> {
-                    try {
-                        boolean acquired = groupSemaphore.tryAcquire(30, TimeUnit.SECONDS);
-                        if (!acquired) {
-                            throw new TimeoutException("Timed out acquiring groupSemaphore for groupId=" + groupId);
-                        }
-                        groupAcquired.set(true);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        throw new RuntimeException("Interrupted acquiring groupSemaphore", e);
-                    } catch (TimeoutException e) {
-                        throw new RuntimeException(e);
+                .whenComplete((v, t) -> {
+                    if (t != null) {
+                        log.error("FAILED groupId={} domainId={} cycleId={}", groupId, domainId, cycleId, t);
+                        meterRegistry.counter("matches_creation_error", "groupId", groupId.toString()).increment();
                     }
-                }, batchExecutor))
-                .thenCompose(v -> {
-                    log.info("Acquired locks for groupId={} domainId={}, cycleId={}", groupId, domainId, cycleId);
-                    return jobExecutor.processGroup(groupId, domainId, cycleId)
-                            .thenRunAsync(() -> doFlushLoop(groupId, domainId, cycleId), batchExecutor);
-                })
-                .whenComplete((v, e) -> {
-                    if (groupAcquired.get()) {
-                        try {
-                            groupSemaphore.release();
-                        } catch (Exception ex) {
-                            log.error("Failed to release groupSemaphore for groupId={}: {}", groupId, ex.getMessage(), ex);
-                        }
-                    } else {
-                        log.debug("Group semaphore was not acquired for groupId={}, skipping release", groupId);
-                    }
-
-                    if (domainAcquired.get()) {
-                        try {
-                            domainSemaphore.release();
-                        } catch (Exception ex) {
-                            log.error("Failed to release domainSemaphore for domainId={}: {}", domainId, ex.getMessage(), ex);
-                        }
-                    } else {
-                        log.debug("Domain semaphore was not acquired for domainId={}, skipping release", domainId);
-                    }
-
-                    try {
-                        matchesCreationFinalizer.finalize(false);
-                    } catch (Exception ex) {
-                        log.warn("matchesCreationFinalizer.finalize(false) threw for groupId={}, cycleId={}: {}", groupId, cycleId, ex.getMessage());
-                    }
-
-                    log.info("Released locks for groupId={} domainId={} cycleId={}, permits: domain={} group={}",
-                            groupId, domainId, cycleId,
-                            domainSemaphore.availablePermits(), groupSemaphore.availablePermits());
-
-                    if (e != null) {
-                        meterRegistry.counter("matches_creation_error", "mode", "batch",
-                                "domainId", domainId.toString(), "groupId", groupId.toString(), "cycleId", cycleId).increment();
-                        log.error("Error in batch+flush for groupId={} domainId={} cycleId={}: {}",
-                                groupId, domainId, cycleId, e.getMessage(), e);
-                    }
-
                     if (groupSemaphore.availablePermits() == 1 && !groupSemaphore.hasQueuedThreads()) {
                         groupLocks.remove(groupId, groupSemaphore);
                     }
-
-                    batchTimer.stop(meterRegistry.timer("batch_matches_duration",
-                            "domainId", domainId.toString(), "groupId", groupId.toString(), "cycleId", cycleId));
+                    matchesCreationFinalizer.finalize(false);
                 });
     }
 
     private void doFlushLoop(UUID groupId, UUID domainId, String cycleId) {
         QueueManagerConfig config = new QueueManagerConfig(
-                queueCapacity, flushIntervalSeconds, drainWarningThreshold, boostBatchFactor, maxFinalBatchSize
-        );
-
+                queueCapacity, flushIntervalSeconds, drainWarningThreshold, boostBatchFactor, maxFinalBatchSize);
         QueueConfig queueConfig = GraphRequestFactory.getQueueConfig(groupId, domainId, DefaultValuesPopulator.getUid(), config);
         QueueManagerImpl queueManager = queueManagerFactory.create(queueConfig);
 
-        if (Objects.isNull(queueManager)) {
-            log.warn("No QueueManager for groupId={} domainId={} cycleId={}", groupId, domainId, cycleId);
+        if (queueManager == null) {
+            log.warn("No QueueManager created for groupId={}", groupId);
             return;
         }
 
-        long queueSize;
-        long startTime = System.currentTimeMillis();
-        CompletableFuture<Void> flushFuture = CompletableFuture.completedFuture(null);
-        for (int i = 0; i < maxIterations; i++) {
-            queueSize = queueManager.getQueueSize();
-            log.debug("Iteration {}: queueSize={} for groupId={} cycleId={}", i, queueSize, groupId, cycleId);
-            if (queueSize == 0) break;
+        long deadline = System.currentTimeMillis() + (shutdownLimitSeconds * 1000L);
 
-            flushFuture = flushFuture.thenComposeAsync(v -> {
-                QueueManagerImpl.flushQueueBlocking(groupId, queueManagerFactory.getFlushSignalCallback());
-                long newQueueSize = queueManager.getQueueSize();
-                if (newQueueSize > 0) {
-                    log.info("Remaining {} queued matches for groupId={} cycleId={}", newQueueSize, groupId, cycleId);
-                    return CompletableFuture.runAsync(() -> {}, CompletableFuture.delayedExecutor(300, TimeUnit.MILLISECONDS, batchExecutor));
-                }
-                return CompletableFuture.completedFuture(null);
-            }, batchExecutor);
-
-            if (System.currentTimeMillis() - startTime > shutdownLimitSeconds * 1000L) {
-                log.warn("Shutdown limit of {}s reached, {} matches remain for groupId={} cycleId={}",
-                        shutdownLimitSeconds, queueSize, groupId, cycleId);
-                meterRegistry.counter("matches_dropped_due_to_shutdown", "groupId", groupId.toString(),
-                        "domainId", domainId.toString(), "cycleId", cycleId).increment(queueSize);
+        while (true) {
+            long queueSize = queueManager.getQueueSize();
+            if (queueSize == 0) {
+                log.info("Flush complete: all queued matches processed for groupId={}", groupId);
                 break;
             }
-        }
 
-        try {
-            flushFuture.get(shutdownLimitSeconds, TimeUnit.SECONDS);
-        } catch (TimeoutException e) {
-            log.warn("Flush timeout for groupId={} cycleId={}", groupId, cycleId);
-        } catch (Exception e) {
-            log.error("Flush failed for groupId={} cycleId={}: {}", groupId, cycleId, e.getMessage());
-        }
+            if (System.currentTimeMillis() > deadline) {
+                log.error("FLUSH DEADLINE EXCEEDED ({}s). Dropping {} queued matches for groupId={}",
+                        shutdownLimitSeconds, queueSize, groupId);
+                meterRegistry.counter("matches_dropped_due_to_flush_deadline", "groupId", groupId.toString()).increment(queueSize);
+                break;
+            }
 
-        queueSize = queueManager.getQueueSize();
-        if (queueSize > 0) {
-            log.warn("Max iterations {} reached, {} matches remain for groupId={} cycleId={}",
-                    maxIterations, queueSize, groupId, cycleId);
-            meterRegistry.counter("matches_dropped_due_to_max_iterations", "groupId", groupId.toString(),
-                    "domainId", domainId.toString(), "cycleId", cycleId).increment(queueSize);
+            QueueManagerImpl.flushQueueBlocking(groupId, queueManagerFactory.getFlushSignalCallback());
+
+            Uninterruptibles.sleepUninterruptibly(100, TimeUnit.MILLISECONDS);
         }
-        log.info("Completed flush for groupId={} cycleId={}", groupId, cycleId);
     }
 }

@@ -21,21 +21,18 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Semaphore;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.CompletionException;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeoutException;
 import java.util.stream.Stream;
 
 @Slf4j
 @Component
 public class GraphPreProcessor {
-    private static final long BUILD_TIMEOUT_MINUTES = 15;
+    private static final long SOFT_TIMEOUT_MINUTES = 30;
+    private static final long HARD_TIMEOUT_MINUTES = 45;
 
     private final PotentialMatchStreamingService potentialMatchStreamingService;
     private final SymmetricGraphBuilderService symmetricGraphBuilder;
@@ -83,131 +80,6 @@ public class GraphPreProcessor {
         return firstTypes.equals(secondTypes) ? MatchType.SYMMETRIC : MatchType.BIPARTITE;
     }
 
-    public CompletableFuture<GraphRecords.GraphResult> buildGraph(List<Node> nodes, MatchingRequest request) {
-        UUID groupId = request.getGroupId();
-        String mode = "batch";
-        Timer.Sample sample = Timer.start(meterRegistry);
-        Timer.Sample buildSample = Timer.start(meterRegistry);
-
-        return acquireAndBuild(() -> {
-            CompletableFuture<GraphRecords.GraphResult> future = CompletableFuture.supplyAsync(() -> {
-                MatchType matchType = request.getMatchType() != null ? request.getMatchType() : MatchType.AUTO;
-                String key = request.getPartitionKey();
-                String leftVal = request.getLeftPartitionValue();
-                String rightVal = request.getRightPartitionValue();
-                boolean isPartitioningApplicable = key != null && !key.isEmpty() &&
-                        leftVal != null && !leftVal.isEmpty() &&
-                        rightVal != null && !rightVal.isEmpty();
-
-                CompletableFuture<GraphRecords.GraphResult> result;
-                Instant partitionStart = Instant.now();
-
-                if (matchType == MatchType.SYMMETRIC || (matchType == MatchType.AUTO && !isPartitioningApplicable)) {
-                    log.info("Processing SYMMETRIC match for groupId={}, page={}", groupId, request.getPage());
-                    result = symmetricGraphBuilder.build(nodes, request);
-                } else if (matchType == MatchType.BIPARTITE || matchType == MatchType.AUTO) {
-                    List<Node> left = new ArrayList<>();
-                    List<Node> right = new ArrayList<>();
-                    partitionStrategy.partition(nodes.stream(), key, leftVal, rightVal)
-                            .apply((l, r) -> {
-                                left.addAll(l.toList());
-                                right.addAll(r.toList());
-                                return null;
-                            });
-                    MatchType inferred = matchType == MatchType.AUTO ? inferMatchType(left, right)
-                            : MatchType.BIPARTITE;
-                    log.info("Inferred match type: {} for groupId={}, page={}", inferred, groupId, request.getPage());
-
-                    if (inferred == MatchType.SYMMETRIC) {
-                        result = symmetricGraphBuilder.build(nodes, request);
-                    } else {
-                        log.info("Partitioned: groupId={}, page={}, leftNodes={}, rightNodes={}",
-                                groupId, request.getPage(), left.size(), right.size());
-                        result = bipartiteGraphBuilder.build(left, right, request);
-                    }
-                } else {
-                    throw new IllegalArgumentException("Unsupported match type: " + matchType);
-                }
-
-                meterRegistry.timer("graph_preprocessor_partition", "groupId", groupId.toString())
-                        .record(Duration.between(partitionStart, Instant.now()));
-                return result;
-            }, executor)
-                    .thenComposeAsync(cf -> cf.orTimeout(BUILD_TIMEOUT_MINUTES, TimeUnit.MINUTES), watchdogExecutor);
-
-            return future.handleAsync((res, throwable) -> {
-                sample.stop(meterRegistry.timer("graph_preprocessor_duration", "groupId", groupId.toString(), "mode",
-                        mode));
-                buildSample
-                        .stop(meterRegistry.timer("graph_build_duration", "groupId", groupId.toString(), "mode", mode));
-                if (throwable != null) {
-                    Throwable cause = throwable instanceof CompletionException ? throwable.getCause() : throwable;
-                    String counterName = cause instanceof TimeoutException ? "graph_build_timeout"
-                            : "graph_preprocessor_errors";
-                    meterRegistry.counter(counterName, "groupId", groupId.toString(), "mode", mode).increment();
-                    log.error("Graph build failed for groupId={}, mode={}, page={}:", groupId, mode, request.getPage(),
-                            cause);
-                    throw cause instanceof RuntimeException ? (RuntimeException) cause : new RuntimeException(cause);
-                }
-                log.info("Graph build completed for groupId={}, mode={}, page={}", groupId, mode, request.getPage());
-                return res;
-            }, executor);
-        }, groupId, mode, sample, buildSample);
-    }
-
-    private CompletableFuture<GraphRecords.GraphResult> acquireAndBuild(
-            Supplier<CompletableFuture<GraphRecords.GraphResult>> buildFutureSupplier,
-            UUID groupId, String mode, Timer.Sample sample, Timer.Sample buildSample) {
-
-        boolean acquired = false;
-
-        try {
-            acquired = buildSemaphore.tryAcquire(60, TimeUnit.SECONDS);
-            if (!acquired) {
-                log.warn("Timeout acquiring buildSemaphore for groupId={}", groupId);
-                sample.stop(meterRegistry.timer("graph_preprocessor_duration", "groupId", groupId.toString(), "mode",
-                        mode));
-                buildSample
-                        .stop(meterRegistry.timer("graph_build_duration", "groupId", groupId.toString(), "mode", mode));
-                meterRegistry.counter("graph_preprocessor_errors", "groupId", groupId.toString(), "mode", mode)
-                        .increment();
-                return CompletableFuture
-                        .failedFuture(new RuntimeException("Timeout acquiring semaphore for graph build."));
-            }
-
-            log.debug("Semaphore acquired for groupId={}. Remaining permits: {}", groupId,
-                    buildSemaphore.availablePermits());
-
-            return buildFutureSupplier.get()
-                    .whenComplete((result, throwable) -> {
-                        buildSemaphore.release();
-                        log.debug("Semaphore released for groupId={}. Remaining permits: {}", groupId,
-                                buildSemaphore.availablePermits());
-                    });
-
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.error("Graph build for groupId={} interrupted during semaphore acquisition.", groupId, e);
-            sample.stop(
-                    meterRegistry.timer("graph_preprocessor_duration", "groupId", groupId.toString(), "mode", mode));
-            buildSample.stop(meterRegistry.timer("graph_build_duration", "groupId", groupId.toString(), "mode", mode));
-            meterRegistry.counter("graph_preprocessor_errors", "groupId", groupId.toString(), "mode", mode).increment();
-
-            if (acquired) {
-                buildSemaphore.release();
-            }
-            return CompletableFuture
-                    .failedFuture(new RuntimeException("Graph build interrupted during semaphore acquisition.", e));
-        } catch (Throwable t) {
-            log.error("Failed to initiate graph build for groupId={}: {}", groupId, t.getMessage(), t);
-            sample.stop(
-                    meterRegistry.timer("graph_preprocessor_duration", "groupId", groupId.toString(), "mode", mode));
-            buildSample.stop(meterRegistry.timer("graph_build_duration", "groupId", groupId.toString(), "mode", mode));
-            meterRegistry.counter("graph_preprocessor_errors", "groupId", groupId.toString(), "mode", mode).increment();
-            return CompletableFuture.failedFuture(t);
-        }
-    }
-
     @Transactional
     public MatchType determineMatchType(UUID groupId, UUID domainId) {
         try (Stream<PotentialMatchEntity> matchStream = potentialMatchStreamingService
@@ -242,6 +114,167 @@ public class GraphPreProcessor {
         } catch (Exception e) {
             log.error("Error determining MatchType for groupId={}, domainId={}: {}", groupId, domainId, e.getMessage());
             return MatchType.BIPARTITE;
+        }
+    }
+
+    public CompletableFuture<GraphRecords.GraphResult> buildGraph(List<Node> nodes, MatchingRequest request) {
+        UUID groupId = request.getGroupId();
+        String mode = "batch";
+
+        Timer.Sample totalSample = Timer.start(meterRegistry);
+        Timer.Sample buildSample = Timer.start(meterRegistry);
+
+        return acquireAndBuild(groupId, mode, () -> {
+            // This supplier will be called ONLY after semaphore is acquired
+            return submitInterruptibleBuildTask(nodes, request, groupId, mode);
+        })
+                .whenComplete((result, throwable) -> {
+                    totalSample.stop(meterRegistry.timer("graph_preprocessor_duration",
+                            "groupId", groupId.toString(), "mode", mode));
+                    buildSample.stop(meterRegistry.timer("graph_build_duration",
+                            "groupId", groupId.toString(), "mode", mode));
+
+                    if (throwable != null) {
+                        String counterName = (throwable instanceof TimeoutException) ? "graph_build_timeout"
+                                : "graph_preprocessor_errors";
+                        meterRegistry.counter(counterName, "groupId", groupId.toString(), "mode", mode).increment();
+                    }
+                });
+    }
+
+
+
+    private CompletableFuture<GraphRecords.GraphResult> submitInterruptibleBuildTask(
+            List<Node> nodes, MatchingRequest request, UUID groupId, String mode) {
+
+        Thread.currentThread().setName("graph-build-" + groupId + "-" + request.getPage());
+
+        MatchType matchType = request.getMatchType() != null ? request.getMatchType() : MatchType.AUTO;
+        String key = request.getPartitionKey();
+        String leftVal = request.getLeftPartitionValue();
+        String rightVal = request.getRightPartitionValue();
+        boolean isPartitioningApplicable = key != null && !key.isEmpty() &&
+                leftVal != null && !leftVal.isEmpty() &&
+                rightVal != null && !rightVal.isEmpty();
+
+        CompletableFuture<GraphRecords.GraphResult> buildFuture;
+
+        if (matchType == MatchType.SYMMETRIC || (matchType == MatchType.AUTO && !isPartitioningApplicable)) {
+            log.info("Processing SYMMETRIC match for groupId={}, page={}", groupId, request.getPage());
+            buildFuture = symmetricGraphBuilder.build(nodes, request);
+        } else {
+            // Partitioning path
+            List<Node> left = new ArrayList<>();
+            List<Node> right = new ArrayList<>();
+            partitionStrategy.partition(nodes.stream(), key, leftVal, rightVal)
+                    .apply((l, r) -> {
+                        left.addAll(l.toList());
+                        right.addAll(r.toList());
+                        return null;
+                    });
+
+            MatchType inferred = matchType == MatchType.AUTO ? inferMatchType(left, right) : MatchType.BIPARTITE;
+            log.info("Inferred match type: {} for groupId={}, page={}", inferred, groupId, request.getPage());
+
+            if (inferred == MatchType.SYMMETRIC) {
+                log.info("Falling back to SYMMETRIC build after partitioning check");
+                buildFuture = symmetricGraphBuilder.build(nodes, request);
+            } else {
+                log.info("Partitioned: groupId={}, page={}, left={}, right={}",
+                        groupId, request.getPage(), left.size(), right.size());
+                buildFuture = bipartiteGraphBuilder.build(left, right, request);
+            }
+        }
+
+        final Future<GraphRecords.GraphResult> taskFuture = new Future<>() {
+            private volatile boolean cancelled = false;
+
+            @Override public boolean cancel(boolean mayInterruptIfRunning) {
+                cancelled = true;
+                buildFuture.cancel(mayInterruptIfRunning);
+                return true;
+            }
+            @Override public boolean isCancelled() { return cancelled || buildFuture.isCancelled(); }
+            @Override public boolean isDone() { return buildFuture.isDone(); }
+            @Override public GraphRecords.GraphResult get() throws ExecutionException, InterruptedException {
+                return buildFuture.get();
+            }
+            @Override public GraphRecords.GraphResult get(long t, TimeUnit u) throws ExecutionException, InterruptedException, TimeoutException {
+                return buildFuture.get(t, u);
+            }
+        };
+
+        watchdogExecutor.schedule(() -> {
+            if (!buildFuture.isDone()) {
+                log.warn("SOFT TIMEOUT ({} min) for graph build groupId={}, page={}",
+                        SOFT_TIMEOUT_MINUTES, groupId, request.getPage());
+                meterRegistry.counter("graph_build_soft_timeout", "groupId", groupId.toString()).increment();
+            }
+        }, SOFT_TIMEOUT_MINUTES, TimeUnit.MINUTES);
+
+        watchdogExecutor.schedule(() -> {
+            if (!buildFuture.isDone()) {
+                log.error("HARD TIMEOUT ({} min) → KILLING graph build groupId={}, page={}",
+                        HARD_TIMEOUT_MINUTES, groupId, request.getPage());
+                meterRegistry.counter("graph_build_hard_timeout", "groupId", groupId.toString()).increment();
+                buildFuture.cancel(true);
+            }
+        }, HARD_TIMEOUT_MINUTES, TimeUnit.MINUTES);
+
+        return buildFuture.applyToEither(
+                CompletableFuture.supplyAsync(() -> {
+                    try { Thread.sleep(SOFT_TIMEOUT_MINUTES * 60_000); } catch (InterruptedException ignored) {}
+                    throw new RuntimeException("Soft timeout");
+                }),
+                Function.identity()
+        );
+    }
+
+
+    private CompletableFuture<GraphRecords.GraphResult> acquireAndBuild(
+            UUID groupId,
+            String mode,
+            Supplier<CompletableFuture<GraphRecords.GraphResult>> buildSupplier) {
+
+        AtomicBoolean permitAcquired = new AtomicBoolean(false);
+
+        try {
+            if (!buildSemaphore.tryAcquire(60, TimeUnit.SECONDS)) {
+                log.warn("Timeout acquiring buildSemaphore for groupId={}", groupId);
+                meterRegistry.counter("graph_preprocessor_errors", "groupId", groupId.toString(), "mode", mode).increment();
+                return CompletableFuture.failedFuture(
+                        new RuntimeException("Timeout waiting for graph build slot (semaphore)"));
+            }
+            permitAcquired.set(true);
+            log.debug("Semaphore acquired for groupId={}. Permits left: {}", groupId, buildSemaphore.availablePermits());
+
+            CompletableFuture<GraphRecords.GraphResult> result = buildSupplier.get();
+
+            return result.handle((res, ex) -> {
+                if (permitAcquired.get()) {
+                    buildSemaphore.release();
+                    log.debug("Semaphore released for groupId={}. Permits left: {}", groupId, buildSemaphore.availablePermits());
+                }
+                if (ex != null) {
+                    Throwable cause = ex instanceof CompletionException ? ex.getCause() : ex;
+                    throw cause instanceof RuntimeException re ? re : new RuntimeException(cause);
+                }
+                return res;
+            });
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            if (permitAcquired.get()) {
+                buildSemaphore.release();
+            }
+            log.error("Interrupted while acquiring semaphore for groupId={}", groupId, e);
+            return CompletableFuture.failedFuture(new RuntimeException("Interrupted during semaphore acquisition", e));
+        } catch (Throwable t) {
+            if (permitAcquired.get()) {
+                buildSemaphore.release();
+            }
+            log.error("Unexpected error starting graph build for groupId={}", groupId, t);
+            return CompletableFuture.failedFuture(t);
         }
     }
 }

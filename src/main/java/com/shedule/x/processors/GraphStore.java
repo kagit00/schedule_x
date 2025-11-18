@@ -1,12 +1,10 @@
 package com.shedule.x.processors;
 
+
 import static com.shedule.x.utils.graph.StoreUtility.matchesGroupPrefix;
 import static org.lmdbjava.DbiFlags.MDB_CREATE;
-import static org.lmdbjava.EnvFlags.MDB_NOSYNC;
-import static org.lmdbjava.EnvFlags.MDB_WRITEMAP;
 import com.shedule.x.config.factory.AutoCloseableStream;
 import com.shedule.x.config.factory.GraphRequestFactory;
-import com.shedule.x.exceptions.InternalServerErrorException;
 import com.shedule.x.models.Edge;
 import com.shedule.x.service.GraphRecords;
 import com.shedule.x.utils.AlgorithmUtils;
@@ -29,6 +27,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.StampedLock;
 import java.util.stream.StreamSupport;
@@ -36,14 +35,15 @@ import java.util.stream.StreamSupport;
 @Slf4j
 @Component
 public class GraphStore implements AutoCloseable {
-    @Value("${graph.store.map-size:68719476736}") // 64 GB default
+
+    @Value("${graph.store.map-size:68719476736}")
     private long maxDbSize;
 
     private static final int BATCH_BASE = 1_000;
-    private static final int LOCK_STRIPES = 16_384; // 2^14
+    private static final int LOCK_STRIPES = 16_384;
     private static final int MAX_KEY_BUF = 128;
     private static final int MAX_VAL_BUF = 512;
-    private static final long BUCKET_TTL_NS = 86_400_000_000_000L; // 24h
+    private static final long BUCKET_TTL_NS = 86_400_000_000_000L;
     private static final int MAX_BUCKET_IDS = 40_000;
 
     // ====================== LMDB ======================
@@ -74,9 +74,8 @@ public class GraphStore implements AutoCloseable {
     private final ThreadLocal<long[]> radixTmp =
             ThreadLocal.withInitial(() -> new long[MAX_BUCKET_IDS * 2]);
 
-
-
-    private final Semaphore writeSemaphore = new Semaphore(1);
+    // ====================== BACKPRESSURE & CANCELLATION ======================
+    private final Semaphore writeSemaphore = new Semaphore(1, true); // fair
     private static final int KEY_REF_OFFSET = 20;   // group(16) + chunk(4)
     private static final int KEY_MAT_OFFSET = 36;   // group(16) + chunk(4) + ref(16)
 
@@ -88,15 +87,6 @@ public class GraphStore implements AutoCloseable {
                 t.setDaemon(true);
                 return t;
             });
-
-
-    private ByteBuffer lshKeyBuffer(int table, int band) {
-        ByteBuffer b = lshKeyBuf.get();
-        b.clear();
-        b.putInt(0x4C534800).putInt(table).putInt(band);
-        b.flip();
-        return b;
-    }
 
     public GraphStore(
             @Qualifier("persistenceExecutor") ExecutorService asyncPool,
@@ -113,7 +103,7 @@ public class GraphStore implements AutoCloseable {
         initLocks();
         initLMDB();
         bindMetrics();
-        log.info("GraphStore ready at {}", new File(dbPath).getAbsolutePath());
+        log.info("GraphStore initialized at {}", new File(dbPath).getAbsolutePath());
 
         syncScheduler.scheduleAtFixedRate(() -> {
             try {
@@ -122,8 +112,6 @@ public class GraphStore implements AutoCloseable {
                 log.warn("LMDB periodic sync failed", e);
             }
         }, 30, 30, TimeUnit.SECONDS);
-
-        log.info("GraphStore ready at {}", new File(dbPath).getAbsolutePath());
     }
 
     @PreDestroy
@@ -131,25 +119,27 @@ public class GraphStore implements AutoCloseable {
     public void close() {
         syncScheduler.shutdownNow();
         asyncPool.shutdownNow();
-        try {
-            if (env != null) env.sync(true);
-        } catch (Exception ignored) {}
+        try { if (env != null) env.sync(true); } catch (Exception ignored) {}
         if (edgeDbi != null) edgeDbi.close();
         if (lshDbi != null) lshDbi.close();
         if (env != null) env.close();
+        log.info("GraphStore shut down cleanly");
     }
-
 
     private void validateAndCreatePath() throws IOException {
         File dir = new File(dbPath);
         if (!dir.exists() && !dir.mkdirs()) {
-            throw new IOException("Cannot create " + dir);
+            throw new IOException("Cannot create directory: " + dir);
         }
-        if (!dir.canWrite()) throw new IOException("No write on " + dir);
+        if (!dir.canWrite()) {
+            throw new IOException("No write permission: " + dir);
+        }
     }
 
     private void initLocks() {
-        for (int i = 0; i < LOCK_STRIPES; i++) stripeLocks[i] = new StampedLock();
+        for (int i = 0; i < LOCK_STRIPES; i++) {
+            stripeLocks[i] = new StampedLock();
+        }
     }
 
     private void initLMDB() {
@@ -170,113 +160,6 @@ public class GraphStore implements AutoCloseable {
     }
 
 
-    public CompletableFuture<Void> persistEdgesAsync(List<GraphRecords.PotentialMatch> matches,
-                                                     UUID groupId, int chunkIndex) {
-        if (matches.isEmpty()) return CompletableFuture.completedFuture(null);
-        int batch = Math.min(BATCH_BASE, matches.size());
-        List<CompletableFuture<Void>> subs = new ArrayList<>();
-        for (List<GraphRecords.PotentialMatch> part : ListUtils.partition(matches, batch)) {
-            subs.add(CompletableFuture.runAsync(() ->
-                    writeEdgeBatch(part, groupId, chunkIndex), asyncPool));
-        }
-        return CompletableFuture.allOf(subs.toArray(new CompletableFuture[0]));
-    }
-
-    private void writeEdgeBatch(List<GraphRecords.PotentialMatch> batch, UUID groupId, int chunkIndex) {
-        try {
-            writeSemaphore.acquire();
-
-            try (Txn<ByteBuffer> txn = env.txnWrite()) {
-                ByteBuffer kb = keyBuf();
-                ByteBuffer vb = valBuf();
-
-                for (GraphRecords.PotentialMatch m : batch) {
-                    kb.clear();
-                    putUUID(kb, groupId);
-                    kb.putInt(chunkIndex);
-                    Murmur3.hash128To(kb, m.getReferenceId());
-                    Murmur3.hash128To(kb, m.getMatchedReferenceId());
-                    kb.flip();
-
-                    vb.clear();
-                    vb.putFloat((float) m.getCompatibilityScore());
-                    putUUID(vb, m.getDomainId());
-                    vb.flip();
-
-                    edgeDbi.put(txn, kb, vb);
-                }
-
-                txn.commit();
-                meterRegistry.counter("edges_written").increment(batch.size());
-            }
-
-        } catch (Exception e) {
-            meterRegistry.counter("edges_write_err").increment(batch.size());
-            log.warn("Edge batch fail", e);
-
-        } finally {
-            writeSemaphore.release();
-        }
-    }
-
-
-    public AutoCloseableStream<Edge> streamEdges(UUID domainId, UUID groupId) {
-        Txn<ByteBuffer> txn = env.txnRead();
-        ByteBuffer prefix = keyBuf().clear();
-        putUUID(prefix, groupId);
-        prefix.flip();
-        CursorIterable<ByteBuffer> iter = edgeDbi.iterate(txn, KeyRange.atLeast(prefix));
-        Iterator<CursorIterable.KeyVal<ByteBuffer>> it = iter.iterator();
-        java.util.stream.Stream<Edge> stream = StreamSupport.stream(
-                        Spliterators.spliteratorUnknownSize(new Iterator<Edge>() {
-                            Edge next = fetchNext(it, domainId, groupId);
-                            @Override public boolean hasNext() { return next != null; }
-                            @Override public Edge next() {
-                                if (next == null) throw new NoSuchElementException();
-                                Edge r = next;
-                                next = fetchNext(it, domainId, groupId);
-                                return r;
-                            }
-                        }, Spliterator.NONNULL), false)
-                .onClose(() -> { iter.close(); txn.close(); });
-        return new AutoCloseableStream<>(stream);
-    }
-
-    private Edge fetchNext(Iterator<CursorIterable.KeyVal<ByteBuffer>> it,
-                           UUID domainId, UUID groupId) {
-        byte[] tmp16 = tmp16Bytes.get();
-        while (it.hasNext()) {
-            CursorIterable.KeyVal<ByteBuffer> kv = it.next();
-            ByteBuffer k = kv.key();
-
-            if (k.getLong(0)  != groupId.getMostSignificantBits() ||
-                    k.getLong(8)  != groupId.getLeastSignificantBits()) {
-                return null;
-            }
-
-            ByteBuffer v = kv.val();
-            UUID dom = new UUID(v.getLong(4), v.getLong(12));
-            if (!dom.equals(domainId)) continue;
-
-            float score = v.getFloat(0);
-
-            ByteBuffer kd = k.duplicate().order(ByteOrder.BIG_ENDIAN);
-
-            kd.position(KEY_REF_OFFSET);
-            kd.get(tmp16, 0, 16);
-            String refHex = Murmur3.toHex(tmp16, 0, 16);
-
-            kd.position(KEY_MAT_OFFSET);
-            kd.get(tmp16, 0, 16);
-            String matHex = Murmur3.toHex(tmp16, 0, 16);
-
-            GraphRecords.PotentialMatch pm = new GraphRecords.PotentialMatch(
-                    refHex, matHex, score, groupId, domainId);
-            return GraphRequestFactory.toEdge(pm);
-        }
-        return null;
-    }
-
     public void addToBucket(int tableIdx, int band, Collection<UUID> nodeIds) {
         if (nodeIds.isEmpty() || nodeIds.size() > MAX_BUCKET_IDS) return;
 
@@ -285,7 +168,10 @@ public class GraphStore implements AutoCloseable {
         StampedLock lock = stripeLocks[stripe];
         long stamp = lock.writeLock();
         try {
-            ByteBuffer keyBufDirect = lshKeyBuffer(tableIdx, band);
+            ByteBuffer keyBufDirect = lshKeyBuf.get();
+            keyBufDirect.clear();
+            keyBufDirect.putInt(0x4C534800).putInt(tableIdx).putInt(band);
+            keyBufDirect.flip();
 
             try (Txn<ByteBuffer> txn = env.txnWrite()) {
                 ByteBuffer existingVal = lshDbi.get(txn, keyBufDirect);
@@ -320,7 +206,11 @@ public class GraphStore implements AutoCloseable {
     }
 
     public Set<UUID> getBucket(int tableIdx, int band) {
-        ByteBuffer keyBufDirect = lshKeyBuffer(tableIdx, band);
+        ByteBuffer keyBufDirect = lshKeyBuf.get();
+        keyBufDirect.clear();
+        keyBufDirect.putInt(0x4C534800).putInt(tableIdx).putInt(band);
+        keyBufDirect.flip();
+
         try (Txn<ByteBuffer> txn = env.txnRead()) {
             ByteBuffer val = lshDbi.get(txn, keyBufDirect);
             if (val == null) return Set.of();
@@ -488,6 +378,173 @@ public class GraphStore implements AutoCloseable {
         } catch (Exception e) {
             log.warn("Clear buckets fail", e);
         }
+    }
+
+    public CompletableFuture<Void> persistEdgesAsync(List<GraphRecords.PotentialMatch> matches,
+                                                     UUID groupId, int chunkIndex) {
+        if (matches.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        AtomicBoolean permitAcquired = new AtomicBoolean(false);
+        List<Future<?>> activeTasks = new CopyOnWriteArrayList<>();
+
+        try {
+            // Backpressure protection
+            if (!writeSemaphore.tryAcquire(30, TimeUnit.SECONDS)) {
+                log.warn("LMDB write backpressure timeout | groupId={}", groupId);
+                meterRegistry.counter("lmdb_write_backpressure_timeout", "groupId", groupId.toString()).increment();
+                return CompletableFuture.failedFuture(new RuntimeException("LMDB write backpressure"));
+            }
+            permitAcquired.set(true);
+
+            int batchSize = Math.min(BATCH_BASE, Math.max(100, matches.size() / 8));
+            List<List<GraphRecords.PotentialMatch>> partitions = ListUtils.partition(matches, batchSize);
+
+            List<CompletableFuture<Void>> futures = new ArrayList<>(partitions.size());
+
+            for (List<GraphRecords.PotentialMatch> partition : partitions) {
+                List<GraphRecords.PotentialMatch> batchCopy = new ArrayList<>(partition);
+
+                Future<?> task = asyncPool.submit(() -> {
+                    Thread.currentThread().setName("lmdb-write-" + groupId + "-" + chunkIndex);
+                    writeEdgeBatchCancellable(batchCopy, groupId, chunkIndex);
+                });
+                activeTasks.add(task);
+
+                CompletableFuture<Void> cf = CompletableFuture.runAsync(() -> {
+                    try {
+                        task.get(300, TimeUnit.SECONDS); // 5 min max per batch
+                    } catch (TimeoutException e) {
+                        log.error("LMDB batch timeout → killing thread | groupId={}", groupId);
+                        task.cancel(true);
+                        throw new RuntimeException("LMDB batch timeout", e);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        task.cancel(true);
+                        throw new RuntimeException("LMDB write interrupted", e);
+                    } catch (ExecutionException e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+                futures.add(cf);
+            }
+
+            return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                    .whenComplete((v, t) -> {
+                        if (t != null) {
+                            activeTasks.forEach(f -> f.cancel(true));
+                        }
+                    });
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            activeTasks.forEach(f -> f.cancel(true));
+            return CompletableFuture.failedFuture(e);
+        } finally {
+            if (permitAcquired.get()) {
+                writeSemaphore.release();
+            }
+        }
+    }
+
+    private void writeEdgeBatchCancellable(List<GraphRecords.PotentialMatch> batch,
+                                           UUID groupId, int chunkIndex) {
+        try (Txn<ByteBuffer> txn = env.txnWrite()) {
+            ByteBuffer kb = keyBuf();
+            ByteBuffer vb = valBuf();
+
+            for (GraphRecords.PotentialMatch m : batch) {
+                if (Thread.interrupted()) {
+                    log.warn("LMDB write cancelled mid-batch | groupId={} | remaining={}", groupId, batch.size());
+                    throw new InterruptedException("Write cancelled");
+                }
+
+                kb.clear();
+                putUUID(kb, groupId);
+                kb.putInt(chunkIndex);
+                Murmur3.hash128To(kb, m.getReferenceId());
+                Murmur3.hash128To(kb, m.getMatchedReferenceId());
+                kb.flip();
+
+                vb.clear();
+                vb.putFloat((float) m.getCompatibilityScore());
+                putUUID(vb, m.getDomainId());
+                vb.flip();
+
+                edgeDbi.put(txn, kb, vb);
+            }
+
+            txn.commit();
+            meterRegistry.counter("edges_written", "groupId", groupId.toString()).increment(batch.size());
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            meterRegistry.counter("edges_write_cancelled", "groupId", groupId.toString()).increment(batch.size());
+            throw new RuntimeException("LMDB write cancelled", e);
+        } catch (Exception e) {
+            meterRegistry.counter("edges_write_error", "groupId", groupId.toString()).increment(batch.size());
+            log.error("LMDB write failed | groupId={}", groupId, e);
+            throw new RuntimeException("LMDB write failed", e);
+        }
+    }
+
+    public AutoCloseableStream<Edge> streamEdges(UUID domainId, UUID groupId) {
+        Txn<ByteBuffer> txn = env.txnRead();
+        ByteBuffer prefix = keyBuf().clear();
+        putUUID(prefix, groupId);
+        prefix.flip();
+        CursorIterable<ByteBuffer> iter = edgeDbi.iterate(txn, KeyRange.atLeast(prefix));
+        Iterator<CursorIterable.KeyVal<ByteBuffer>> it = iter.iterator();
+
+        java.util.stream.Stream<Edge> stream = StreamSupport.stream(
+                        Spliterators.spliteratorUnknownSize(new Iterator<Edge>() {
+                            Edge next = fetchNext(it, domainId, groupId);
+                            @Override public boolean hasNext() { return next != null; }
+                            @Override public Edge next() {
+                                if (next == null) throw new NoSuchElementException();
+                                Edge r = next;
+                                next = fetchNext(it, domainId, groupId);
+                                return r;
+                            }
+                        }, Spliterator.NONNULL), false)
+                .onClose(() -> { iter.close(); txn.close(); });
+
+        return new AutoCloseableStream<>(stream);
+    }
+
+    private Edge fetchNext(Iterator<CursorIterable.KeyVal<ByteBuffer>> it,
+                           UUID domainId, UUID groupId) {
+        byte[] tmp16 = tmp16Bytes.get();
+        while (it.hasNext()) {
+            CursorIterable.KeyVal<ByteBuffer> kv = it.next();
+            ByteBuffer k = kv.key();
+
+            if (k.getLong(0) != groupId.getMostSignificantBits() ||
+                    k.getLong(8) != groupId.getLeastSignificantBits()) {
+                return null;
+            }
+
+            ByteBuffer v = kv.val();
+            UUID dom = new UUID(v.getLong(4), v.getLong(12));
+            if (!dom.equals(domainId)) continue;
+
+            float score = v.getFloat(0);
+
+            ByteBuffer kd = k.duplicate().order(ByteOrder.BIG_ENDIAN);
+            kd.position(KEY_REF_OFFSET);
+            kd.get(tmp16, 0, 16);
+            String refHex = Murmur3.toHex(tmp16, 0, 16);
+
+            kd.position(KEY_MAT_OFFSET);
+            kd.get(tmp16, 0, 16);
+            String matHex = Murmur3.toHex(tmp16, 0, 16);
+
+            GraphRecords.PotentialMatch pm = new GraphRecords.PotentialMatch(
+                    refHex, matHex, score, groupId, domainId);
+            return GraphRequestFactory.toEdge(pm);
+        }
+        return null;
     }
 
     public CompletableFuture<Void> persistEdgesAsyncFallback(List<GraphRecords.PotentialMatch> matches,
