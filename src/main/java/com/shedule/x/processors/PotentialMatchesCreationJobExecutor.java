@@ -1,7 +1,6 @@
 package com.shedule.x.processors;
 
 import com.google.common.util.concurrent.Uninterruptibles;
-import com.shedule.x.dto.CursorPage;
 import com.shedule.x.dto.MatchingRequest;
 import com.shedule.x.dto.NodesCount;
 import com.shedule.x.service.NodeFetchService;
@@ -29,7 +28,6 @@ public class PotentialMatchesCreationJobExecutor {
     private final PotentialMatchService potentialMatchService;
     private final NodeFetchService nodeFetchService;
     private final MeterRegistry meterRegistry;
-
     private final ExecutorService batchExecutor;
 
     @Value("${match.batch-limit:500}")
@@ -40,6 +38,8 @@ public class PotentialMatchesCreationJobExecutor {
 
     @Value("${match.retry-delay-millis:1000}")
     private long retryDelayMillis;
+
+    private static final int EMPTY_BATCH_TOLERANCE = 3;
 
     public PotentialMatchesCreationJobExecutor(
             PotentialMatchService potentialMatchService,
@@ -53,79 +53,95 @@ public class PotentialMatchesCreationJobExecutor {
         this.batchExecutor = batchExecutor;
     }
 
-    private static final int EMPTY_BATCH_TOLERANCE = 3;
-
     public CompletableFuture<Void> processGroup(UUID groupId, UUID domainId, String cycleId) {
-        return CompletableFuture.runAsync(() -> {
-            int emptyStreak = 0;
-
-            while (emptyStreak < EMPTY_BATCH_TOLERANCE) {
-                CursorPage page = nodeFetchService
-                        .fetchNodeIdsByCursor(groupId, domainId, batchLimit, cycleId)
-                        .join();
-
-                if (page.ids().isEmpty()) {
-                    emptyStreak++;
-                    log.info("Empty batch {}/{} for groupId={}, cycleId={}", emptyStreak, EMPTY_BATCH_TOLERANCE, groupId, cycleId);
-                    continue;
-                }
-
-                emptyStreak = 0;
-
-                NodesCount result = processPageWithRetries(groupId, domainId, cycleId, page.ids());
-                if (result == null) {
-                    log.warn("Failed to process page for groupId={}, retrying next cursor page", groupId);
-                    continue;
-                }
-
-                if (page.lastCreatedAt() != null && page.lastId() != null) {
-                    nodeFetchService.persistCursor(groupId, domainId, page.lastCreatedAt().atOffset(ZoneOffset.UTC), page.lastId());
-                }
-
-                if (!page.hasMore()) {
-                    log.info("No more nodes to process for groupId={}, cycleId={}", groupId, cycleId);
-                    break;
-                }
-            }
-
-            log.info("Completed processing groupId={}, cycleId={}", groupId, cycleId);
-        }, batchExecutor);
+        return processGroupRecursive(groupId, domainId, cycleId, 0);
     }
 
-    private NodesCount processPageWithRetries(UUID groupId, UUID domainId, String cycleId, List<UUID> nodeIds) {
-        for (int attempt = 1; attempt <= maxRetries; attempt++) {
-            try {
-                MatchingRequest request = MatchingRequest.builder()
-                        .groupId(groupId)
-                        .domainId(domainId)
-                        .processingCycleId(cycleId)
-                        .limit(nodeIds.size())
-                        .isRealTime(false)
-                        .build();
+    private CompletableFuture<Void> processGroupRecursive(UUID groupId, UUID domainId, String cycleId, int emptyStreak) {
+        if (emptyStreak >= EMPTY_BATCH_TOLERANCE) {
+            log.info("Completed processing groupId={}, cycleId={}", groupId, cycleId);
+            return CompletableFuture.completedFuture(null);
+        }
 
-                NodesCount result = potentialMatchService
-                        .matchByGroup(request, cycleId)
-                        .get(600, TimeUnit.SECONDS);
+        return nodeFetchService.fetchNodeIdsByCursor(groupId, domainId, batchLimit, cycleId)
+                .thenComposeAsync(page -> {
+                    if (page.ids().isEmpty()) {
+                        int newStreak = emptyStreak + 1;
+                        log.info("Empty batch {}/{} for groupId={}, cycleId={}",
+                                newStreak, EMPTY_BATCH_TOLERANCE, groupId, cycleId);
+                        return processGroupRecursive(groupId, domainId, cycleId, newStreak);
+                    }
 
-                log.info("Success: groupId={}, processed {} nodes", groupId, result.nodeCount());
-                return result;
-            } catch (Exception e) {
-                log.warn("Retry {}/{} failed for groupId={}, cycleId={}: {}", attempt, maxRetries, groupId, cycleId, e.toString());
-                meterRegistry.counter("match.retry.attempts",
-                        "groupId", groupId.toString(),
-                        "cycleId", cycleId).increment();
+                    return processPageWithRetries(groupId, domainId, cycleId, page.ids())
+                            .thenComposeAsync(result -> {
+                                if (result != null && page.lastCreatedAt() != null && page.lastId() != null) {
+                                    nodeFetchService.persistCursor(groupId, domainId,
+                                            page.lastCreatedAt().atOffset(ZoneOffset.UTC), page.lastId());
+                                }
 
-                if (attempt == maxRetries) {
-                    log.error("Exhausted retries for groupId={}, cycleId={}", groupId, cycleId);
-                    meterRegistry.counter("match.retries.exhausted",
+                                if (!page.hasMore()) {
+                                    log.info("No more nodes to process for groupId={}, cycleId={}", groupId, cycleId);
+                                    return CompletableFuture.completedFuture(null);
+                                }
+
+                                return processGroupRecursive(groupId, domainId, cycleId, 0);
+                            }, batchExecutor);
+                }, batchExecutor);
+    }
+
+    private CompletableFuture<NodesCount> processPageWithRetries(
+            UUID groupId, UUID domainId, String cycleId, List<UUID> nodeIds) {
+        return processPageAttempt(groupId, domainId, cycleId, nodeIds, 1);
+    }
+
+    private CompletableFuture<NodesCount> processPageAttempt(
+            UUID groupId, UUID domainId, String cycleId, List<UUID> nodeIds, int attempt) {
+
+        MatchingRequest request = MatchingRequest.builder()
+                .groupId(groupId)
+                .domainId(domainId)
+                .processingCycleId(cycleId)
+                .limit(nodeIds.size())
+                .isRealTime(false)
+                .build();
+
+        return potentialMatchService.matchByGroup(request, cycleId)
+                .orTimeout(600, TimeUnit.SECONDS)
+                .thenApply(result -> {
+                    log.info("Success: groupId={}, processed {} nodes", groupId, result.nodeCount());
+                    return result;
+                })
+                .exceptionally(error -> {
+                    log.warn("Attempt {}/{} failed for groupId={}, cycleId={}: {}",
+                            attempt, maxRetries, groupId, cycleId, error.toString());
+                    meterRegistry.counter("match.retry.attempts",
                             "groupId", groupId.toString(), "cycleId", cycleId).increment();
                     return null;
-                }
+                })
+                .thenComposeAsync(result -> {
+                    if (result != null) {
+                        return CompletableFuture.completedFuture(result);
+                    }
 
-                Uninterruptibles.sleepUninterruptibly(
-                        retryDelayMillis * (1L << (attempt - 1)), TimeUnit.MILLISECONDS);
-            }
-        }
-        return null;
+                    if (attempt >= maxRetries) {
+                        log.error("Exhausted retries for groupId={}, cycleId={}", groupId, cycleId);
+                        meterRegistry.counter("match.retries.exhausted",
+                                "groupId", groupId.toString(), "cycleId", cycleId).increment();
+                        return CompletableFuture.completedFuture(null);
+                    }
+
+                    long delayMillis = retryDelayMillis * (1L << (attempt - 1));
+                    return delay(delayMillis)
+                            .thenComposeAsync(v ->
+                                            processPageAttempt(groupId, domainId, cycleId, nodeIds, attempt + 1),
+                                    batchExecutor);
+                }, batchExecutor);
+    }
+
+    private CompletableFuture<Void> delay(long delayMillis) {
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        CompletableFuture.delayedExecutor(delayMillis, TimeUnit.MILLISECONDS)
+                .execute(() -> future.complete(null));
+        return future;
     }
 }

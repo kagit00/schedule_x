@@ -117,30 +117,6 @@ public class GraphPreProcessor {
         }
     }
 
-    public CompletableFuture<GraphRecords.GraphResult> buildGraph(List<Node> nodes, MatchingRequest request) {
-        UUID groupId = request.getGroupId();
-        String mode = "batch";
-
-        Timer.Sample totalSample = Timer.start(meterRegistry);
-        Timer.Sample buildSample = Timer.start(meterRegistry);
-
-        return acquireAndBuild(groupId, mode, () -> {
-            // This supplier will be called ONLY after semaphore is acquired
-            return submitInterruptibleBuildTask(nodes, request, groupId, mode);
-        })
-                .whenComplete((result, throwable) -> {
-                    totalSample.stop(meterRegistry.timer("graph_preprocessor_duration",
-                            "groupId", groupId.toString(), "mode", mode));
-                    buildSample.stop(meterRegistry.timer("graph_build_duration",
-                            "groupId", groupId.toString(), "mode", mode));
-
-                    if (throwable != null) {
-                        String counterName = (throwable instanceof TimeoutException) ? "graph_build_timeout"
-                                : "graph_preprocessor_errors";
-                        meterRegistry.counter(counterName, "groupId", groupId.toString(), "mode", mode).increment();
-                    }
-                });
-    }
 
 
 
@@ -230,51 +206,67 @@ public class GraphPreProcessor {
         );
     }
 
+    public CompletableFuture<GraphRecords.GraphResult> buildGraph(List<Node> nodes, MatchingRequest request) {
+        UUID groupId = request.getGroupId();
+        String mode = "batch";
 
-    private CompletableFuture<GraphRecords.GraphResult> acquireAndBuild(
+        Timer.Sample totalSample = Timer.start(meterRegistry);
+        Timer.Sample buildSample = Timer.start(meterRegistry);
+
+        return acquireAndBuildAsync(groupId, mode, () -> {
+            return submitInterruptibleBuildTask(nodes, request, groupId, mode);
+        })
+                .whenComplete((result, throwable) -> {
+                    totalSample.stop(meterRegistry.timer("graph_preprocessor_duration",
+                            "groupId", groupId.toString(), "mode", mode));
+                    buildSample.stop(meterRegistry.timer("graph_build_duration",
+                            "groupId", groupId.toString(), "mode", mode));
+
+                    if (throwable != null) {
+                        String counterName = (throwable instanceof TimeoutException) ? "graph_build_timeout"
+                                : "graph_preprocessor_errors";
+                        meterRegistry.counter(counterName, "groupId", groupId.toString(), "mode", mode).increment();
+                    }
+                });
+    }
+
+    private CompletableFuture<GraphRecords.GraphResult> acquireAndBuildAsync(
             UUID groupId,
             String mode,
             Supplier<CompletableFuture<GraphRecords.GraphResult>> buildSupplier) {
 
-        AtomicBoolean permitAcquired = new AtomicBoolean(false);
+        CompletableFuture<Void> semaphoreAcquired = new CompletableFuture<>();
 
-        try {
-            if (!buildSemaphore.tryAcquire(60, TimeUnit.SECONDS)) {
-                log.warn("Timeout acquiring buildSemaphore for groupId={}", groupId);
-                meterRegistry.counter("graph_preprocessor_errors", "groupId", groupId.toString(), "mode", mode).increment();
-                return CompletableFuture.failedFuture(
-                        new RuntimeException("Timeout waiting for graph build slot (semaphore)"));
-            }
-            permitAcquired.set(true);
-            log.debug("Semaphore acquired for groupId={}. Permits left: {}", groupId, buildSemaphore.availablePermits());
-
-            CompletableFuture<GraphRecords.GraphResult> result = buildSupplier.get();
-
-            return result.handle((res, ex) -> {
-                if (permitAcquired.get()) {
-                    buildSemaphore.release();
-                    log.debug("Semaphore released for groupId={}. Permits left: {}", groupId, buildSemaphore.availablePermits());
+        CompletableFuture.runAsync(() -> {
+            try {
+                if (!buildSemaphore.tryAcquire(60, TimeUnit.SECONDS)) {
+                    semaphoreAcquired.completeExceptionally(
+                            new RuntimeException("Timeout waiting for graph build slot (semaphore)"));
+                } else {
+                    log.debug("Semaphore acquired for groupId={}. Permits left: {}",
+                            groupId, buildSemaphore.availablePermits());
+                    semaphoreAcquired.complete(null);
                 }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                semaphoreAcquired.completeExceptionally(
+                        new RuntimeException("Interrupted during semaphore acquisition", e));
+            }
+        });
+
+        return semaphoreAcquired.thenCompose(v -> {
+            CompletableFuture<GraphRecords.GraphResult> buildFuture = buildSupplier.get();
+
+            return buildFuture.whenComplete((res, ex) -> {
+                buildSemaphore.release();
+                log.debug("Semaphore released for groupId={}. Permits left: {}",
+                        groupId, buildSemaphore.availablePermits());
+
                 if (ex != null) {
-                    Throwable cause = ex instanceof CompletionException ? ex.getCause() : ex;
-                    throw cause instanceof RuntimeException re ? re : new RuntimeException(cause);
+                    meterRegistry.counter("graph_preprocessor_errors",
+                            "groupId", groupId.toString(), "mode", mode).increment();
                 }
-                return res;
             });
-
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            if (permitAcquired.get()) {
-                buildSemaphore.release();
-            }
-            log.error("Interrupted while acquiring semaphore for groupId={}", groupId, e);
-            return CompletableFuture.failedFuture(new RuntimeException("Interrupted during semaphore acquisition", e));
-        } catch (Throwable t) {
-            if (permitAcquired.get()) {
-                buildSemaphore.release();
-            }
-            log.error("Unexpected error starting graph build for groupId={}", groupId, t);
-            return CompletableFuture.failedFuture(t);
-        }
+        });
     }
 }

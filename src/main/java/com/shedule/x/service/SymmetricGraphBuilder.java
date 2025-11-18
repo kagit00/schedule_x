@@ -176,66 +176,6 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
         }
     }
 
-    private CompletableFuture<Void> submitCancellableChunk(
-            List<Node> chunk,
-            SymmetricEdgeBuildingStrategy strategy,
-            MatchingRequest request,
-            int chunkIdx,
-            String cycleId,
-            int taskId) {
-
-        UUID groupId = request.getGroupId();
-
-        return CompletableFuture.runAsync(() -> {
-                    AtomicBoolean computePermit = new AtomicBoolean(false);
-                    AtomicBoolean mappingPermit = new AtomicBoolean(false);
-
-                    try {
-                        if (!computeSemaphore.tryAcquire(60, TimeUnit.SECONDS)) {
-                            throw new RuntimeException("Compute backpressure timeout");
-                        }
-                        computePermit.set(true);
-
-                        // ← CHANGE HERE: return CompletableFuture from strategy
-                        CompletableFuture<GraphRecords.ChunkResult> computation =
-                                CompletableFuture.supplyAsync(() -> {
-                                    Thread.currentThread().setName("chunk-" + chunkIdx + "-" + groupId);
-                                    List<GraphRecords.PotentialMatch> matches = new ArrayList<>();
-                                    strategy.processBatch(chunk, null, matches, Collections.emptySet(), request, Map.of());
-                                    return new GraphRecords.ChunkResult(Collections.emptySet(), matches, chunkIdx, Instant.now());
-                                }, computeExecutor);
-
-                        GraphRecords.ChunkResult result = computation
-                                .orTimeout(CHUNK_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                                .get();  // now safe: not blocking computeExecutor thread
-
-                        if (!mappingSemaphore.tryAcquire(60, TimeUnit.SECONDS)) {
-                            throw new RuntimeException("Mapping backpressure timeout");
-                        }
-                        mappingPermit.set(true);
-
-                        potentialMatchComputationProcessor
-                                .processChunkMatches(result, groupId, request.getDomainId(), cycleId, matchBatchSize)
-                                .get(600, TimeUnit.SECONDS);  // or make this async too
-
-                    } catch (TimeoutException e) {
-                        throw new RuntimeException("Chunk " + chunkIdx + " timed out", e);
-                    } catch (Exception e) {
-                        throw new RuntimeException("Chunk processing failed", e);
-                    } finally {
-                        if (computePermit.get()) computeSemaphore.release();
-                        if (mappingPermit.get()) mappingSemaphore.release();
-                    }
-                }, computeExecutor)
-                .orTimeout(CHUNK_HARD_KILL_SECONDS, TimeUnit.SECONDS)
-                .whenComplete((v, t) -> {
-                    if (t instanceof TimeoutException) {
-                        log.error("HARD KILL chunk {} | groupId={}", chunkIdx, groupId);
-                        meterRegistry.counter("graph_chunk_hard_kill", "groupId", groupId.toString()).increment();
-                    }
-                });
-    }
-
     private void finalizeBuild(UUID groupId, UUID domainId, String cycleId, CompletableFuture<GraphRecords.GraphResult> resultFuture) {
         potentialMatchComputationProcessor.saveFinalMatches(groupId, domainId, cycleId, null, topK)
                 .thenRun(() -> {
@@ -270,5 +210,63 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
         if (!future.isDone()) {
             future.completeExceptionally(t instanceof RuntimeException re ? re : new RuntimeException(t));
         }
+    }
+
+    private CompletableFuture<Void> submitCancellableChunk(
+            List<Node> chunk,
+            SymmetricEdgeBuildingStrategy strategy,
+            MatchingRequest request,
+            int chunkIdx,
+            String cycleId,
+            int taskId) {
+
+        UUID groupId = request.getGroupId();
+
+        return acquireSemaphoreAsync(computeSemaphore)
+                .thenCompose(v -> {
+                    // Start computation
+                    CompletableFuture<GraphRecords.ChunkResult> computation =
+                            CompletableFuture.supplyAsync(() -> {
+                                        Thread.currentThread().setName("chunk-" + chunkIdx + "-" + groupId);
+                                        List<GraphRecords.PotentialMatch> matches = new ArrayList<>();
+                                        strategy.processBatch(chunk, null, matches, Collections.emptySet(), request, Map.of());
+                                        return new GraphRecords.ChunkResult(Collections.emptySet(), matches, chunkIdx, Instant.now());
+                                    }, computeExecutor)
+                                    .orTimeout(CHUNK_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+                    return computation.whenComplete((r, e) -> computeSemaphore.release());
+                })
+                .thenCompose(result -> acquireSemaphoreAsync(mappingSemaphore)
+                        .thenCompose(v -> {
+                            CompletableFuture<Void> processing = potentialMatchComputationProcessor
+                                    .processChunkMatches(result, groupId, request.getDomainId(), cycleId, matchBatchSize)
+                                    .orTimeout(600, TimeUnit.SECONDS);
+
+                            return processing.whenComplete((r, e) -> mappingSemaphore.release());
+                        }))
+                .orTimeout(CHUNK_HARD_KILL_SECONDS, TimeUnit.SECONDS)
+                .whenComplete((v, t) -> {
+                    if (t instanceof TimeoutException) {
+                        log.error("HARD KILL chunk {} | groupId={}", chunkIdx, groupId);
+                        meterRegistry.counter("graph_chunk_hard_kill", "groupId", groupId.toString()).increment();
+                    }
+                });
+    }
+
+    private CompletableFuture<Void> acquireSemaphoreAsync(Semaphore semaphore) {
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        CompletableFuture.runAsync(() -> {
+            try {
+                if (!semaphore.tryAcquire(60, TimeUnit.SECONDS)) {
+                    future.completeExceptionally(new TimeoutException("Semaphore acquisition timeout"));
+                } else {
+                    future.complete(null);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                future.completeExceptionally(e);
+            }
+        }); // Uses ForkJoinPool.commonPool() - doesn't block your executors
+        return future;
     }
 }

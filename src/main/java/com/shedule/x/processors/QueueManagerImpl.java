@@ -9,6 +9,8 @@ import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
 import java.lang.ref.WeakReference;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.*;
@@ -80,39 +82,6 @@ public class QueueManagerImpl {
         return queue.size();
     }
 
-    public void setFlushInterval(int newIntervalSeconds) {
-        if (newIntervalSeconds <= 0) {
-            log.warn("Invalid flush interval {}s for groupId={}, ignoring", newIntervalSeconds, config.getGroupId());
-            return;
-        }
-        if (System.currentTimeMillis() - lastFlushIntervalSetAt < DEBOUNCE_WINDOW_MS) {
-            log.info("Debounced setFlushInterval {}s for groupId={}", newIntervalSeconds, config.getGroupId());
-            return;
-        }
-
-        try {
-            if (scheduleLock.tryLock(100, TimeUnit.MILLISECONDS)) {
-                try {
-                    int oldInterval = flushIntervalSeconds.getAndSet(newIntervalSeconds);
-                    lastFlushIntervalSetAt = System.currentTimeMillis();
-                    log.info("Updated flush interval from {}s to {}s for groupId={}", oldInterval, newIntervalSeconds, config.getGroupId());
-                    if (flushTask != null) {
-                        flushTask.cancel(false);
-                    }
-                    scheduleGeneration.incrementAndGet();
-                    startPeriodicFlush();
-                } finally {
-                    scheduleLock.unlock();
-                }
-            } else {
-                log.warn("Could not acquire scheduleLock for groupId={}", config.getGroupId());
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.error("Interrupted while setting flush interval for groupId={}", config.getGroupId(), e);
-        }
-    }
-
     public boolean enqueue(GraphRecords.PotentialMatch match) {
         try {
             if (!queue.offer(match, 1, TimeUnit.SECONDS)) {
@@ -128,34 +97,6 @@ public class QueueManagerImpl {
         }
     }
 
-    private void startPeriodicFlush() {
-        long generation = scheduleGeneration.get();
-        flushTask = flushScheduler.scheduleWithFixedDelay(() -> {
-            if (scheduleGeneration.get() != generation) {
-                log.debug("Skipping stale periodic flush task for groupId={}, generation={}", config.getGroupId(), generation);
-                return;
-            }
-            try {
-                int queueSize = queue.size();
-                long lastSize = lastFlushedQueueSize.get();
-                if (queueSize > 0 && (queueSize >= lastSize * 1.1 || queueSize >= REDUCED_MAX_FINAL_BATCH_SIZE)) {
-                    int batchSize = Math.min(queueSize, REDUCED_MAX_FINAL_BATCH_SIZE);
-                    log.debug("Periodic flush for groupId={}, queueSize={}, batchSize={}", config.getGroupId(), queueSize, batchSize);
-                    FlushUtils.executeFlush(periodicFlushSemaphore, flushExecutor, flushSignalCallback,
-                            config.getGroupId(), config.getDomainId(), batchSize, config.getProcessingCycleId(),
-                            meterRegistry, lastFlushedQueueSize);
-                } else {
-                    log.debug("Skipping periodic flush for groupId={} as queue is empty or growth insufficient (size={}, last={})",
-                            config.getGroupId(), queueSize, lastSize);
-                }
-                MetricsUtils.reportQueueMetrics(meterRegistry, config.getGroupId(), enqueueCount, dequeueCount, metricsLock);
-                checkQueueHealth();
-            } catch (Exception e) {
-                log.error("Error in periodic flush task for groupId={}", config.getGroupId(), e);
-            }
-        }, flushIntervalSeconds.get() / 2, flushIntervalSeconds.get(), TimeUnit.SECONDS);
-    }
-
     public static void flushQueueBlocking(UUID groupId, QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushCallback) {
         WeakReference<QueueManagerImpl> ref = INSTANCES.get(groupId);
         QueueManagerImpl manager = ref != null ? ref.get() : null;
@@ -166,20 +107,6 @@ public class QueueManagerImpl {
                 Math.min(manager.getQueue().size(), manager.config.getMaxFinalBatchSize()), manager.config.getProcessingCycleId());
     }
 
-    public static void flushAllQueuesBlocking(QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushCallback) {
-        INSTANCES.forEach((groupId, ref) -> {
-            try {
-                CompletableFuture.runAsync(() -> flushQueueBlocking(groupId, flushCallback))
-                        .orTimeout(30, TimeUnit.SECONDS)
-                        .exceptionally(e -> {
-                            log.error("Flush timeout or error for groupId={}", groupId, e);
-                            return null;
-                        }).get(30, TimeUnit.SECONDS);
-            } catch (Exception e) {
-                log.error("Failed to initiate flush for groupId={}", groupId, e);
-            }
-        });
-    }
 
     private void scheduleInstanceTTLEviction() {
         flushScheduler.schedule(() -> {
@@ -210,49 +137,6 @@ public class QueueManagerImpl {
         }
     }
 
-    public static QueueManagerImpl getOrCreate(
-            QueueConfig config,
-            MeterRegistry meterRegistry,
-            ExecutorService mappingExecutor,
-            ExecutorService flushExecutor,
-            ScheduledExecutorService flushScheduler,
-            QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback
-    ) {
-        synchronized (INSTANCES) {
-            return INSTANCES.compute(config.getGroupId(), (key, ref) -> {
-                QueueManagerImpl existing = ref != null ? ref.get() : null;
-
-                if (existing != null) {
-                    boolean domainMismatch = !existing.config.getDomainId().equals(config.getDomainId());
-                    boolean cycleMismatch = !existing.config.getProcessingCycleId().equals(config.getProcessingCycleId());
-
-                    if (domainMismatch) {
-                        throw new IllegalStateException(
-                                "GroupId " + key +
-                                        " associated with domainId " + existing.config.getDomainId()
-                        );
-                    }
-
-                    if (cycleMismatch) {
-                        log.info("Evicting QueueManager for groupId={} due to cycle change {} -> {}",
-                                key, existing.config.getProcessingCycleId(), config.getProcessingCycleId());
-                        INSTANCES.remove(key, ref);
-                        existing = null;
-                    }
-                }
-
-                if (existing == null) {
-                    QueueManagerImpl newManager = new QueueManagerImpl(
-                            config, meterRegistry, mappingExecutor, flushExecutor, flushScheduler, flushSignalCallback
-                    );
-                    return new WeakReference<>(newManager);
-                }
-
-                return ref;
-            }).get();
-        }
-    }
-
     public static void remove(UUID groupId) {
         synchronized (INSTANCES) {
             WeakReference<QueueManagerImpl> ref = INSTANCES.remove(groupId);
@@ -269,5 +153,164 @@ public class QueueManagerImpl {
         synchronized (INSTANCES) {
             INSTANCES.keySet().forEach(QueueManagerImpl::remove);
         }
+    }
+
+    private void startPeriodicFlush() {
+        long generation = scheduleGeneration.get();
+        flushTask = flushScheduler.scheduleWithFixedDelay(() -> {
+            if (scheduleGeneration.get() != generation) {
+                return;
+            }
+            try {
+                int queueSize = queue.size();
+                long lastSize = lastFlushedQueueSize.get();
+
+                if (queueSize > 0 && (queueSize >= lastSize * 1.1 || queueSize >= REDUCED_MAX_FINAL_BATCH_SIZE)) {
+                    int batchSize = Math.min(queueSize, REDUCED_MAX_FINAL_BATCH_SIZE);
+
+                    CompletableFuture.runAsync(() ->
+                                    FlushUtils.executeFlush(periodicFlushSemaphore, flushExecutor, flushSignalCallback,
+                                            config.getGroupId(), config.getDomainId(), batchSize, config.getProcessingCycleId(),
+                                            meterRegistry, lastFlushedQueueSize),
+                            flushExecutor);
+                }
+
+                checkQueueHealth();
+
+            } catch (Exception e) {
+                log.error("Error in periodic flush task for groupId={}", config.getGroupId(), e);
+            }
+        }, flushIntervalSeconds.get() / 2, flushIntervalSeconds.get(), TimeUnit.SECONDS);
+    }
+
+    public static CompletableFuture<Void> flushAllQueuesAsync(
+            QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushCallback) {
+
+        List<CompletableFuture<Void>> allFlushes = new ArrayList<>();
+
+        INSTANCES.forEach((groupId, ref) -> {
+            CompletableFuture<Void> flush = CompletableFuture.runAsync(() ->
+                            flushQueueBlocking(groupId, flushCallback))
+                    .orTimeout(30, TimeUnit.SECONDS)
+                    .exceptionally(e -> {
+                        log.error("Flush timeout or error for groupId={}", groupId, e);
+                        return null;
+                    });
+
+            allFlushes.add(flush);
+        });
+
+        return CompletableFuture.allOf(allFlushes.toArray(new CompletableFuture[0]));
+    }
+
+    public void setFlushInterval(int newIntervalSeconds) {
+        if (newIntervalSeconds <= 0) return;
+        if (System.currentTimeMillis() - lastFlushIntervalSetAt < DEBOUNCE_WINDOW_MS) return;
+
+        try {
+            if (scheduleLock.tryLock(100, TimeUnit.MILLISECONDS)) {
+                try {
+                    int oldInterval = flushIntervalSeconds.getAndSet(newIntervalSeconds);
+                    lastFlushIntervalSetAt = System.currentTimeMillis();
+
+                    if (flushTask != null) {
+                        flushTask.cancel(false);
+                    }
+
+                    scheduleGeneration.incrementAndGet();
+
+                    CompletableFuture.runAsync(this::startPeriodicFlush, flushScheduler);
+
+                } finally {
+                    scheduleLock.unlock();
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+
+    public static QueueManagerImpl getOrCreate(
+            QueueConfig config,
+            MeterRegistry meterRegistry,
+            ExecutorService mappingExecutor,
+            ExecutorService flushExecutor,
+            ScheduledExecutorService flushScheduler,
+            QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback
+    ) {
+        UUID groupId = config.getGroupId();
+
+        WeakReference<QueueManagerImpl> ref = INSTANCES.get(groupId);
+        QueueManagerImpl existing = ref != null ? ref.get() : null;
+
+        if (existing != null) {
+            if (!existing.config.getDomainId().equals(config.getDomainId())) {
+                throw new IllegalStateException(
+                        "GroupId " + groupId + " is already associated with domainId " +
+                                existing.config.getDomainId() + ", cannot use domainId " + config.getDomainId()
+                );
+            }
+
+            if (existing.config.getProcessingCycleId().equals(config.getProcessingCycleId())) {
+                log.debug("Reusing existing QueueManager for groupId={}, processingCycleId={}",
+                        groupId, config.getProcessingCycleId());
+                return existing;
+            } else {
+                log.info("Cycle mismatch detected for groupId={}: {} -> {}. Will evict and recreate.",
+                        groupId, existing.config.getProcessingCycleId(), config.getProcessingCycleId());
+
+                synchronized (INSTANCES) {
+                    WeakReference<QueueManagerImpl> currentRef = INSTANCES.get(groupId);
+                    QueueManagerImpl current = currentRef != null ? currentRef.get() : null;
+
+                    if (current == existing) {
+                        INSTANCES.remove(groupId);
+                        log.info("Evicted QueueManager for groupId={}", groupId);
+
+                        QueueManagerImpl finalExisting = existing;
+                        CompletableFuture.runAsync(() -> {
+                            if (finalExisting.flushTask != null) {
+                                finalExisting.flushTask.cancel(false);
+                            }
+                        }, flushExecutor);
+                    }
+                }
+                existing = null;
+            }
+        }
+
+        if (existing == null) {
+            log.info("Creating new QueueManager for groupId={}, domainId={}, processingCycleId={}",
+                    groupId, config.getDomainId(), config.getProcessingCycleId());
+
+            QueueManagerImpl newManager = new QueueManagerImpl(
+                    config, meterRegistry, mappingExecutor, flushExecutor, flushScheduler, flushSignalCallback
+            );
+
+
+            synchronized (INSTANCES) {
+                WeakReference<QueueManagerImpl> currentRef = INSTANCES.get(groupId);
+                QueueManagerImpl current = currentRef != null ? currentRef.get() : null;
+
+                if (current != null) {
+                    log.info("Another thread created QueueManager for groupId={} concurrently. Using theirs.", groupId);
+
+                    CompletableFuture.runAsync(() -> {
+                        if (newManager.flushTask != null) {
+                            newManager.flushTask.cancel(false);
+                        }
+                    }, flushExecutor);
+
+                    return current;
+                }
+
+                INSTANCES.put(groupId, new WeakReference<>(newManager));
+                log.info("Installed new QueueManager for groupId={}", groupId);
+                return newManager;
+            }
+        }
+
+        throw new IllegalStateException("Failed to get or create QueueManager for groupId=" + groupId);
     }
 }

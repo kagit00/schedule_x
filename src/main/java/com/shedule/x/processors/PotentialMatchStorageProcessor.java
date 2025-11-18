@@ -84,76 +84,6 @@ public class PotentialMatchStorageProcessor {
     }
 
 
-    public CompletableFuture<Void> saveAndFinalizeMatches(
-            List<PotentialMatchEntity> matches,
-            UUID groupId, UUID domainId, String cycleId) {
-
-        if (shutdownInitiated.get()) {
-            return CompletableFuture.failedFuture(new IllegalStateException("Shutting down"));
-        }
-        if (matches.isEmpty()) {
-            return CompletableFuture.completedFuture(null);
-        }
-
-        Timer.Sample sample = Timer.start(meterRegistry);
-        final long ACQUIRE_TIMEOUT_MS = 600_000;
-
-        try {
-            if (!storageSemaphore.tryAcquire(ACQUIRE_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-                return CompletableFuture.failedFuture(new TimeoutException("Storage semaphore timeout waiting to acquire"));
-            }
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            return CompletableFuture.failedFuture(ie);
-        }
-
-        return CompletableFuture.runAsync(() -> {
-                    withAdvisoryLock(groupId, conn -> {
-
-                        try {
-                            conn.setAutoCommit(false);
-
-                            try (Statement st = conn.createStatement()) {
-                                st.execute(PG_SESSION_SETUP_SQL);
-                                st.execute(QueryUtils.getPotentialMatchesTempTableSql());
-                            }
-
-                            CopyManager mgr = new CopyManager(conn.unwrap(BaseConnection.class));
-                            copyBatchWithCancellation(mgr, matches, groupId, domainId, cycleId);
-
-                            try (PreparedStatement merge = conn.prepareStatement(QueryUtils.getMergePotentialMatchesSql())) {
-                                merge.setObject(1, groupId);
-                                merge.setObject(2, groupId);
-                                merge.setString(3, cycleId);
-                                merge.executeUpdate();
-                            }
-
-                            conn.commit();
-
-                        } catch (Exception e) {
-                            try { conn.rollback(); } catch (SQLException ignored) {}
-                            throw new CompletionException(e);
-                        }
-
-                        return null;
-                    });
-                }, storageExecutor)
-                .completeOnTimeout(null, SAVE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-                .whenComplete((v, t) -> {
-                    storageSemaphore.release();
-                    long ms = Duration.ofNanos(sample.stop(
-                            meterRegistry.timer("storage_processor_finalize_duration", "groupId", groupId.toString())
-                    )).toMillis();
-
-                    if (t == null) {
-                        log.info("Finalized {} matches for groupId={} in {} ms", matches.size(), groupId, ms);
-                    } else {
-                        log.error("Finalize failed for groupId={}: {}", groupId, t.toString(), t);
-                    }
-                });
-    }
-
-
     @Retryable(
             value = SQLException.class,
             exceptionExpression = "@sqlErrorCode.isDeadlock(#root)",
@@ -182,14 +112,6 @@ public class PotentialMatchStorageProcessor {
         }, storageExecutor);
     }
 
-    private void withAdvisoryLock(UUID groupId, Runnable action) {
-        withAdvisoryLock(groupId, conn -> {
-            action.run();
-            return null;
-        });
-    }
-
-
     public long countFinalMatches(String groupId, UUID domainId, String processingCycleId) {
         if (shutdownInitiated.get()) {
             throw new IllegalStateException("Shutting down");
@@ -216,46 +138,6 @@ public class PotentialMatchStorageProcessor {
             log.error("Count failed for groupId={}", groupId, e);
             throw new CompletionException(e);
         }
-    }
-
-    public CompletableFuture<Void> savePotentialMatches(
-            List<PotentialMatchEntity> matches,
-            UUID groupId, UUID domainId, String processingCycleId) {
-
-        if (shutdownInitiated.get() || matches.isEmpty()) {
-            return CompletableFuture.completedFuture(null);
-        }
-
-        final long ACQUIRE_TIMEOUT_MS = 600_000;
-        List<PotentialMatchEntity> safeMatches = List.copyOf(matches);
-        Timer.Sample sample = Timer.start(meterRegistry);
-
-        try {
-            if (!storageSemaphore.tryAcquire(ACQUIRE_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-                return CompletableFuture.failedFuture(new TimeoutException("Storage semaphore timeout waiting to acquire permit."));
-            }
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            return CompletableFuture.failedFuture(ie);
-        }
-
-        return CompletableFuture.runAsync(
-                        () -> saveAllBatchesInOneTransaction(safeMatches, groupId, domainId, processingCycleId),
-                        storageExecutor)
-                .orTimeout(SAVE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-                .whenComplete((v, t) -> {
-                    storageSemaphore.release();
-                    long ms = Duration.ofNanos(sample.stop(meterRegistry.timer("storage_processor_duration", "groupId", groupId.toString()))).toMillis();
-
-                    if (t == null) {
-                        meterRegistry.counter("storage_processor_matches_saved_total", "groupId", groupId.toString()).increment(safeMatches.size());
-                        log.info("SUCCESS: Saved {} potential matches for groupId={} in {} ms.", safeMatches.size(), groupId, ms);
-                    } else {
-                        Throwable cause = (t instanceof CompletionException && t.getCause() != null) ? t.getCause() : t;
-                        meterRegistry.counter("storage_processor_errors", "groupId", groupId.toString(), "error_type", "save").increment(safeMatches.size());
-                        log.error("FAILED: Could not save matches for groupId={}. Total time: {} ms. Reason: {}", groupId, ms, cause.toString(), cause);
-                    }
-                });
     }
 
     private void saveAllBatchesInOneTransaction(List<PotentialMatchEntity> all, UUID groupId, UUID domainId, String cycleId) {
@@ -351,6 +233,130 @@ public class PotentialMatchStorageProcessor {
             log.error("Failed to acquire advisory lock or execute database action for groupId={}", groupId, e);
             throw new CompletionException(e);
         }
+    }
+
+    private CompletableFuture<Void> acquireSemaphoreAsync(
+            Semaphore semaphore, UUID groupId) {
+
+        CompletableFuture<Void> future = new CompletableFuture<>();
+
+        CompletableFuture.runAsync(() -> {
+            try {
+                if (!semaphore.tryAcquire(600000L, TimeUnit.MILLISECONDS)) {
+                    future.completeExceptionally(
+                            new TimeoutException("Storage save" + " semaphore timeout for groupId=" + groupId));
+                } else {
+                    future.complete(null);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                future.completeExceptionally(e);
+            }
+        });
+
+        return future;
+    }
+
+    public CompletableFuture<Void> saveAndFinalizeMatches(
+            List<PotentialMatchEntity> matches,
+            UUID groupId, UUID domainId, String cycleId) {
+
+        if (shutdownInitiated.get()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Shutting down"));
+        }
+        if (matches.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        Timer.Sample sample = Timer.start(meterRegistry);
+        final long ACQUIRE_TIMEOUT_MS = 600_000;
+
+        return acquireSemaphoreAsync(storageSemaphore, groupId)
+                .thenComposeAsync(v ->
+                                CompletableFuture.runAsync(() -> {
+                                            withAdvisoryLock(groupId, conn -> {
+                                                try {
+                                                    conn.setAutoCommit(false);
+
+                                                    try (Statement st = conn.createStatement()) {
+                                                        st.execute(PG_SESSION_SETUP_SQL);
+                                                        st.execute(QueryUtils.getPotentialMatchesTempTableSql());
+                                                    }
+
+                                                    CopyManager mgr = new CopyManager(conn.unwrap(BaseConnection.class));
+                                                    copyBatchWithCancellation(mgr, matches, groupId, domainId, cycleId);
+
+                                                    try (PreparedStatement merge = conn.prepareStatement(QueryUtils.getMergePotentialMatchesSql())) {
+                                                        merge.setObject(1, groupId);
+                                                        merge.setObject(2, groupId);
+                                                        merge.setString(3, cycleId);
+                                                        merge.executeUpdate();
+                                                    }
+
+                                                    conn.commit();
+
+                                                } catch (Exception e) {
+                                                    try { conn.rollback(); } catch (SQLException ignored) {}
+                                                    throw new CompletionException(e);
+                                                }
+
+                                                return null;
+                                            });
+                                        }, storageExecutor)
+                                        .orTimeout(SAVE_TIMEOUT_MS, TimeUnit.MILLISECONDS),
+                        storageExecutor)
+                .whenComplete((v, t) -> {
+                    storageSemaphore.release();
+                    long ms = Duration.ofNanos(sample.stop(
+                            meterRegistry.timer("storage_processor_finalize_duration", "groupId", groupId.toString())
+                    )).toMillis();
+
+                    if (t == null) {
+                        log.info("Finalized {} matches for groupId={} in {} ms", matches.size(), groupId, ms);
+                    } else {
+                        log.error("Finalize failed for groupId={}: {}", groupId, t.toString(), t);
+                    }
+                });
+    }
+
+    public CompletableFuture<Void> savePotentialMatches(
+            List<PotentialMatchEntity> matches,
+            UUID groupId, UUID domainId, String processingCycleId) {
+
+        if (shutdownInitiated.get() || matches.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        final long ACQUIRE_TIMEOUT_MS = 600_000;
+        List<PotentialMatchEntity> safeMatches = List.copyOf(matches);
+        Timer.Sample sample = Timer.start(meterRegistry);
+
+        return acquireSemaphoreAsync(storageSemaphore, groupId)
+                .thenComposeAsync(v ->
+                                CompletableFuture.runAsync(
+                                                () -> saveAllBatchesInOneTransaction(safeMatches, groupId, domainId, processingCycleId),
+                                                storageExecutor)
+                                        .orTimeout(SAVE_TIMEOUT_MS, TimeUnit.MILLISECONDS),
+                        storageExecutor)
+                .whenComplete((v, t) -> {
+                    storageSemaphore.release();
+                    long ms = Duration.ofNanos(sample.stop(
+                            meterRegistry.timer("storage_processor_duration", "groupId", groupId.toString())
+                    )).toMillis();
+
+                    if (t == null) {
+                        meterRegistry.counter("storage_processor_matches_saved_total", "groupId", groupId.toString())
+                                .increment(safeMatches.size());
+                        log.info("SUCCESS: Saved {} potential matches for groupId={} in {} ms.",
+                                safeMatches.size(), groupId, ms);
+                    } else {
+                        Throwable cause = (t instanceof CompletionException && t.getCause() != null) ? t.getCause() : t;
+                        meterRegistry.counter("storage_processor_errors", "groupId", groupId.toString(), "error_type", "save")
+                                .increment(safeMatches.size());
+                        log.error("FAILED: Could not save matches for groupId={}. Total time: {} ms. Reason: {}",
+                                groupId, ms, cause.toString(), cause);
+                    }
+                });
     }
 
 }

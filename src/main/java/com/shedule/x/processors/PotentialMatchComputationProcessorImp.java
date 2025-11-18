@@ -220,40 +220,6 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
         }
     }
 
-
-    @PreDestroy
-    private void shutdown() {
-        shutdownInitiated = true;
-        mappingExecutor.shutdown();
-        storageExecutor.shutdown();
-
-        try {
-            CompletableFuture<Void> flushFuture = CompletableFuture.runAsync(() -> {
-                QueueManagerImpl.flushAllQueuesBlocking(this::savePendingMatchesBlocking);
-                QueueManagerImpl.removeAll();
-            });
-
-            flushFuture.get(30, TimeUnit.SECONDS);
-        } catch (Exception e) {
-            log.error("Failed to flush queues during shutdown", e);
-        }
-
-        try {
-            if (!mappingExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
-                mappingExecutor.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
-        }
-        try {
-            if (!storageExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
-                storageExecutor.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
     @Override
     public CompletableFuture<Void> savePendingMatches(UUID groupId, UUID domainId, String processingCycleId, int batchSize) {
         if (shutdownInitiated) return CompletableFuture.completedFuture(null);
@@ -266,119 +232,6 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
                     log.warn("Failed to save pending matches for groupId={}", groupId, t);
                     return null;
                 });
-    }
-
-    @Override
-    public CompletableFuture<Void> saveFinalMatches(
-            UUID groupId, UUID domainId, String processingCycleId,
-            AutoCloseableStream<Edge> initialEdgeStream, int topK) {
-
-        log.info("Starting FINAL SAVE with HARD CANCELLATION | groupId={}", groupId);
-
-        AtomicBoolean semaphoreAcquired = new AtomicBoolean(false);
-        AtomicReference<Future<?>> finalSaveTaskRef = new AtomicReference<>(null);
-
-        CompletableFuture<Void> resultFuture = CompletableFuture.supplyAsync(() -> {
-            try {
-                if (!saveSemaphore.tryAcquire(60, TimeUnit.SECONDS)) {
-                    throw new RuntimeException("Final save backpressure: semaphore timeout");
-                }
-                semaphoreAcquired.set(true);
-                log.debug("Acquired saveSemaphore for final save | groupId={}", groupId);
-
-                Future<?> task = storageExecutor.submit(() -> {
-                    Thread.currentThread().setName("final-save-" + groupId);
-                    performFinalSaveWithInterruptionCheck(groupId, domainId, processingCycleId);
-                });
-                finalSaveTaskRef.set(task);
-
-                // Soft timeout
-                task.get(finalSaveTimeoutSeconds, TimeUnit.SECONDS);
-
-                return null;
-
-            } catch (TimeoutException e) {
-                log.error("Final save SOFT TIMEOUT after {}s | groupId={}", finalSaveTimeoutSeconds, groupId);
-                throw new RuntimeException("Final save exceeded soft timeout", e);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new RuntimeException("Final save interrupted", e);
-            } catch (Exception e) {
-                throw new RuntimeException("Final save failed", e);
-            } finally {
-                Future<?> task = finalSaveTaskRef.get();
-                if (task != null && !task.isDone()) {
-                    task.cancel(true);
-                }
-                if (semaphoreAcquired.get()) {
-                    saveSemaphore.release();
-                    log.debug("Released saveSemaphore after final save | groupId={}", groupId);
-                }
-            }
-        }, storageExecutor);
-
-        // Hard kill watchdog — now safe to capture
-        watchdogExecutor.schedule(() -> {
-            if (!resultFuture.isDone()) {
-                log.error("HARD KILL: Final save exceeded {}s → killing thread | groupId={}",
-                        finalSaveTimeoutSeconds * 2, groupId);
-                meterRegistry.counter("final_save_hard_kill", "groupId", groupId.toString()).increment();
-
-                Future<?> task = finalSaveTaskRef.get();
-                if (task != null && !task.isDone()) {
-                    task.cancel(true);
-                }
-                resultFuture.completeExceptionally(new TimeoutException("Final save hard timeout"));
-            }
-        }, finalSaveTimeoutSeconds * 2L, TimeUnit.SECONDS);
-
-        return resultFuture.exceptionally(t -> {
-            log.error("Final save failed for groupId={}: {}", groupId, t.getMessage());
-            meterRegistry.counter("final_save_errors", "groupId", groupId.toString()).increment();
-            return null;
-        });
-    }
-
-    private void performFinalSaveWithInterruptionCheck(UUID groupId, UUID domainId, String processingCycleId) {
-        AtomicLong processed = new AtomicLong(0);
-        Map<String, List<PotentialMatchEntity>> matchesByRefId = new HashMap<>();
-        List<PotentialMatchEntity> batch = new ArrayList<>(tempTableBatchSize);
-
-        try (AutoCloseableStream<Edge> edgeStream = graphStore.streamEdges(domainId, groupId)) {
-            edgeStream.forEach(edge -> {
-                if (Thread.interrupted()) {
-                    log.warn("Final save interrupted at {} edges | groupId={}", processed.get(), groupId);
-                    throw new RuntimeException("Final save cancelled by interruption");
-                }
-
-                PotentialMatchEntity entity = GraphRequestFactory.convertToPotentialMatch(edge, groupId, domainId, processingCycleId);
-                if (entity != null) {
-                    matchesByRefId.computeIfAbsent(entity.getReferenceId(), k -> new ArrayList<>()).add(entity);
-                }
-
-                if (processed.incrementAndGet() % 10_000 == 0) {
-                    Thread.yield();
-                }
-            });
-        }
-
-        List<CompletableFuture<Void>> saveFutures = new ArrayList<>();
-        for (List<PotentialMatchEntity> matches : matchesByRefId.values()) {
-            batch.addAll(matches);
-            if (batch.size() >= tempTableBatchSize) {
-                List<PotentialMatchEntity> batchToSave = new ArrayList<>(batch);
-                saveFutures.add(potentialMatchSaver.saveMatchesAsync(batchToSave, groupId, domainId, processingCycleId, true));
-                batch.clear();
-            }
-        }
-        if (!batch.isEmpty()) {
-            saveFutures.add(potentialMatchSaver.saveMatchesAsync(batch, groupId, domainId, processingCycleId, true));
-        }
-
-        CompletableFuture.allOf(saveFutures.toArray(new CompletableFuture[0]))
-                .join();
-
-        log.info("Final save completed successfully | groupId={} | nodes={}", groupId, matchesByRefId.size());
     }
 
     @Override
@@ -476,4 +329,181 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
             return 0;
         }
     }
+
+    private CompletableFuture<Void> acquireSemaphoreAsync(Semaphore semaphore, String operation, UUID groupId) {
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        CompletableFuture.runAsync(() -> {
+            try {
+                if (!semaphore.tryAcquire(60, TimeUnit.SECONDS)) {
+                    future.completeExceptionally(
+                            new TimeoutException(operation + " semaphore timeout for groupId=" + groupId));
+                } else {
+                    future.complete(null);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                future.completeExceptionally(e);
+            }
+        });
+        return future;
+    }
+
+    @Override
+    public CompletableFuture<Void> saveFinalMatches(
+            UUID groupId, UUID domainId, String processingCycleId,
+            AutoCloseableStream<Edge> initialEdgeStream, int topK) {
+
+        log.info("Starting FINAL SAVE with HARD CANCELLATION | groupId={}", groupId);
+
+        AtomicReference<CompletableFuture<Void>> saveTaskRef = new AtomicReference<>();
+
+        return acquireSemaphoreAsync(saveSemaphore, "Final save", groupId)
+                .thenComposeAsync(v -> {
+                    CompletableFuture<Void> saveTask = CompletableFuture.runAsync(() -> {
+                                Thread.currentThread().setName("final-save-" + groupId);
+                                performFinalSaveWithInterruptionCheck(groupId, domainId, processingCycleId);
+                            }, storageExecutor)
+                            .orTimeout(finalSaveTimeoutSeconds, TimeUnit.SECONDS);
+
+                    saveTaskRef.set(saveTask);
+
+                    watchdogExecutor.schedule(() -> {
+                        CompletableFuture<Void> task = saveTaskRef.get();
+                        if (task != null && !task.isDone()) {
+                            log.error("HARD KILL: Final save exceeded {}s → cancelling | groupId={}",
+                                    finalSaveTimeoutSeconds * 2, groupId);
+                            meterRegistry.counter("final_save_hard_kill", "groupId", groupId.toString()).increment();
+                            task.cancel(true);
+                        }
+                    }, finalSaveTimeoutSeconds * 2L, TimeUnit.SECONDS);
+
+                    return saveTask;
+                }, storageExecutor)
+                .whenComplete((res, ex) -> {
+                    saveSemaphore.release();
+                    log.debug("Released saveSemaphore after final save | groupId={}", groupId);
+
+                    if (ex != null) {
+                        log.error("Final save failed for groupId={}: {}", groupId, ex.getMessage());
+                        meterRegistry.counter("final_save_errors", "groupId", groupId.toString()).increment();
+                    }
+                });
+    }
+
+    private void performFinalSaveWithInterruptionCheck(UUID groupId, UUID domainId, String processingCycleId) {
+        AtomicLong processed = new AtomicLong(0);
+        Map<String, List<PotentialMatchEntity>> matchesByRefId = new HashMap<>();
+        List<PotentialMatchEntity> batch = new ArrayList<>(tempTableBatchSize);
+
+        try (AutoCloseableStream<Edge> edgeStream = graphStore.streamEdges(domainId, groupId)) {
+            edgeStream.forEach(edge -> {
+                if (Thread.interrupted()) {
+                    log.warn("Final save interrupted at {} edges | groupId={}", processed.get(), groupId);
+                    throw new RuntimeException("Final save cancelled by interruption");
+                }
+
+                PotentialMatchEntity entity = GraphRequestFactory.convertToPotentialMatch(edge, groupId, domainId, processingCycleId);
+                if (entity != null) {
+                    matchesByRefId.computeIfAbsent(entity.getReferenceId(), k -> new ArrayList<>()).add(entity);
+                }
+
+                if (processed.incrementAndGet() % 10_000 == 0) {
+                    Thread.yield();
+                }
+            });
+        }
+
+        List<CompletableFuture<Void>> saveFutures = new ArrayList<>();
+        for (List<PotentialMatchEntity> matches : matchesByRefId.values()) {
+            batch.addAll(matches);
+            if (batch.size() >= tempTableBatchSize) {
+                List<PotentialMatchEntity> batchToSave = new ArrayList<>(batch);
+                saveFutures.add(potentialMatchSaver.saveMatchesAsync(batchToSave, groupId, domainId, processingCycleId, true));
+                batch.clear();
+            }
+        }
+        if (!batch.isEmpty()) {
+            saveFutures.add(potentialMatchSaver.saveMatchesAsync(batch, groupId, domainId, processingCycleId, true));
+        }
+
+        try {
+            CompletableFuture.allOf(saveFutures.toArray(new CompletableFuture[0]))
+                    .orTimeout(matchSaveTimeoutSeconds, TimeUnit.SECONDS)
+                    .get(); // Safe because orTimeout will complete it
+        } catch (Exception e) {
+            throw new CompletionException("Failed to save final batches", e);
+        }
+
+        log.info("Final save completed successfully | groupId={} | nodes={}", groupId, matchesByRefId.size());
+    }
+
+    private CompletableFuture<Void> savePendingMatchesAsync(
+            UUID groupId, UUID domainId, Integer batchSize, String processingCycleId) {
+
+        QueueConfig queueConfig = GraphRequestFactory.getQueueConfig(groupId, domainId, processingCycleId, queueManagerConfig);
+        QueueManagerImpl manager = queueManagerFactory.create(queueConfig);
+        BlockingQueue<GraphRecords.PotentialMatch> queue = manager.getQueue();
+
+        return drainAndSaveRecursive(queue, groupId, domainId, processingCycleId, 0);
+    }
+
+    private CompletableFuture<Void> drainAndSaveRecursive(
+            BlockingQueue<GraphRecords.PotentialMatch> queue,
+            UUID groupId, UUID domainId, String processingCycleId, long totalProcessed) {
+
+        List<GraphRecords.PotentialMatch> batch = new ArrayList<>();
+        int drained = queue.drainTo(batch, queueManagerConfig.getMaxFinalBatchSize());
+
+        if (drained == 0) {
+            log.info("Completed async drain for groupId={}, total processed={}", groupId, totalProcessed);
+            return CompletableFuture.completedFuture(null);
+        }
+
+        log.info("Draining {} matches for groupId={}", drained, groupId);
+
+        return graphStore.persistEdgesAsync(batch, groupId, 0)
+                .orTimeout(matchSaveTimeoutSeconds, TimeUnit.SECONDS)
+                .thenComposeAsync(v ->
+                                drainAndSaveRecursive(queue, groupId, domainId, processingCycleId, totalProcessed + drained),
+                        mappingExecutor)
+                .exceptionally(throwable -> {
+                    log.error("Async drain failed for groupId={}: {}", groupId, throwable.getMessage());
+                    return null;
+                });
+    }
+
+    @PreDestroy
+    private void shutdown() {
+        log.info("Initiating shutdown...");
+        shutdownInitiated = true;
+
+        try {
+            CompletableFuture<Void> flushFuture = CompletableFuture.runAsync(() -> {
+                QueueManagerImpl.flushAllQueuesAsync(this::savePendingMatchesAsync);
+                QueueManagerImpl.removeAll();
+            });
+
+            flushFuture.get(30, TimeUnit.SECONDS);
+            log.info("Queue flush completed");
+
+        } catch (Exception e) {
+            log.error("Failed to flush queues during shutdown", e);
+        }
+
+        mappingExecutor.shutdown();
+        storageExecutor.shutdown();
+
+        try {
+            if (!mappingExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+                mappingExecutor.shutdownNow();
+            }
+            if (!storageExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+                storageExecutor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.error("Shutdown interrupted", e);
+        }
+    }
+
 }

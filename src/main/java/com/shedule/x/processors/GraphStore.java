@@ -27,7 +27,6 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.StampedLock;
 import java.util.stream.StreamSupport;
@@ -380,74 +379,6 @@ public class GraphStore implements AutoCloseable {
         }
     }
 
-    public CompletableFuture<Void> persistEdgesAsync(List<GraphRecords.PotentialMatch> matches,
-                                                     UUID groupId, int chunkIndex) {
-        if (matches.isEmpty()) {
-            return CompletableFuture.completedFuture(null);
-        }
-
-        AtomicBoolean permitAcquired = new AtomicBoolean(false);
-        List<Future<?>> activeTasks = new CopyOnWriteArrayList<>();
-
-        try {
-            // Backpressure protection
-            if (!writeSemaphore.tryAcquire(30, TimeUnit.SECONDS)) {
-                log.warn("LMDB write backpressure timeout | groupId={}", groupId);
-                meterRegistry.counter("lmdb_write_backpressure_timeout", "groupId", groupId.toString()).increment();
-                return CompletableFuture.failedFuture(new RuntimeException("LMDB write backpressure"));
-            }
-            permitAcquired.set(true);
-
-            int batchSize = Math.min(BATCH_BASE, Math.max(100, matches.size() / 8));
-            List<List<GraphRecords.PotentialMatch>> partitions = ListUtils.partition(matches, batchSize);
-
-            List<CompletableFuture<Void>> futures = new ArrayList<>(partitions.size());
-
-            for (List<GraphRecords.PotentialMatch> partition : partitions) {
-                List<GraphRecords.PotentialMatch> batchCopy = new ArrayList<>(partition);
-
-                Future<?> task = asyncPool.submit(() -> {
-                    Thread.currentThread().setName("lmdb-write-" + groupId + "-" + chunkIndex);
-                    writeEdgeBatchCancellable(batchCopy, groupId, chunkIndex);
-                });
-                activeTasks.add(task);
-
-                CompletableFuture<Void> cf = CompletableFuture.runAsync(() -> {
-                    try {
-                        task.get(300, TimeUnit.SECONDS); // 5 min max per batch
-                    } catch (TimeoutException e) {
-                        log.error("LMDB batch timeout → killing thread | groupId={}", groupId);
-                        task.cancel(true);
-                        throw new RuntimeException("LMDB batch timeout", e);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        task.cancel(true);
-                        throw new RuntimeException("LMDB write interrupted", e);
-                    } catch (ExecutionException e) {
-                        throw new RuntimeException(e);
-                    }
-                });
-                futures.add(cf);
-            }
-
-            return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
-                    .whenComplete((v, t) -> {
-                        if (t != null) {
-                            activeTasks.forEach(f -> f.cancel(true));
-                        }
-                    });
-
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            activeTasks.forEach(f -> f.cancel(true));
-            return CompletableFuture.failedFuture(e);
-        } finally {
-            if (permitAcquired.get()) {
-                writeSemaphore.release();
-            }
-        }
-    }
-
     private void writeEdgeBatchCancellable(List<GraphRecords.PotentialMatch> batch,
                                            UUID groupId, int chunkIndex) {
         try (Txn<ByteBuffer> txn = env.txnWrite()) {
@@ -546,6 +477,70 @@ public class GraphStore implements AutoCloseable {
         }
         return null;
     }
+
+
+    private CompletableFuture<Void> acquireSemaphoreAsync(Semaphore semaphore, UUID groupId) {
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        CompletableFuture.runAsync(() -> {
+            try {
+                if (!semaphore.tryAcquire(30, TimeUnit.SECONDS)) {
+                    future.completeExceptionally(
+                            new TimeoutException("LMDB write" + " semaphore timeout for groupId=" + groupId));
+                    meterRegistry.counter("lmdb_write_backpressure_timeout",
+                            "groupId", groupId.toString()).increment();
+                } else {
+                    future.complete(null);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                future.completeExceptionally(e);
+            }
+        });
+        return future;
+    }
+
+    public CompletableFuture<Void> persistEdgesAsync(List<GraphRecords.PotentialMatch> matches,
+                                                     UUID groupId, int chunkIndex) {
+        if (matches.isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        return acquireSemaphoreAsync(writeSemaphore, groupId)
+                .thenComposeAsync(v -> {
+                    int batchSize = Math.min(BATCH_BASE, Math.max(100, matches.size() / 8));
+                    List<List<GraphRecords.PotentialMatch>> partitions = ListUtils.partition(matches, batchSize);
+
+                    List<CompletableFuture<Void>> futures = new ArrayList<>(partitions.size());
+
+                    for (List<GraphRecords.PotentialMatch> partition : partitions) {
+                        List<GraphRecords.PotentialMatch> batchCopy = new ArrayList<>(partition);
+
+                        CompletableFuture<Void> batchFuture = CompletableFuture.runAsync(() -> {
+                                    Thread.currentThread().setName("lmdb-write-" + groupId + "-" + chunkIndex);
+                                    writeEdgeBatchCancellable(batchCopy, groupId, chunkIndex);
+                                }, asyncPool)
+                                .orTimeout(300, TimeUnit.SECONDS);
+
+                        futures.add(batchFuture);
+                    }
+
+                    return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+                }, asyncPool)
+                .whenComplete((v, t) -> {
+                    writeSemaphore.release();
+
+                    if (t != null) {
+                        log.error("LMDB write failed for groupId={}: {}", groupId, t.getMessage());
+                        meterRegistry.counter("lmdb_write_errors",
+                                "groupId", groupId.toString()).increment();
+                    }
+                })
+                .exceptionally(throwable -> {
+                    log.error("Persist edges failed for groupId={}: {}", groupId, throwable.getMessage());
+                    return null;
+                });
+    }
+
 
     public CompletableFuture<Void> persistEdgesAsyncFallback(List<GraphRecords.PotentialMatch> matches,
                                                              String groupId, int chunkIndex, Throwable t) {

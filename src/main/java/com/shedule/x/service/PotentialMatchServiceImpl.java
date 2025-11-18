@@ -20,8 +20,7 @@ import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
+
 
 @Slf4j
 @Service
@@ -88,7 +87,8 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
                                 fetchedCount, MAX_NODES, groupId, cycleId);
                         meterRegistry.counter("node_count_exceeded",
                                 Tags.of("groupId", groupId.toString(), "cycleId", cycleId)).increment();
-                        throw new IllegalStateException("Node count exceeds maximum limit");
+                        return CompletableFuture.failedFuture(
+                                new IllegalStateException("Node count exceeds maximum limit"));
                     }
 
                     return fetchNodesInSubBatches(nodeIds, groupId, request.getCreatedAfter())
@@ -137,35 +137,42 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
             List<UUID> nodeIds, UUID groupId, LocalDateTime createdAfter) {
 
         List<List<UUID>> subBatches = Lists.partition(nodeIds, NODE_ID_SUB_BATCH_SIZE);
-        var semaphore = new Semaphore(4);
-        List<CompletableFuture<List<Node>>> futures = new ArrayList<>();
 
-        for (List<UUID> subBatch : subBatches) {
-            try {
-                if (!semaphore.tryAcquire(60, TimeUnit.SECONDS)) {
-                    log.warn("Timed out acquiring semaphore for groupId={}, subBatch size={}", groupId, subBatch.size());
-                    continue;
-                }
-
-                futures.add(nodeFetchService.fetchNodesInBatchesAsync(subBatch, groupId, createdAfter)
-                        .whenComplete((v, t) -> semaphore.release()));
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return CompletableFuture.failedFuture(e);
-            }
+        if (subBatches.isEmpty()) {
+            return CompletableFuture.completedFuture(Collections.emptyList());
         }
 
+        List<Node> allNodes = Collections.synchronizedList(new ArrayList<>());
+        Semaphore semaphore = new Semaphore(4);
+
+        List<CompletableFuture<Void>> futures = subBatches.stream()
+                .map(subBatch -> acquireSemaphoreAsync(semaphore)
+                        .thenComposeAsync(v ->
+                                        nodeFetchService.fetchNodesInBatchesAsync(subBatch, groupId, createdAfter)
+                                                .thenAccept(allNodes::addAll)
+                                                .whenComplete((res, ex) -> semaphore.release()),
+                                batchExecutor))
+                .toList();
+
         return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
-                .thenApplyAsync(v -> futures.stream()
-                        .flatMap(f -> {
-                            try {
-                                return f.join().stream();
-                            } catch (Exception e) {
-                                log.error("Failed to get sub-batch result for groupId={}: {}", groupId, e.getMessage());
-                                return Stream.empty();
-                            }
-                        })
-                        .collect(Collectors.toList()), batchExecutor);
+                .thenApply(v -> new ArrayList<>(allNodes));
+    }
+
+    private CompletableFuture<Void> acquireSemaphoreAsync(Semaphore semaphore) {
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        CompletableFuture.runAsync(() -> {
+            try {
+                if (!semaphore.tryAcquire(60, TimeUnit.SECONDS)) {
+                    future.completeExceptionally(new TimeoutException("Semaphore acquisition timeout"));
+                } else {
+                    future.complete(null);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                future.completeExceptionally(e);
+            }
+        });
+        return future;
     }
 
     private CompletableFuture<Void> processGraphAndMatches(
@@ -205,7 +212,6 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
                     throw new CompletionException("Graph processing failed", throwable);
                 });
     }
-
 
     private void bufferMatchParticipationHistory(List<Node> nodes, UUID groupId, UUID domainId, String cycleId) {
         LocalDateTime now = DefaultValuesPopulator.getCurrentTimestamp();

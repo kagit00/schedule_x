@@ -37,7 +37,7 @@ public class PotentialMatchesCreationScheduler {
     private final PotentialMatchesCreationJobExecutor jobExecutor;
     private final MeterRegistry meterRegistry;
     private final Semaphore domainSemaphore;
-    private final ConcurrentMap<UUID, Semaphore> groupLocks = new ConcurrentHashMap<>();
+    private final ConcurrentMap<UUID, CompletableFuture<Void>> groupLocks = new ConcurrentHashMap<>();
     private final ExecutorService batchExecutor;
     private final QueueManagerFactory queueManagerFactory;
     private final MatchesCreationFinalizer matchesCreationFinalizer;
@@ -59,6 +59,8 @@ public class PotentialMatchesCreationScheduler {
 
     @Value("${match.shutdown-limit-seconds:3600}")
     private int shutdownLimitSeconds;
+
+
 
     public PotentialMatchesCreationScheduler(
             DomainService domainService,
@@ -87,6 +89,13 @@ public class PotentialMatchesCreationScheduler {
                         "batchExecutor max pool size (" + poolSize + ") must be >= " + requiredSize);
             }
         }
+    }
+
+    private void cleanupIdleGroupLocks() {
+        groupLocks.entrySet().removeIf(entry -> {
+            CompletableFuture<Void> future = entry.getValue();
+            return future.isDone();
+        });
     }
 
     @Scheduled(fixedDelayString = "${match.save.delay:300000}")
@@ -118,101 +127,114 @@ public class PotentialMatchesCreationScheduler {
             allTasks.add(processGroupTask(groupId, domainId, cycleId));
         }
 
-        CompletableFuture.runAsync(() -> {
-            try {
-                CompletableFuture.allOf(allTasks.toArray(new CompletableFuture[0]))
-                        .get(3, TimeUnit.HOURS);
+        CompletableFuture.allOf(allTasks.toArray(new CompletableFuture[0]))
+                .orTimeout(3, TimeUnit.HOURS)
+                .whenCompleteAsync((v, error) -> {
+                    if (error instanceof TimeoutException) {
+                        log.error("BATCH CYCLE TIMEOUT AFTER 3 HOURS | cycleId={}", cycleId, error);
+                        allTasks.forEach(f -> f.cancel(true));
+                        meterRegistry.counter("batch_cycle_timeout_total").increment();
+                    } else if (error != null) {
+                        log.error("BATCH CYCLE FAILED | cycleId={}", cycleId, error);
+                        meterRegistry.counter("batch_cycle_failure_total").increment();
+                    } else {
+                        log.info("BATCH CYCLE COMPLETED SUCCESSFULLY | cycleId={} | groups={}", cycleId, allTasks.size());
+                        taskList.forEach(t -> matchesCreationFinalizer.finalize(true));
+                    }
 
-                log.info("BATCH CYCLE COMPLETED SUCCESSFULLY | cycleId={} | groups={}", cycleId, allTasks.size());
-                taskList.forEach(t -> matchesCreationFinalizer.finalize(true));
+                    sample.stop(meterRegistry.timer("batch_matches_total_duration"));
+                    cleanupIdleGroupLocks();
+                }, batchExecutor);
+    }
 
-            } catch (TimeoutException te) {
-                log.error("BATCH CYCLE TIMEOUT AFTER 3 HOURS | cycleId={}. Killing all remaining tasks...", cycleId, te);
-                allTasks.forEach(f -> f.cancel(true));
-                meterRegistry.counter("batch_cycle_timeout_total").increment();
 
-            } catch (Exception e) {
-                log.error("BATCH CYCLE FAILED | cycleId={}", cycleId, e);
-                meterRegistry.counter("batch_cycle_failure_total").increment();
+    private CompletableFuture<Void> doFlushLoopAsync(UUID groupId, UUID domainId, String cycleId) {
+        return CompletableFuture.runAsync(() -> {
+            QueueManagerConfig config = new QueueManagerConfig(
+                    queueCapacity, flushIntervalSeconds, drainWarningThreshold,
+                    boostBatchFactor, maxFinalBatchSize);
+            QueueConfig queueConfig = GraphRequestFactory.getQueueConfig(
+                    groupId, domainId, DefaultValuesPopulator.getUid(), config);
+            QueueManagerImpl queueManager = queueManagerFactory.create(queueConfig);
 
-            } finally {
-                sample.stop(meterRegistry.timer("batch_matches_total_duration"));
-                cleanupIdleGroupLocks();
+            if (queueManager == null) {
+                log.warn("No QueueManager created for groupId={}", groupId);
+                return;
+            }
+
+            long deadline = System.currentTimeMillis() + (shutdownLimitSeconds * 1000L);
+
+            while (true) {
+                long queueSize = queueManager.getQueueSize();
+                if (queueSize == 0) {
+                    log.info("Flush complete: all queued matches processed for groupId={}", groupId);
+                    break;
+                }
+
+                if (System.currentTimeMillis() > deadline) {
+                    log.error("FLUSH DEADLINE EXCEEDED ({}s). Dropping {} queued matches for groupId={}",
+                            shutdownLimitSeconds, queueSize, groupId);
+                    meterRegistry.counter("matches_dropped_due_to_flush_deadline",
+                            "groupId", groupId.toString()).increment(queueSize);
+                    break;
+                }
+
+                QueueManagerImpl.flushQueueBlocking(groupId, queueManagerFactory.getFlushSignalCallback());
+                Uninterruptibles.sleepUninterruptibly(100, TimeUnit.MILLISECONDS);
             }
         }, batchExecutor);
     }
 
-    private void cleanupIdleGroupLocks() {
-        groupLocks.entrySet().removeIf(entry -> {
-            Semaphore s = entry.getValue();
-            return s.availablePermits() == 1 && !s.hasQueuedThreads();
-        });
-    }
-
     private CompletableFuture<Void> processGroupTask(UUID groupId, UUID domainId, String cycleId) {
-        Semaphore groupSemaphore = groupLocks.computeIfAbsent(groupId, k -> new Semaphore(1, true));
+        CompletableFuture<Void> previousTask = groupLocks.get(groupId);
 
-        return CompletableFuture.runAsync(() -> {
-                    domainSemaphore.acquireUninterruptibly();
-                    try {
-                        groupSemaphore.acquireUninterruptibly();
-                        try {
-                            log.info("START groupId={} domainId={} cycleId={}", groupId, domainId, cycleId);
+        CompletableFuture<Void> currentTask;
 
-                            jobExecutor.processGroup(groupId, domainId, cycleId)
-                                    .thenRunAsync(() -> doFlushLoop(groupId, domainId, cycleId), batchExecutor)
-                                    .join();
+        if (previousTask == null || previousTask.isDone()) {
+            currentTask = executeGroupTask(groupId, domainId, cycleId);
+        } else {
+            currentTask = previousTask.thenCompose(v -> executeGroupTask(groupId, domainId, cycleId));
+        }
 
-                            log.info("SUCCESS groupId={} domainId={} cycleId={}", groupId, domainId, cycleId);
-                        } finally {
-                            groupSemaphore.release();
-                        }
-                    } finally {
-                        domainSemaphore.release();
-                    }
-                }, batchExecutor)
-                .whenComplete((v, t) -> {
-                    if (t != null) {
-                        log.error("FAILED groupId={} domainId={} cycleId={}", groupId, domainId, cycleId, t);
-                        meterRegistry.counter("matches_creation_error", "groupId", groupId.toString()).increment();
-                    }
-                    if (groupSemaphore.availablePermits() == 1 && !groupSemaphore.hasQueuedThreads()) {
-                        groupLocks.remove(groupId, groupSemaphore);
-                    }
-                    matchesCreationFinalizer.finalize(false);
-                });
+        groupLocks.put(groupId, currentTask);
+
+        currentTask.whenComplete((v, e) -> {
+            groupLocks.compute(groupId, (k, existing) ->
+                    existing == currentTask && existing.isDone() ? null : existing
+            );
+        });
+
+        return currentTask;
     }
 
-    private void doFlushLoop(UUID groupId, UUID domainId, String cycleId) {
-        QueueManagerConfig config = new QueueManagerConfig(
-                queueCapacity, flushIntervalSeconds, drainWarningThreshold, boostBatchFactor, maxFinalBatchSize);
-        QueueConfig queueConfig = GraphRequestFactory.getQueueConfig(groupId, domainId, DefaultValuesPopulator.getUid(), config);
-        QueueManagerImpl queueManager = queueManagerFactory.create(queueConfig);
+    private CompletableFuture<Void> executeGroupTask(UUID groupId, UUID domainId, String cycleId) {
+        return acquireSemaphoreAsync(domainSemaphore)
+                .thenCompose(v -> {
+                    log.info("START groupId={} domainId={} cycleId={}", groupId, domainId, cycleId);
 
-        if (queueManager == null) {
-            log.warn("No QueueManager created for groupId={}", groupId);
-            return;
-        }
+                    return jobExecutor.processGroup(groupId, domainId, cycleId)
+                            .thenCompose(result -> doFlushLoopAsync(groupId, domainId, cycleId));
+                })
+                .whenCompleteAsync((v, error) -> {
+                    domainSemaphore.release();
 
-        long deadline = System.currentTimeMillis() + (shutdownLimitSeconds * 1000L);
+                    if (error != null) {
+                        log.error("FAILED groupId={} domainId={} cycleId={}", groupId, domainId, cycleId, error);
+                        meterRegistry.counter("matches_creation_error", "groupId", groupId.toString()).increment();
+                    } else {
+                        log.info("SUCCESS groupId={} domainId={} cycleId={}", groupId, domainId, cycleId);
+                    }
 
-        while (true) {
-            long queueSize = queueManager.getQueueSize();
-            if (queueSize == 0) {
-                log.info("Flush complete: all queued matches processed for groupId={}", groupId);
-                break;
-            }
+                    matchesCreationFinalizer.finalize(false);
+                }, batchExecutor);
+    }
 
-            if (System.currentTimeMillis() > deadline) {
-                log.error("FLUSH DEADLINE EXCEEDED ({}s). Dropping {} queued matches for groupId={}",
-                        shutdownLimitSeconds, queueSize, groupId);
-                meterRegistry.counter("matches_dropped_due_to_flush_deadline", "groupId", groupId.toString()).increment(queueSize);
-                break;
-            }
-
-            QueueManagerImpl.flushQueueBlocking(groupId, queueManagerFactory.getFlushSignalCallback());
-
-            Uninterruptibles.sleepUninterruptibly(100, TimeUnit.MILLISECONDS);
-        }
+    private CompletableFuture<Void> acquireSemaphoreAsync(Semaphore semaphore) {
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        CompletableFuture.runAsync(() -> {
+            semaphore.acquireUninterruptibly();
+            future.complete(null);
+        });
+        return future;
     }
 }
