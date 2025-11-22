@@ -19,6 +19,7 @@ import org.springframework.retry.policy.SimpleRetryPolicy;
 import org.springframework.retry.support.RetryTemplate;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
+import java.io.IOException;
 import java.sql.SQLException;
 import java.util.Map;
 import java.util.UUID;
@@ -72,10 +73,14 @@ public class Beans {
 
     @Bean("persistenceExecutor")
     public ExecutorService persistenceExecutor(MeterRegistry meterRegistry) {
-        ThreadFactory threadFactory = new ThreadFactoryBuilder().setNameFormat("persistence-executor-%d").build();
-        ThreadPoolExecutor executor = new ThreadPoolExecutor(
-                8, 16, 0L, TimeUnit.MILLISECONDS,
-                new LinkedBlockingQueue<>(500),
+        ThreadFactory threadFactory = new ThreadFactoryBuilder()
+                .setNameFormat("persistence-executor-%d")
+                .build();
+
+        return new ThreadPoolExecutor(
+                10, 20,
+                60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(Integer.MAX_VALUE),
                 threadFactory,
                 new ThreadPoolExecutor.CallerRunsPolicy() {
                     @Override
@@ -86,8 +91,6 @@ public class Beans {
                     }
                 }
         );
-        executor.allowCoreThreadTimeOut(false);
-        return executor;
     }
 
     @Bean(destroyMethod = "shutdown")
@@ -277,25 +280,12 @@ public class Beans {
         return executor;
     }
 
-    @Bean
-    public QueueManagerFactory queueManagerFactory(
-            MeterRegistry meterRegistry,
-            @Qualifier("persistenceExecutor") ExecutorService mappingExecutor,
-            @Qualifier("queueFlushExecutor") ExecutorService flushExecutor,
-            @Qualifier("queueFlushScheduler") ScheduledExecutorService flushScheduler) {
-
-        QueueManagerImpl.QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback =
-                (groupId, domainId, batchSize, processingCycleId) -> {
-                    return CompletableFuture.completedFuture(null);
-                };
-        return new QueueManagerFactory(meterRegistry, mappingExecutor, flushExecutor, flushScheduler, flushSignalCallback);
-    }
 
     @Bean
     @Qualifier("queueFlushScheduler")
     public ScheduledExecutorService queueFlushScheduler() {
         return Executors.newScheduledThreadPool(8, r -> {
-            Thread t = new Thread(r, "queue-manager-global-flush-scheduler");
+            Thread t = new Thread(r, "queue-flush-scheduler");
             t.setDaemon(true);
             return t;
         });
@@ -309,24 +299,6 @@ public class Beans {
                 0L, TimeUnit.MILLISECONDS,
                 new LinkedBlockingQueue<>(100),
                 new ThreadFactoryBuilder().setNameFormat("match-pro-%d").build()
-        );
-    }
-
-    @Bean(name = "batchCopyExecutor")
-    public ExecutorService batchCopyExecutor() {
-        return Executors.newFixedThreadPool(
-                2,
-                new ThreadFactory() {
-                    private final ThreadFactory defaultFactory = Executors.defaultThreadFactory();
-
-                    @Override
-                    public Thread newThread(Runnable r) {
-                        Thread thread = defaultFactory.newThread(r);
-                        thread.setName("batch-copy-exec-" + thread.getId());
-                        thread.setDaemon(false);
-                        return thread;
-                    }
-                }
         );
     }
 }

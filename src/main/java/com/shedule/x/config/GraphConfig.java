@@ -1,8 +1,11 @@
 package com.shedule.x.config;
 
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.shedule.x.builder.FlatEdgeBuildingStrategy;
 import com.shedule.x.builder.MetadataEdgeBuildingStrategy;
+import com.shedule.x.config.factory.NodePriorityProvider;
 import com.shedule.x.processors.*;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
@@ -10,10 +13,12 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.context.annotation.Scope;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.util.Collections;
+import java.util.UUID;
 import java.util.concurrent.*;
 
 @Slf4j
@@ -22,22 +27,16 @@ public class GraphConfig {
 
     @Bean("lshExecutor")
     public ExecutorService lshExecutorService(MeterRegistry meterRegistry) {
-        ThreadFactory threadFactory = new ThreadFactoryBuilder().setNameFormat("lsh-executor-%d").build();
-        ThreadPoolExecutor executor = new ThreadPoolExecutor(
-                4, 8, 0L, TimeUnit.MILLISECONDS,
-                new LinkedBlockingQueue<>(500),
+        ThreadFactory threadFactory = new ThreadFactoryBuilder()
+                .setNameFormat("lsh-executor-%d").build();
+
+        return new ThreadPoolExecutor(
+                6, 12,
+                60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(Integer.MAX_VALUE),
                 threadFactory,
-                new ThreadPoolExecutor.CallerRunsPolicy() {
-                    @Override
-                    public void rejectedExecution(Runnable r, ThreadPoolExecutor e) {
-                        meterRegistry.counter("lsh_executor_rejections").increment();
-                        log.warn("LSH task rejected: queue size={}", e.getQueue().size());
-                        super.rejectedExecution(r, e);
-                    }
-                }
+                new ThreadPoolExecutor.CallerRunsPolicy()
         );
-        executor.allowCoreThreadTimeOut(false);
-        return executor;
     }
 
 
@@ -54,7 +53,11 @@ public class GraphConfig {
     }
 
     @Bean
-    @Scope("prototype")
+    public NodePriorityProvider nodePriorityProvider(@Lazy LSHIndex lshIndex) {
+        return lshIndex::getNodePriorityScore;
+    }
+
+    @Bean
     public LSHIndexImpl lshIndex(
             @Value("${lsh.num-hash-tables:16}") int numHashTables,
             @Value("${lsh.num-bands:16}") int numBands,

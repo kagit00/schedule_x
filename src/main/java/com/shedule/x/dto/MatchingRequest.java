@@ -30,7 +30,7 @@ public class MatchingRequest {
     private int page;
 
     @ValidEnum(enumClass = MatchType.class, message = "Invalid match type")
-    private MatchType matchType;
+    private MatchType matchType = MatchType.AUTO;
 
     private String weightFunctionKey;
     private String partitionKey;

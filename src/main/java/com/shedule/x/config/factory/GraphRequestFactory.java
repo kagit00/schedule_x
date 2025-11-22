@@ -53,12 +53,12 @@ public final class GraphRequestFactory {
                 .build();
     }
 
-    public static PotentialMatchEntity convertToPotentialMatch(Edge edge, UUID groupId, UUID domainId, String pid) {
+    public static PotentialMatchEntity convertToPotentialMatch(EdgeDTO edge, UUID groupId, UUID domainId, String pid) {
         return PotentialMatchEntity.builder()
                 .matchedAt(DefaultValuesPopulator.getCurrentTimestamp())
-                .matchedReferenceId(edge.getToNode().getReferenceId())
-                .referenceId(edge.getFromNode().getReferenceId())
-                .compatibilityScore(edge.getWeight())
+                .matchedReferenceId(edge.getToNodeHash())
+                .referenceId(edge.getFromNodeHash())
+                .compatibilityScore((double) edge.getScore())
                 .groupId(groupId)
                 .domainId(domainId)
                 .processingCycleId(pid)
@@ -202,9 +202,9 @@ public final class GraphRequestFactory {
     public static QueueConfig getQueueConfig(UUID groupId, UUID domainId, String processingCycleId, QueueManagerConfig queueManagerConfig) {
         return QueueConfig.builder()
                 .groupId(groupId).processingCycleId(processingCycleId)
-                .capacity(queueManagerConfig.getCapacity()).boostBatchFactor(queueManagerConfig.getBoostBatchFactor())
-                .flushIntervalSeconds(queueManagerConfig.getFlushIntervalSeconds()).maxFinalBatchSize(queueManagerConfig.getMaxFinalBatchSize())
-                .drainWarningThreshold(queueManagerConfig.getDrainWarningThreshold()).domainId(domainId)
+                .capacity(queueManagerConfig.capacity()).boostBatchFactor(queueManagerConfig.boostBatchFactor())
+                .flushIntervalSeconds(queueManagerConfig.flushIntervalSeconds()).maxFinalBatchSize(queueManagerConfig.maxFinalBatchSize())
+                .drainWarningThreshold(queueManagerConfig.drainWarningThreshold()).domainId(domainId)
                 .build();
     }
 

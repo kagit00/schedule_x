@@ -11,7 +11,6 @@ import io.micrometer.core.instrument.Timer;
 
 import java.util.*;
 import io.micrometer.core.instrument.MeterRegistry;
-import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 
@@ -22,11 +21,10 @@ import org.apache.commons.lang3.tuple.Pair;
 import java.util.concurrent.ThreadLocalRandom;
 
 
+import org.springframework.beans.factory.annotation.Qualifier;
 
-import java.util.*;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.*;
-import java.util.concurrent.locks.*;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.stream.Collectors;
 
 @Slf4j
 public class LSHIndexImpl implements LSHIndex {
@@ -51,25 +49,33 @@ public class LSHIndexImpl implements LSHIndex {
     private volatile boolean shutdownInitiated = false;
     private final ThreadLocal<List<UUID>[]> updatesPool;
     private final ThreadLocal<short[]> hashBufferPool;
+    private final ReentrantLock buildingLock = new ReentrantLock();
 
-    public LSHIndexImpl(LSHConfig config, MeterRegistry meterRegistry, ExecutorService executor, GraphStore graphStore) {
+    public LSHIndexImpl(LSHConfig config,
+                        MeterRegistry meterRegistry,
+                        @Qualifier("indexExecutor") ExecutorService executor,
+                        GraphStore graphStore) {
         this.numHashTables = config.getNumHashTables();
         this.numBands = config.getNumBands();
         this.topK = config.getTopK();
-        this.meterRegistry = meterRegistry != null ? meterRegistry : new SimpleMeterRegistry();
-        this.executor = executor;
+        this.meterRegistry = meterRegistry;
         this.graphStore = graphStore;
+        this.executor = executor;
         this.nodeHashCache = initializeCache();
         this.candidateCountSummary = initializeCandidateCountSummary();
         this.hashCollisionCounter = initializeHashCollisionCounter();
         this.updatesPool = initializeUpdatesPool();
         this.hashBufferPool = initializeHashBufferPool();
         registerMetrics();
-        log.info("Initialized PERSISTENT LSHIndex with {} tables, {} bands, topK={}", numHashTables, numBands, topK);
+        log.info("Initialized LSHIndex with {} tables, {} bands, topK={}",
+                numHashTables, numBands, topK);
     }
 
     private Cache<UUID, short[]> initializeCache() {
-        return Caffeine.newBuilder().maximumSize(MAX_CACHE_SIZE).build();
+        return Caffeine.newBuilder()
+                .maximumSize(MAX_CACHE_SIZE)
+                .expireAfterWrite(10, TimeUnit.MINUTES)
+                .build();
     }
 
     private DistributionSummary initializeCandidateCountSummary() {
@@ -79,15 +85,15 @@ public class LSHIndexImpl implements LSHIndex {
     }
 
     private Counter initializeHashCollisionCounter() {
-        return Counter.builder("lsh_hash_collisions").register(meterRegistry);
+        return Counter.builder("lsh_hash_collisions")
+                .register(meterRegistry);
     }
 
     private ThreadLocal<List<UUID>[]> initializeUpdatesPool() {
         return ThreadLocal.withInitial(() -> {
-            @SuppressWarnings("unchecked")
             List<UUID>[] arr = new List[numHashTables * numBands];
             for (int i = 0; i < arr.length; i++) {
-                arr[i] = new ArrayList<>();
+                arr[i] = new ArrayList<>(16);
             }
             return arr;
         });
@@ -112,7 +118,14 @@ public class LSHIndexImpl implements LSHIndex {
         } catch (InterruptedException e) {
             log.error("Shutdown interrupted", e);
             Thread.currentThread().interrupt();
+        } finally {
+            cleanupThreadLocals();
         }
+    }
+
+    private void cleanupThreadLocals() {
+        updatesPool.remove();
+        hashBufferPool.remove();
     }
 
     @Override
@@ -138,7 +151,8 @@ public class LSHIndexImpl implements LSHIndex {
                     isBuilding = false;
                     long durationMs = TimeUnit.NANOSECONDS.toMillis(sample.stop(meterRegistry.timer("lsh_insert_duration")));
                     meterRegistry.counter("lsh_insert_total").increment(entries.size());
-                    log.info("Inserted {} entries, total: {}, {}ms", entries.size(), totalEntries.get(), durationMs);
+                    log.info("Inserted {} entries, total: {}, {}ms",
+                            entries.size(), totalEntries.get(), durationMs);
                 })
                 .exceptionally(ex -> {
                     isBuilding = false;
@@ -158,14 +172,27 @@ public class LSHIndexImpl implements LSHIndex {
             int[] metadata = e.getKey();
             if (nodeId == null || metadata == null || metadata.length == 0) continue;
 
-            short[] hashes = hashBufferPool.get();
-            for (int i = 0; i < numHashTables; i++) {
-                hashes[i] = (short) HashUtils.computeHash(metadata, i, numBands);
-            }
-            nodeHashCache.put(nodeId, Arrays.copyOf(hashes, numHashTables));
+            // Unified hash computation
+            short[] newHashes = HashUtils.computeHashes(metadata, numHashTables, numBands);
+            short[] oldHashes = nodeHashCache.getIfPresent(nodeId);
 
+            // Handle duplicate nodes - remove from old buckets
+            if (oldHashes != null) {
+                for (int i = 0; i < numHashTables; i++) {
+                    graphStore.removeFromBucket(i, oldHashes[i], nodeId);
+                }
+            }
+
+            // Cache new hashes
+            nodeHashCache.put(nodeId, Arrays.copyOf(newHashes, numHashTables));
+
+            // Add to new buckets
             for (int i = 0; i < numHashTables; i++) {
-                updates[i * numBands + hashes[i]].add(nodeId);
+                int bandIndex = newHashes[i] & 0xFFFF; // Ensure non-negative
+                List<UUID> bucket = updates[i * numBands + bandIndex];
+                if (!bucket.contains(nodeId)) {
+                    bucket.add(nodeId);
+                }
             }
         }
 
@@ -173,12 +200,24 @@ public class LSHIndexImpl implements LSHIndex {
             for (int b = 0; b < numBands; b++) {
                 List<UUID> list = updates[t * numBands + b];
                 if (!list.isEmpty()) {
+                    int before = graphStore.getBucket(t, b).size();
                     graphStore.addToBucket(t, b, list);
+                    int after = graphStore.getBucket(t, b).size();
+                    hashCollisionCounter.increment(after - before);
                     added += list.size();
                 }
             }
         }
         totalEntries.addAndGet(added);
+    }
+
+    @Override
+    public long getNodePriorityScore(UUID nodeId) {
+        short[] hashes = nodeHashCache.getIfPresent(nodeId);
+        if (hashes != null && hashes.length > 0) {
+            return hashes[0] & 0xFFFFL;
+        }
+        return nodeId.getMostSignificantBits() ^ nodeId.getLeastSignificantBits();
     }
 
     @Override
@@ -188,8 +227,9 @@ public class LSHIndexImpl implements LSHIndex {
         Set<UUID> candidates = ConcurrentHashMap.newKeySet();
 
         try {
-            if (metadata == null) return Collections.emptySet();
+            if (metadata == null || nodeId == null) return Collections.emptySet();
 
+            // Unified hash computation
             short[] hashes = nodeHashCache.getIfPresent(nodeId);
             if (hashes == null) {
                 hashes = HashUtils.computeHashes(metadata, numHashTables, numBands);
@@ -197,9 +237,20 @@ public class LSHIndexImpl implements LSHIndex {
             }
 
             for (int i = 0; i < numHashTables; i++) {
-                Set<UUID> bucket = graphStore.getBucket(i, (int) hashes[i]);
+                int bandIndex = hashes[i] & 0xFFFF;
+                Set<UUID> bucket = graphStore.getBucket(i, bandIndex);
                 candidates.addAll(bucket);
             }
+
+            // Apply topK filtering
+            if (candidates.size() > topK) {
+                candidates = candidates.stream()
+                        .limit(topK)
+                        .collect(Collectors.toSet());
+            }
+        } catch (Exception e) {
+            log.error("Query failed for node {}", nodeId, e);
+            return Collections.emptySet();
         } finally {
             if (sample && timer != null) {
                 timer.stop(meterRegistry.timer("lsh_query_duration_sampled"));
@@ -233,13 +284,86 @@ public class LSHIndexImpl implements LSHIndex {
     public long totalBucketsCount() { return totalEntries.get(); }
 
     @Override
-    public boolean isBuilding() { return isBuilding; }
+    public boolean isBuilding() {
+        return buildingLock.isHeldByCurrentThread() || isBuilding;
+    }
 
     @Override
     public void clean() {
-        graphStore.clearAllBuckets();
-        nodeHashCache.invalidateAll();
-        totalEntries.set(0L);
-        log.info("LSH index cleared (persistent buckets removed)");
+        buildingLock.lock();
+        try {
+            graphStore.clearAllBuckets();
+            nodeHashCache.invalidateAll();
+            totalEntries.set(0L);
+            log.info("LSH index cleared (persistent buckets removed)");
+        } finally {
+            buildingLock.unlock();
+        }
+    }
+
+    @Override
+    public void trimBuckets() {
+        buildingLock.lock();
+        try {
+            for (int t = 0; t < numHashTables; t++) {
+                for (int b = 0; b < numBands; b++) {
+                    Set<UUID> bucket = graphStore.getBucket(t, b);
+                    if (bucket.size() > BUCKET_TRIM_RATIO * MAX_CACHE_SIZE) {
+                        graphStore.trimBucket(t, b, (long) (bucket.size() * BUCKET_TRIM_RATIO));
+                    }
+                }
+            }
+        } finally {
+            buildingLock.unlock();
+        }
+    }
+
+    @Override
+    public void updateNode(UUID nodeId, int[] newMetadata) {
+        buildingLock.lock();
+        try {
+            if (newMetadata == null) {
+                throw new IllegalArgumentException("Metadata cannot be null");
+            }
+
+            // Remove old data
+            short[] oldHashes = nodeHashCache.getIfPresent(nodeId);
+            if (oldHashes != null) {
+                for (int i = 0; i < numHashTables; i++) {
+                    graphStore.removeFromBucket(i, oldHashes[i], nodeId);
+                }
+                nodeHashCache.invalidate(nodeId);
+            }
+
+            // Add new data
+            short[] newHashes = HashUtils.computeHashes(newMetadata, numHashTables, numBands);
+            nodeHashCache.put(nodeId, newHashes);
+            for (int i = 0; i < numHashTables; i++) {
+                int bandIndex = newHashes[i] & 0xFFFF;
+                graphStore.addToBucket(i, bandIndex, Collections.singleton(nodeId));
+            }
+            totalEntries.addAndGet(numHashTables);
+            log.debug("Updated node {}", nodeId);
+        } finally {
+            buildingLock.unlock();
+        }
+    }
+
+    @Override
+    public void removeNode(UUID nodeId) {
+        buildingLock.lock();
+        try {
+            short[] hashes = nodeHashCache.getIfPresent(nodeId);
+            if (hashes != null) {
+                for (int i = 0; i < numHashTables; i++) {
+                    graphStore.removeFromBucket(i, hashes[i], nodeId);
+                }
+                nodeHashCache.invalidate(nodeId);
+                totalEntries.addAndGet((long) -numHashTables * numBands);
+                log.debug("Removed node {}", nodeId);
+            }
+        } finally {
+            buildingLock.unlock();
+        }
     }
 }

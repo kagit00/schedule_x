@@ -99,7 +99,7 @@ public class PerfectMatchServiceImpl implements PerfectMatchService {
                     }
                     MatchingConfiguration config = configOptional.get();
                     MatchingGroup group = config.getGroup();
-                    MatchType matchType = graphPreProcessor.determineMatchType(groupId, domainId);
+                    MatchType matchType = graphPreProcessor.determineMatchTypeFromExistingData(groupId, domainId);
 
                     return GraphRequestFactory.buildMatchingContext(
                             groupId, domainId, 0, matchType, group.isCostBased(), group.getIndustry(), request

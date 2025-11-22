@@ -1,5 +1,6 @@
 package com.shedule.x.processors.matcher.strategies;
 
+import com.shedule.x.dto.EdgeDTO;
 import com.shedule.x.dto.MatchResult;
 import com.shedule.x.dto.MatchingRequest;
 import com.shedule.x.models.*;
@@ -75,10 +76,10 @@ public class HungarianMatchingStrategy implements MatchingStrategy {
 
             for (int i = 0; i < n; i++) {
                 Node from = currentLeftNodes.get(i);
-                for (Edge edge : graph.getEdgesFrom(from)) {
-                    Integer j = rightNodeIndex.get(edge.getToNode().getReferenceId());
+                for (EdgeDTO edge : graph.getEdgesFrom(from)) {
+                    Integer j = rightNodeIndex.get(edge.getFromNodeHash());
                     if (j != null) {
-                        costMatrix[i][j] = (int) -edge.getWeight(); // Negate weight for max matching
+                        costMatrix[i][j] = (int) -edge.getScore(); // Negate weight for max matching
                     }
                 }
             }

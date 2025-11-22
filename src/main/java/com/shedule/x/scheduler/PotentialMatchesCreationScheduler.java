@@ -1,14 +1,10 @@
 package com.shedule.x.scheduler;
 
-import com.google.common.util.concurrent.Uninterruptibles;
-import com.shedule.x.config.QueueConfig;
-import com.shedule.x.config.QueueManagerConfig;
-import com.shedule.x.config.factory.GraphRequestFactory;
-import com.shedule.x.config.factory.QueueManagerFactory;
+
+import com.shedule.x.dto.GroupTaskRequest;
 import com.shedule.x.models.Domain;
 import com.shedule.x.processors.MatchesCreationFinalizer;
 import com.shedule.x.processors.PotentialMatchesCreationJobExecutor;
-import com.shedule.x.processors.QueueManagerImpl;
 import com.shedule.x.repo.MatchingGroupRepository;
 import com.shedule.x.service.DomainService;
 import com.shedule.x.utils.basic.DefaultValuesPopulator;
@@ -23,7 +19,11 @@ import org.springframework.stereotype.Component;
 
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.*;
+import java.util.concurrent.*;
+import com.shedule.x.processors.PotentialMatchComputationProcessor;
+
+
 import java.util.*;
 import java.util.concurrent.*;
 
@@ -35,39 +35,28 @@ public class PotentialMatchesCreationScheduler {
     private final DomainService domainService;
     private final MatchingGroupRepository matchingGroupRepository;
     private final PotentialMatchesCreationJobExecutor jobExecutor;
+
+    // We now inject the Processor directly to handle lifecycle
+    private final PotentialMatchComputationProcessor processor;
+
     private final MeterRegistry meterRegistry;
     private final Semaphore domainSemaphore;
     private final ConcurrentMap<UUID, CompletableFuture<Void>> groupLocks = new ConcurrentHashMap<>();
     private final ExecutorService batchExecutor;
-    private final QueueManagerFactory queueManagerFactory;
     private final MatchesCreationFinalizer matchesCreationFinalizer;
-
-    @Value("${match.queue.capacity:500000}")
-    private int queueCapacity;
-
-    @Value("${match.flush-interval-seconds:5}")
-    private int flushIntervalSeconds;
-
-    @Value("${match.drain-warning-threshold:0.9}")
-    private double drainWarningThreshold;
-
-    @Value("${match.boost-batch-factor:2}")
-    private int boostBatchFactor;
 
     @Value("${match.max-final-batch-size:50000}")
     private int maxFinalBatchSize;
 
-    @Value("${match.shutdown-limit-seconds:3600}")
-    private int shutdownLimitSeconds;
-
-
+    @Value("${match.save.delay:300000}")
+    private long scheduleDelay;
 
     public PotentialMatchesCreationScheduler(
             DomainService domainService,
             MatchingGroupRepository matchingGroupRepository,
             PotentialMatchesCreationJobExecutor jobExecutor,
+            PotentialMatchComputationProcessor processor, // Injected
             MeterRegistry meterRegistry,
-            QueueManagerFactory queueManagerFactory,
             @Qualifier("matchCreationExecutorService") ExecutorService batchExecutor,
             @Value("${match.max-concurrent-domains:2}") int maxConcurrentDomains,
             MatchesCreationFinalizer matchesCreationFinalizer
@@ -75,166 +64,164 @@ public class PotentialMatchesCreationScheduler {
         this.domainService = domainService;
         this.matchingGroupRepository = matchingGroupRepository;
         this.jobExecutor = jobExecutor;
+        this.processor = processor;
         this.meterRegistry = meterRegistry;
-        this.queueManagerFactory = queueManagerFactory;
-        this.domainSemaphore = new Semaphore(maxConcurrentDomains, true);
         this.batchExecutor = batchExecutor;
         this.matchesCreationFinalizer = matchesCreationFinalizer;
 
-        if (batchExecutor instanceof ThreadPoolExecutor tpe) {
+        // Fair semaphore to prevents thread starvation for heavy domains
+        this.domainSemaphore = new Semaphore(maxConcurrentDomains, true);
+
+        validateExecutorPool(batchExecutor, maxConcurrentDomains);
+    }
+
+    private void validateExecutorPool(ExecutorService executor, int concurrentDomains) {
+        if (executor instanceof ThreadPoolExecutor tpe) {
             int poolSize = tpe.getMaximumPoolSize();
-            int requiredSize = maxConcurrentDomains + 4;
+            int requiredSize = concurrentDomains + 2; // +2 for overhead/overhead tasks
             if (poolSize < requiredSize) {
-                throw new IllegalArgumentException(
-                        "batchExecutor max pool size (" + poolSize + ") must be >= " + requiredSize);
+                log.warn("BatchExecutor pool size ({}) is small for maxConcurrentDomains ({}). Potential deadlock.",
+                        poolSize, concurrentDomains);
             }
         }
     }
 
     private void cleanupIdleGroupLocks() {
-        groupLocks.entrySet().removeIf(entry -> {
-            CompletableFuture<Void> future = entry.getValue();
-            return future.isDone();
-        });
+        groupLocks.entrySet().removeIf(entry -> entry.getValue().isDone());
     }
 
     @Scheduled(fixedDelayString = "${match.save.delay:300000}")
     public void processAllDomainsScheduled() {
         Timer.Sample sample = Timer.start(meterRegistry);
         String cycleId = DefaultValuesPopulator.getUid();
-        log.info("Starting batch matching cycleId={}", cycleId);
+        log.info("Starting BATCH MATCHING CYCLE | cycleId={}", cycleId);
 
         List<Domain> domains = domainService.getActiveDomains();
         if (domains.isEmpty()) {
-            log.info("No active domains");
+            log.info("No active domains found. Skipping cycle.");
             sample.stop(meterRegistry.timer("batch_matches_total_duration"));
             return;
         }
 
+        // 1. Flatten all work into a list of (Domain, GroupID) tuples
         List<CompletableFuture<Void>> allTasks = new ArrayList<>();
-        List<Map.Entry<Domain, UUID>> taskList = new ArrayList<>();
+        List<GroupTaskRequest> tasks = new ArrayList<>();
 
         for (Domain domain : domains) {
             List<UUID> groupIds = matchingGroupRepository.findGroupIdsByDomainId(domain.getId());
             for (UUID groupId : groupIds) {
-                taskList.add(new AbstractMap.SimpleEntry<>(domain, groupId));
+                tasks.add(new GroupTaskRequest(domain, groupId, cycleId));
             }
         }
 
-        for (Map.Entry<Domain, UUID> task : taskList) {
-            UUID domainId = task.getKey().getId();
-            UUID groupId = task.getValue();
-            allTasks.add(processGroupTask(groupId, domainId, cycleId));
+        log.info("Found {} groups to process across {} domains.", tasks.size(), domains.size());
+
+        // 2. Trigger Tasks (Non-blocking, chained)
+        for (GroupTaskRequest task : tasks) {
+            allTasks.add(processGroupTask(task));
         }
 
+        // 3. Wait for global completion (with hard timeout) or proceed async
         CompletableFuture.allOf(allTasks.toArray(new CompletableFuture[0]))
                 .orTimeout(3, TimeUnit.HOURS)
                 .whenCompleteAsync((v, error) -> {
-                    if (error instanceof TimeoutException) {
-                        log.error("BATCH CYCLE TIMEOUT AFTER 3 HOURS | cycleId={}", cycleId, error);
-                        allTasks.forEach(f -> f.cancel(true));
-                        meterRegistry.counter("batch_cycle_timeout_total").increment();
-                    } else if (error != null) {
-                        log.error("BATCH CYCLE FAILED | cycleId={}", cycleId, error);
-                        meterRegistry.counter("batch_cycle_failure_total").increment();
-                    } else {
-                        log.info("BATCH CYCLE COMPLETED SUCCESSFULLY | cycleId={} | groups={}", cycleId, allTasks.size());
-                        taskList.forEach(t -> matchesCreationFinalizer.finalize(true));
-                    }
-
+                    handleCycleCompletion(cycleId, allTasks, error);
                     sample.stop(meterRegistry.timer("batch_matches_total_duration"));
                     cleanupIdleGroupLocks();
+
+                    // Trigger finalizing logic (updating statuses, etc.)
+                    // Passing 'true' assuming batch mode logic
+                    tasks.forEach(t -> matchesCreationFinalizer.finalize(true));
+
                 }, batchExecutor);
     }
 
-
-    private CompletableFuture<Void> doFlushLoopAsync(UUID groupId, UUID domainId, String cycleId) {
-        return CompletableFuture.runAsync(() -> {
-            QueueManagerConfig config = new QueueManagerConfig(
-                    queueCapacity, flushIntervalSeconds, drainWarningThreshold,
-                    boostBatchFactor, maxFinalBatchSize);
-            QueueConfig queueConfig = GraphRequestFactory.getQueueConfig(
-                    groupId, domainId, DefaultValuesPopulator.getUid(), config);
-            QueueManagerImpl queueManager = queueManagerFactory.create(queueConfig);
-
-            if (queueManager == null) {
-                log.warn("No QueueManager created for groupId={}", groupId);
-                return;
+    /**
+     * Ensures serial execution for the same Group ID, but parallel execution across different Groups.
+     */
+    private CompletableFuture<Void> processGroupTask(GroupTaskRequest request) {
+        return groupLocks.compute(request.groupId(), (k, previousTask) -> {
+            if (previousTask == null || previousTask.isDone()) {
+                return executeGroupTaskChain(request);
+            } else {
+                // Chain onto the existing task for this group
+                log.info("Group {} is busy. Chaining task.", request.groupId());
+                return previousTask.thenCompose(v -> executeGroupTaskChain(request));
             }
-
-            long deadline = System.currentTimeMillis() + (shutdownLimitSeconds * 1000L);
-
-            while (true) {
-                long queueSize = queueManager.getQueueSize();
-                if (queueSize == 0) {
-                    log.info("Flush complete: all queued matches processed for groupId={}", groupId);
-                    break;
-                }
-
-                if (System.currentTimeMillis() > deadline) {
-                    log.error("FLUSH DEADLINE EXCEEDED ({}s). Dropping {} queued matches for groupId={}",
-                            shutdownLimitSeconds, queueSize, groupId);
-                    meterRegistry.counter("matches_dropped_due_to_flush_deadline",
-                            "groupId", groupId.toString()).increment(queueSize);
-                    break;
-                }
-
-                QueueManagerImpl.flushQueueBlocking(groupId, queueManagerFactory.getFlushSignalCallback());
-                Uninterruptibles.sleepUninterruptibly(100, TimeUnit.MILLISECONDS);
-            }
-        }, batchExecutor);
-    }
-
-    private CompletableFuture<Void> processGroupTask(UUID groupId, UUID domainId, String cycleId) {
-        CompletableFuture<Void> previousTask = groupLocks.get(groupId);
-
-        CompletableFuture<Void> currentTask;
-
-        if (previousTask == null || previousTask.isDone()) {
-            currentTask = executeGroupTask(groupId, domainId, cycleId);
-        } else {
-            currentTask = previousTask.thenCompose(v -> executeGroupTask(groupId, domainId, cycleId));
-        }
-
-        groupLocks.put(groupId, currentTask);
-
-        currentTask.whenComplete((v, e) -> {
-            groupLocks.compute(groupId, (k, existing) ->
-                    existing == currentTask && existing.isDone() ? null : existing
-            );
         });
-
-        return currentTask;
     }
 
-    private CompletableFuture<Void> executeGroupTask(UUID groupId, UUID domainId, String cycleId) {
-        return acquireSemaphoreAsync(domainSemaphore)
+    /**
+     * The Core Pipeline:
+     * 1. Acquire Semaphore (throttle domains)
+     * 2. Compute Matches (Job Executor) -> Writes to Queue
+     * 3. Drain Queue (Processor) -> Async flush of remaining memory/disk
+     * 4. Final Save (Processor) -> Stream from LMDB to SQL
+     * 5. Cleanup -> Close resources
+     */
+    private CompletableFuture<Void> executeGroupTaskChain(GroupTaskRequest req) {
+        return acquireSemaphoreAsync(domainSemaphore, req.groupId())
                 .thenCompose(v -> {
-                    log.info("START groupId={} domainId={} cycleId={}", groupId, domainId, cycleId);
+                    log.info("START PROCESSING | groupId={} | domainId={}", req.groupId(), req.domain().getId());
 
-                    return jobExecutor.processGroup(groupId, domainId, cycleId)
-                            .thenCompose(result -> doFlushLoopAsync(groupId, domainId, cycleId));
+                    // STEP 1: Compute & Ingest (Pushes to QueueManager)
+                    return jobExecutor.processGroup(req.groupId(), req.domain().getId(), req.cycleId());
+                })
+                .thenCompose(v -> {
+                    // STEP 2: Drain any remaining items in Queue/Disk to LMDB
+                    // The Processor handles the logic of pulling from the QueueManager
+                    log.debug("Draining pending matches | groupId={}", req.groupId());
+                    return processor.savePendingMatchesAsync(req.groupId(), req.domain().getId(), req.cycleId(), maxFinalBatchSize);
+                })
+                .thenCompose(v -> {
+                    // STEP 3: Streaming Final Save (LMDB -> SQL)
+                    // Assuming 'null' stream means Processor opens its own stream from GraphStore
+                    log.debug("Executing Final Save | groupId={}", req.groupId());
+                    return processor.saveFinalMatches(req.groupId(), req.domain().getId(), req.cycleId(), null, -1);
                 })
                 .whenCompleteAsync((v, error) -> {
+                    // STEP 4: Release & Cleanup (Always runs)
                     domainSemaphore.release();
 
+                    // Critical: Close QueueManager and delete spill files
+                    processor.cleanup(req.groupId());
+
                     if (error != null) {
-                        log.error("FAILED groupId={} domainId={} cycleId={}", groupId, domainId, cycleId, error);
-                        meterRegistry.counter("matches_creation_error", "groupId", groupId.toString()).increment();
+                        log.error("FAILED groupId={} | error={}", req.groupId(), error.getMessage());
+                        meterRegistry.counter("matches_creation_error", "groupId", req.groupId().toString()).increment();
                     } else {
-                        log.info("SUCCESS groupId={} domainId={} cycleId={}", groupId, domainId, cycleId);
+                        log.info("SUCCESS groupId={}", req.groupId());
                     }
 
+                    // Notify external finalizer (stats, status updates)
                     matchesCreationFinalizer.finalize(false);
                 }, batchExecutor);
     }
 
-    private CompletableFuture<Void> acquireSemaphoreAsync(Semaphore semaphore) {
-        CompletableFuture<Void> future = new CompletableFuture<>();
-        CompletableFuture.runAsync(() -> {
-            semaphore.acquireUninterruptibly();
-            future.complete(null);
-        });
-        return future;
+    private void handleCycleCompletion(String cycleId, List<CompletableFuture<Void>> tasks, Throwable error) {
+        if (error instanceof TimeoutException) {
+            log.error("BATCH CYCLE TIMEOUT (3h) | cycleId={}", cycleId);
+            tasks.forEach(f -> f.cancel(true));
+            meterRegistry.counter("batch_cycle_timeout").increment();
+        } else if (error != null) {
+            log.error("BATCH CYCLE FAILED | cycleId={}", cycleId, error);
+            meterRegistry.counter("batch_cycle_failure").increment();
+        } else {
+            log.info("BATCH CYCLE COMPLETED | cycleId={}", cycleId);
+        }
+    }
+
+    private CompletableFuture<Void> acquireSemaphoreAsync(Semaphore semaphore, UUID debugId) {
+        return CompletableFuture.runAsync(() -> {
+            try {
+                // Use tryAcquire to avoid indefinite deadlocks if threads get stuck
+                if (!semaphore.tryAcquire(120, TimeUnit.MINUTES)) {
+                    throw new CompletionException(new TimeoutException("Semaphore acquisition timed out for " + debugId));
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new CompletionException(e);
+            }
+        }, batchExecutor);
     }
 }

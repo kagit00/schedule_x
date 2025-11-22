@@ -13,6 +13,5 @@ import java.util.UUID;
 
 @Repository
 public interface NodesCursorRepository extends JpaRepository<NodesCursor, NodesCursorId> {
-
     Optional<NodesCursor> findByIdGroupIdAndIdDomainId(UUID groupId, UUID domainId);
 }

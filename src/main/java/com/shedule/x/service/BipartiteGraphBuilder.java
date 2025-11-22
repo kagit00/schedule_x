@@ -3,13 +3,14 @@ package com.shedule.x.service;
 import com.shedule.x.builder.BipartiteEdgeBuilder;
 import com.shedule.x.config.factory.AutoCloseableStream;
 import com.shedule.x.config.factory.GraphFactory;
+import com.shedule.x.dto.EdgeDTO;
 import com.shedule.x.dto.MatchingRequest;
 import com.shedule.x.exceptions.InternalServerErrorException;
 import com.shedule.x.models.Edge;
 import com.shedule.x.models.Graph;
 import com.shedule.x.models.Node;
-import com.shedule.x.processors.PotentialMatchSaver;
 import com.shedule.x.processors.GraphStore;
+import com.shedule.x.processors.PotentialMatchSaver;
 import com.shedule.x.utils.db.BatchUtils;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import io.github.resilience4j.retry.annotation.Retry;
@@ -59,14 +60,14 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
             MeterRegistry meterRegistry,
             @Qualifier("graphBuildExecutor") ExecutorService computeExecutor,
             PotentialMatchSaver matchSaver,
-            GraphStore graphStore,
+            GraphStore graphStoreImp,
             @Qualifier("persistenceExecutor") ExecutorService mappingExecutor) {
         this.bipartiteEdgeBuilder = Objects.requireNonNull(bipartiteEdgeBuilder,
                 "bipartiteEdgeBuilder must not be null");
         this.meterRegistry = Objects.requireNonNull(meterRegistry, "meterRegistry must not be null");
         this.computeExecutor = Objects.requireNonNull(computeExecutor, "computeExecutor must not be null");
         this.matchSaver = Objects.requireNonNull(matchSaver, "matchSaver must not be null");
-        this.graphStore = Objects.requireNonNull(graphStore, "graphStore must not be null");
+        this.graphStore = Objects.requireNonNull(graphStoreImp, "graphStore must not be null");
         this.mappingExecutor = Objects.requireNonNull(mappingExecutor, "mappingExecutor must not be null");
     }
 
@@ -252,7 +253,7 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
                         leftChunks.stream().flatMap(List::stream).collect(Collectors.toList()),
                         rightChunks.stream().flatMap(List::stream).collect(Collectors.toList()));
 
-                try (AutoCloseableStream<Edge> edgeStream = graphStore.streamEdges(domainId, groupId)) {
+                try (AutoCloseableStream<EdgeDTO> edgeStream = graphStore.streamEdges(domainId, groupId)) {
                     edgeStream.forEach(edge -> {
                         graph.addEdge(edge);
                         finalMatches.add(convertToPotentialMatch(edge, groupId, domainId));
@@ -337,11 +338,11 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
     }
 
 
-    private GraphRecords.PotentialMatch convertToPotentialMatch(Edge edge, UUID groupId, UUID domainId) {
+    private GraphRecords.PotentialMatch convertToPotentialMatch(EdgeDTO edge, UUID groupId, UUID domainId) {
         return new GraphRecords.PotentialMatch(
-                edge.getFromNode().getReferenceId(),
-                edge.getToNode().getReferenceId(),
-                edge.getWeight(),
+                edge.getFromNodeHash(),
+                edge.getToNodeHash(),
+                edge.getScore(),
                 groupId,
                 domainId);
     }

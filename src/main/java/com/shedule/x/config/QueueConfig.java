@@ -18,8 +18,18 @@ public class QueueConfig {
     private final int boostBatchFactor;
     private final int maxFinalBatchSize;
 
+    @Builder.Default
+    private final boolean useDiskSpill = true;
+
     public QueueConfig(UUID groupId, UUID domainId, String processingCycleId, int capacity,
                        int flushIntervalSeconds, double drainWarningThreshold, int boostBatchFactor, int maxFinalBatchSize) {
+        this(groupId, domainId, processingCycleId, capacity, flushIntervalSeconds,
+                drainWarningThreshold, boostBatchFactor, maxFinalBatchSize, true);
+    }
+
+    public QueueConfig(UUID groupId, UUID domainId, String processingCycleId, int capacity,
+                       int flushIntervalSeconds, double drainWarningThreshold, int boostBatchFactor,
+                       int maxFinalBatchSize, boolean useDiskSpill) {
         this.groupId = Objects.requireNonNull(groupId, "groupId must not be null");
         this.domainId = Objects.requireNonNull(domainId, "domainId must not be null");
         this.processingCycleId = Objects.requireNonNull(processingCycleId, "processingCycleId must not be null");
@@ -28,5 +38,6 @@ public class QueueConfig {
         this.drainWarningThreshold = drainWarningThreshold;
         this.boostBatchFactor = boostBatchFactor;
         this.maxFinalBatchSize = maxFinalBatchSize;
+        this.useDiskSpill = useDiskSpill;
     }
 }

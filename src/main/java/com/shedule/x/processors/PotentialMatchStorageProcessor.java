@@ -35,7 +35,7 @@ import java.util.function.Function;
 @Component
 public class PotentialMatchStorageProcessor {
 
-    private static final int MAX_CONCURRENT_SAVES = 4;
+    private static final int MAX_CONCURRENT_SAVES = 16;
     private static final long SAVE_TIMEOUT_MS = 1_800_000;
     private static final String TEMP_TABLE_COPY_SQL = "COPY temp_potential_matches " +
             "(id, group_id, domain_id, processing_cycle_id, reference_id, matched_reference_id, compatibility_score, matched_at) " +
@@ -242,12 +242,8 @@ public class PotentialMatchStorageProcessor {
 
         CompletableFuture.runAsync(() -> {
             try {
-                if (!semaphore.tryAcquire(600000L, TimeUnit.MILLISECONDS)) {
-                    future.completeExceptionally(
-                            new TimeoutException("Storage save" + " semaphore timeout for groupId=" + groupId));
-                } else {
-                    future.complete(null);
-                }
+                semaphore.acquire();
+                future.complete(null);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 future.completeExceptionally(e);

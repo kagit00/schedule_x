@@ -29,6 +29,8 @@ public class MatchParticipationHistory {
     @Column(name = "domain_id", nullable = false)
     private UUID domainId;
 
+    private String processingCycleId;
+
     @Column(name = "participated_at", nullable = false)
     private LocalDateTime participatedAt;
 }

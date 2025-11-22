@@ -17,16 +17,19 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 
 @Slf4j
 @Service
 public class PotentialMatchServiceImpl implements PotentialMatchService {
-    private static final int MAX_NODES = 2000;
-    private static final int NODE_ID_SUB_BATCH_SIZE = 1000;
+
+    // DB Safe-guards
+    private static final int NODE_FETCH_BATCH_SIZE = 1000;
     private static final int HISTORY_FLUSH_INTERVAL = 5;
 
     private final NodeFetchService nodeFetchService;
@@ -35,11 +38,13 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
     private final MeterRegistry meterRegistry;
     private final ExecutorService batchExecutor;
     private final ExecutorService ioExecutor;
-    private final ExecutorService graphExecutor;
     private final MatchParticipationHistoryRepository matchParticipationHistoryRepository;
+
+    // Buffers & Locks
     private final ConcurrentLinkedQueue<MatchParticipationHistory> historyBuffer = new ConcurrentLinkedQueue<>();
     private final AtomicInteger pageCounter = new AtomicInteger(0);
-    @Value("${match.batch-overlap:200}") private int batchOverlap;
+    // Limit concurrent DB calls for Node Hydration to avoid IO saturation
+    private final Semaphore dbFetchSemaphore = new Semaphore(4, true);
 
     public PotentialMatchServiceImpl(
             NodeFetchService nodeFetchService,
@@ -48,7 +53,6 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
             MeterRegistry meterRegistry,
             @Qualifier("matchCreationExecutorService") ExecutorService batchExecutor,
             @Qualifier("ioExecutorService") ExecutorService ioExecutor,
-            @Qualifier("graphExecutorService") ExecutorService graphExecutor,
             MatchParticipationHistoryRepository matchParticipationHistoryRepository
     ) {
         this.nodeFetchService = nodeFetchService;
@@ -57,173 +61,107 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
         this.meterRegistry = meterRegistry;
         this.batchExecutor = batchExecutor;
         this.ioExecutor = ioExecutor;
-        this.graphExecutor = graphExecutor;
         this.matchParticipationHistoryRepository = matchParticipationHistoryRepository;
     }
 
     @Override
-    public CompletableFuture<NodesCount> matchByGroup(MatchingRequest request, String cycleId) {
-        int limit = request.getLimit();
+    public CompletableFuture<NodesCount> processNodeBatch(List<UUID> nodeIds, MatchingRequest request) {
         UUID groupId = request.getGroupId();
         UUID domainId = request.getDomainId();
+        String cycleId = request.getProcessingCycleId();
+
+        if (nodeIds.isEmpty()) {
+            return CompletableFuture.completedFuture(
+                    NodesCount.builder().nodeCount(0).build());
+        }
 
         Timer.Sample sample = Timer.start(meterRegistry);
 
-        return fetchNodeIdsByCursor(groupId, domainId, limit, cycleId)
-                .thenComposeAsync(page -> {
-                    List<UUID> nodeIds = page.ids();
-                    int fetchedCount = nodeIds.size();
+        // 1. Hydrate Nodes (Fetch Entity Data from IDs)
+        return fetchNodesInSubBatches(nodeIds, groupId, request.getCreatedAfter())
+                .thenComposeAsync(nodes -> {
+                    log.info("Hydrated {} nodes for matching | groupId={}", nodes.size(), groupId);
 
-                    log.info("Fetched {} node IDs for groupId={}, domainId={}, cycleId={}",
-                            fetchedCount, groupId, domainId, cycleId);
+                    // 2. Audit Trail
+                    bufferMatchParticipationHistory(nodes, groupId, domainId, cycleId);
 
-                    if (fetchedCount == 0) {
-                        return CompletableFuture.completedFuture(
-                                NodesCount.builder().nodeCount(0).hasMoreNodes(false).build());
-                    }
+                    // 3. Delegate to Graph Engine
+                    return processGraphAndMatches(nodes, request, groupId, cycleId)
+                            .thenApply(v -> NodesCount.builder().nodeCount(nodes.size()).build());
 
-                    if (fetchedCount > MAX_NODES) {
-                        log.warn("Node count {} exceeds MAX_NODES={} for groupId={}, cycleId={}",
-                                fetchedCount, MAX_NODES, groupId, cycleId);
-                        meterRegistry.counter("node_count_exceeded",
-                                Tags.of("groupId", groupId.toString(), "cycleId", cycleId)).increment();
-                        return CompletableFuture.failedFuture(
-                                new IllegalStateException("Node count exceeds maximum limit"));
-                    }
-
-                    return fetchNodesInSubBatches(nodeIds, groupId, request.getCreatedAfter())
-                            .thenComposeAsync(nodes -> {
-                                log.info("Loaded {} nodes for matching, groupId={}, cycleId={}",
-                                        nodes.size(), groupId, cycleId);
-
-                                bufferMatchParticipationHistory(nodes, groupId, domainId, cycleId);
-
-                                return processGraphAndMatches(nodes, request, groupId, domainId, cycleId)
-                                        .thenApply(v -> NodesCount.builder()
-                                                .nodeCount(fetchedCount)
-                                                .hasMoreNodes(page.hasMore())
-                                                .build());
-                            }, batchExecutor);
                 }, batchExecutor)
-                .exceptionally(throwable -> {
-                    log.error("Matching failed for groupId={}, domainId={}, cycleId={}: {}",
-                            groupId, domainId, cycleId, throwable.getMessage(), throwable);
-                    meterRegistry.counter("matching_errors",
-                                    Tags.of("groupId", groupId.toString(), "domainId", domainId.toString(), "cycleId", cycleId))
-                            .increment();
-                    return NodesCount.builder().nodeCount(0).hasMoreNodes(false).build();
-                })
                 .whenComplete((result, throwable) -> {
-                    sample.stop(meterRegistry.timer("matching_duration",
-                            Tags.of("groupId", groupId.toString(),
-                                    "domainId", domainId.toString(),
-                                    "cycleId", cycleId,
-                                    "nodeCount", String.valueOf(result.nodeCount()))));
-
-                    meterRegistry.counter("nodes_processed_total",
-                                    Tags.of("groupId", groupId.toString(), "domainId", domainId.toString(), "cycleId", cycleId))
-                            .increment(result.nodeCount());
-
-                    flushHistoryIfNeeded();
+                    long duration = sample.stop(meterRegistry.timer("matching_batch_duration", "groupId", groupId.toString()));
+                    if (throwable != null) {
+                        log.error("Batch failed | groupId={} | cycleId={}", groupId, cycleId, throwable);
+                        meterRegistry.counter("matching_batch_errors", "groupId", groupId.toString()).increment();
+                    } else {
+                        flushHistoryIfNeeded();
+                    }
                 });
-    }
-
-    private CompletableFuture<CursorPage> fetchNodeIdsByCursor(
-            UUID groupId, UUID domainId, int limit, String cycleId) {
-        return nodeFetchService.fetchNodeIdsByCursor(groupId, domainId, limit, cycleId);
     }
 
     private CompletableFuture<List<Node>> fetchNodesInSubBatches(
             List<UUID> nodeIds, UUID groupId, LocalDateTime createdAfter) {
 
-        List<List<UUID>> subBatches = Lists.partition(nodeIds, NODE_ID_SUB_BATCH_SIZE);
+        List<List<UUID>> partitions = Lists.partition(nodeIds, NODE_FETCH_BATCH_SIZE);
+        List<CompletableFuture<List<Node>>> futures = new ArrayList<>();
 
-        if (subBatches.isEmpty()) {
-            return CompletableFuture.completedFuture(Collections.emptyList());
+        for (List<UUID> subBatch : partitions) {
+            // Async acquire semaphore to prevent DB thrashing
+            futures.add(acquireDbSemaphore()
+                    .thenCompose(v -> nodeFetchService.fetchNodesInBatchesAsync(subBatch, groupId, createdAfter))
+                    .whenComplete((res, ex) -> dbFetchSemaphore.release())
+            );
         }
 
-        List<Node> allNodes = Collections.synchronizedList(new ArrayList<>());
-        Semaphore semaphore = new Semaphore(4);
-
-        List<CompletableFuture<Void>> futures = subBatches.stream()
-                .map(subBatch -> acquireSemaphoreAsync(semaphore)
-                        .thenComposeAsync(v ->
-                                        nodeFetchService.fetchNodesInBatchesAsync(subBatch, groupId, createdAfter)
-                                                .thenAccept(allNodes::addAll)
-                                                .whenComplete((res, ex) -> semaphore.release()),
-                                batchExecutor))
-                .toList();
-
         return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
-                .thenApply(v -> new ArrayList<>(allNodes));
-    }
-
-    private CompletableFuture<Void> acquireSemaphoreAsync(Semaphore semaphore) {
-        CompletableFuture<Void> future = new CompletableFuture<>();
-        CompletableFuture.runAsync(() -> {
-            try {
-                if (!semaphore.tryAcquire(60, TimeUnit.SECONDS)) {
-                    future.completeExceptionally(new TimeoutException("Semaphore acquisition timeout"));
-                } else {
-                    future.complete(null);
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                future.completeExceptionally(e);
-            }
-        });
-        return future;
+                .thenApply(v -> futures.stream()
+                        .map(CompletableFuture::join) // Safe to join here as they are all done
+                        .flatMap(List::stream)
+                        .collect(Collectors.toList())
+                );
     }
 
     private CompletableFuture<Void> processGraphAndMatches(
-            List<Node> nodes,
-            MatchingRequest request,
-            UUID groupId,
-            UUID domainId,
-            String cycleId) {
+            List<Node> nodes, MatchingRequest request, UUID groupId, String cycleId) {
 
-        if (nodes.isEmpty()) {
-            return CompletableFuture.completedFuture(null);
-        }
+        if (nodes.isEmpty()) return CompletableFuture.completedFuture(null);
 
+        // Decorate request
         request.setNumberOfNodes(nodes.size());
-        String weightFunctionKey = weightFunctionResolver.resolveWeightFunctionKey(groupId);
-        request.setWeightFunctionKey(weightFunctionKey);
+        request.setWeightFunctionKey(weightFunctionResolver.resolveWeightFunctionKey(groupId));
 
+        // Call the GraphPreProcessor we fixed earlier
         return graphPreProcessor.buildGraph(nodes, request)
                 .thenAcceptAsync(graphResult -> {
-                    log.info("Graph built for {} nodes, groupId={}, cycleId={}", nodes.size(), groupId, cycleId);
+                    // Mark as processed only after GraphBuilder accepts them
+                    List<UUID> processedIds = nodes.stream().map(Node::getId).toList();
+                    nodeFetchService.markNodesAsProcessed(processedIds, groupId);
+                }, batchExecutor);
+    }
 
-                    List<UUID> nodeIdsToMark = nodes.stream()
-                            .map(Node::getId)
-                            .filter(Objects::nonNull)
-                            .toList();
-
-                    if (!nodeIdsToMark.isEmpty()) {
-                        nodeFetchService.markNodesAsProcessed(nodeIdsToMark, groupId);
-                        log.debug("Marked {} nodes as processed, groupId={}", nodeIdsToMark.size(), groupId);
-                    }
-                }, graphExecutor)
-                .exceptionally(throwable -> {
-                    log.error("Graph processing failed for groupId={}, cycleId={}: {}",
-                            groupId, cycleId, throwable.getMessage(), throwable);
-                    meterRegistry.counter("graph_processing_errors",
-                            Tags.of("groupId", groupId.toString(), "cycleId", cycleId)).increment();
-                    throw new CompletionException("Graph processing failed", throwable);
-                });
+    private CompletableFuture<Void> acquireDbSemaphore() {
+        return CompletableFuture.runAsync(() -> {
+            try {
+                if (!dbFetchSemaphore.tryAcquire(60, TimeUnit.SECONDS)) {
+                    throw new CompletionException(new TimeoutException("DB Semaphore timeout"));
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new CompletionException(e);
+            }
+        });
     }
 
     private void bufferMatchParticipationHistory(List<Node> nodes, UUID groupId, UUID domainId, String cycleId) {
-        LocalDateTime now = DefaultValuesPopulator.getCurrentTimestamp();
-        List<MatchParticipationHistory> entries = nodes.stream()
-                .map(node -> MatchParticipationHistory.builder()
-                        .participatedAt(now)
-                        .nodeId(node.getId())
-                        .groupId(groupId)
-                        .domainId(domainId)
-                        .build())
-                .toList();
-        historyBuffer.addAll(entries);
+        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC); // Use consistent clock
+        nodes.forEach(node -> historyBuffer.offer(
+                MatchParticipationHistory.builder()
+                        .participatedAt(now).nodeId(node.getId())
+                        .groupId(groupId).domainId(domainId)
+                        .processingCycleId(cycleId)
+                        .build()));
     }
 
     private void flushHistoryIfNeeded() {
@@ -231,14 +169,13 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
             CompletableFuture.runAsync(() -> {
                 List<MatchParticipationHistory> entries = new ArrayList<>();
                 MatchParticipationHistory entry;
-                while ((entry = historyBuffer.poll()) != null) {
+                int count = 0;
+                while (count < 2000 && (entry = historyBuffer.poll()) != null) {
                     entries.add(entry);
+                    count++;
                 }
-                try {
+                if (!entries.isEmpty()) {
                     matchParticipationHistoryRepository.saveAll(entries);
-                    log.info("Flushed {} match participation history entries", entries.size());
-                } catch (Exception e) {
-                    log.warn("Failed to flush match participation history: {}", e.getMessage());
                 }
             }, ioExecutor);
         }

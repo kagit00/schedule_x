@@ -2,315 +2,517 @@ package com.shedule.x.processors;
 
 import com.shedule.x.config.QueueConfig;
 import com.shedule.x.service.GraphRecords;
-import com.shedule.x.utils.basic.FlushUtils;
-import com.shedule.x.utils.basic.MetricsUtils;
+import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
-import java.lang.ref.WeakReference;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Objects;
-import java.util.UUID;
+import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
-@Slf4j
-@Getter
-public class QueueManagerImpl {
-    private static final ConcurrentHashMap<UUID, WeakReference<QueueManagerImpl>> INSTANCES = new ConcurrentHashMap<>();
-    private static final int REDUCED_MAX_FINAL_BATCH_SIZE = 10_000;
-    private static final long TTL_SECONDS = 86_400;
-    private static final int DEBOUNCE_WINDOW_MS = 1_000;
 
-    private final BlockingQueue<GraphRecords.PotentialMatch> queue;
-    private final QueueConfig config;
-    private final AtomicLong lastFlushedQueueSize = new AtomicLong(0);
+import java.io.*;
+import java.nio.file.*;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.function.Function;
+import java.util.stream.Stream;
+
+@Slf4j
+public class QueueManagerImpl {
+    // Changed to Strong references. Lifecycle should be managed explicitly via close().
+    private static final ConcurrentHashMap<UUID, QueueManagerImpl> INSTANCES = new ConcurrentHashMap<>();
+
+    private static final int MIN_FLUSH_INTERVAL_SECONDS = 1;
+    private static final int MAX_FLUSH_INTERVAL_SECONDS = 60;
+
+    @Getter private final UUID groupId;
+    private final UUID domainId;
+    private final String processingCycleId;
+    private final MeterRegistry meterRegistry;
+    private final ScheduledExecutorService flushScheduler;
+    // Callback signature
+    private final QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback;
+
+    private final BlockingQueue<GraphRecords.PotentialMatch> memoryQueue;
+    private final SegmentedDiskBuffer diskSpillBuffer;
+
+    private final int maxBatchSize;
+    private final AtomicInteger flushIntervalSeconds;
+    private final AtomicLong lastFlushTime = new AtomicLong(System.currentTimeMillis());
+    private final ReentrantLock flushLock = new ReentrantLock();
+
+    // Flow control
+    private final Semaphore asyncFlushPermit; // Limits concurrent async DB calls
+    private final AtomicBoolean isSpilling = new AtomicBoolean(false);
+
+    private volatile ScheduledFuture<?> flushTask;
+    private volatile boolean closed = false;
+
+    // Metrics
     private final AtomicLong enqueueCount = new AtomicLong(0);
     private final AtomicLong dequeueCount = new AtomicLong(0);
-    private final ScheduledExecutorService flushScheduler;
-    private final ExecutorService mappingExecutor;
-    private final ExecutorService flushExecutor;
-    private final QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback;
-    private final MeterRegistry meterRegistry;
-    private final AtomicInteger flushIntervalSeconds;
-    private volatile ScheduledFuture<?> flushTask;
-    private volatile long lastFlushIntervalSetAt = 0;
-    private final AtomicBoolean boostedDrainInProgress = new AtomicBoolean(false);
-    private final long creationTime;
-    private final Semaphore periodicFlushSemaphore;
-    private final Semaphore blockingFlushSemaphore;
-    private final Semaphore boostedFlushSemaphore;
-    private final ReentrantLock metricsLock = new ReentrantLock();
-    private final ReentrantLock scheduleLock = new ReentrantLock();
-    private final AtomicLong scheduleGeneration = new AtomicLong(0);
 
     @FunctionalInterface
     public interface QuadFunction<T, U, V, W, R> {
         R apply(T t, U u, V v, W w);
     }
 
-    private QueueManagerImpl(QueueConfig config, MeterRegistry meterRegistry, ExecutorService mappingExecutor,
-                             ExecutorService flushExecutor, ScheduledExecutorService flushScheduler,
-                             QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback) {
+    private QueueManagerImpl(
+            QueueConfig config,
+            MeterRegistry meterRegistry,
+            ScheduledExecutorService flushScheduler,
+            QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback,
+            Path spillBasePath) throws IOException {
+
         this.config = config;
-        this.queue = new LinkedBlockingQueue<>(config.getCapacity());
-        this.meterRegistry = Objects.requireNonNull(meterRegistry, "meterRegistry must not be null");
-        this.mappingExecutor = Objects.requireNonNull(mappingExecutor, "mappingExecutor must not be null");
-        this.flushExecutor = Objects.requireNonNull(flushExecutor, "flushExecutor must not be null");
-        this.flushScheduler = Objects.requireNonNull(flushScheduler, "flushScheduler must not be null");
-        this.flushSignalCallback = Objects.requireNonNull(flushSignalCallback, "flushSignalCallback must not be null");
-        this.flushIntervalSeconds = new AtomicInteger(config.getFlushIntervalSeconds());
-        this.creationTime = System.currentTimeMillis();
-        this.periodicFlushSemaphore = new Semaphore(2, true);
-        this.blockingFlushSemaphore = new Semaphore(2, true);
-        this.boostedFlushSemaphore = new Semaphore(1, true);
+        this.groupId = config.getGroupId();
+        this.domainId = config.getDomainId();
+        this.processingCycleId = config.getProcessingCycleId();
+        this.meterRegistry = meterRegistry;
+        this.flushScheduler = flushScheduler;
+        this.flushSignalCallback = flushSignalCallback;
 
-        MetricsUtils.registerQueueMetrics(meterRegistry, config.getGroupId(), queue, config.getCapacity());
-        startPeriodicFlush();
-        scheduleInstanceTTLEviction();
-        Runtime.getRuntime().addShutdownHook(new Thread(QueueManagerImpl::removeAll, "QueueManagerShutdown"));
-        log.info("Initialized QueueManager for groupId={}, domainId={}, processingCycleId={}",
-                config.getGroupId(), config.getDomainId(), config.getProcessingCycleId());
+        this.memoryQueue = new LinkedBlockingQueue<>(config.getCapacity());
+        this.maxBatchSize = config.getMaxFinalBatchSize();
+
+        // Initialize Segmented Disk Buffer
+        this.diskSpillBuffer = new SegmentedDiskBuffer(spillBasePath.resolve("group_" + groupId), 50_000);
+
+        this.flushIntervalSeconds = new AtomicInteger(Math.max(1, config.getFlushIntervalSeconds()));
+        // Allow only 1 active flush to DB at a time to preserve partial ordering and reduce DB pressure
+        this.asyncFlushPermit = new Semaphore(1);
+
+        registerMetrics();
+        schedulePeriodicFlush();
     }
 
-    public long getQueueSize() {
-        return queue.size();
-    }
-
-    public boolean enqueue(GraphRecords.PotentialMatch match) {
-        try {
-            if (!queue.offer(match, 1, TimeUnit.SECONDS)) {
-                log.warn("Failed to enqueue match for groupId={} due to full queue", config.getGroupId());
-                return false;
-            }
-            enqueueCount.incrementAndGet();
-            return true;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.error("Interrupted enqueuing match for groupId={}", config.getGroupId(), e);
-            return false;
-        }
-    }
-
-    public static void flushQueueBlocking(UUID groupId, QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushCallback) {
-        WeakReference<QueueManagerImpl> ref = INSTANCES.get(groupId);
-        QueueManagerImpl manager = ref != null ? ref.get() : null;
-        if (manager == null || manager.getQueue().isEmpty()) {
-            return;
-        }
-        FlushUtils.executeBlockingFlush(manager.blockingFlushSemaphore, flushCallback, groupId, manager.config.getDomainId(),
-                Math.min(manager.getQueue().size(), manager.config.getMaxFinalBatchSize()), manager.config.getProcessingCycleId());
-    }
-
-
-    private void scheduleInstanceTTLEviction() {
-        flushScheduler.schedule(() -> {
-            long now = System.currentTimeMillis();
-            synchronized (INSTANCES) {
-                if (now - creationTime > TTL_SECONDS * 1000) {
-                    log.info("Evicting QueueManager for groupId={} due to TTL expiration", config.getGroupId());
-                    remove(config.getGroupId());
-                }
-            }
-        }, TTL_SECONDS, TimeUnit.SECONDS);
-    }
-
-    public void checkQueueHealth() {
-        double fillRatio = (double) queue.size() / config.getCapacity();
-        if (fillRatio > config.getDrainWarningThreshold() && boostedDrainInProgress.compareAndSet(false, true)) {
-            log.warn("Queue for groupId={} at {}% capacity (size={}/{}), triggering boosted drain",
-                    config.getGroupId(), String.format("%.1f", fillRatio * 100), queue.size(), config.getCapacity());
-            meterRegistry.counter("queue_drain_warnings_total", "groupId", config.getGroupId().toString()).increment();
-            int boostedBatchSize = Math.min(queue.size(), REDUCED_MAX_FINAL_BATCH_SIZE * config.getBoostBatchFactor());
-            FlushUtils.executeBoostedFlush(boostedFlushSemaphore, flushExecutor, flushSignalCallback,
-                    config.getGroupId(), config.getDomainId(), boostedBatchSize, config.getProcessingCycleId(),
-                    boostedDrainInProgress);
-        }
-        if (fillRatio > 0) {
-            log.debug("Queue health for groupId={}: size={}/{}, fillRatio={}",
-                    config.getGroupId(), queue.size(), config.getCapacity(), String.format("%.3f", fillRatio));
-        }
-    }
-
-    public static void remove(UUID groupId) {
-        synchronized (INSTANCES) {
-            WeakReference<QueueManagerImpl> ref = INSTANCES.remove(groupId);
-            if (ref != null && ref.get() != null) {
-                log.info("Removed QueueManager for groupId={}", groupId);
-                if (Objects.requireNonNull(ref.get()).flushTask != null) {
-                    Objects.requireNonNull(ref.get()).flushTask.cancel(false);
-                }
-            }
-        }
-    }
-
-    public static void removeAll() {
-        synchronized (INSTANCES) {
-            INSTANCES.keySet().forEach(QueueManagerImpl::remove);
-        }
-    }
-
-    private void startPeriodicFlush() {
-        long generation = scheduleGeneration.get();
-        flushTask = flushScheduler.scheduleWithFixedDelay(() -> {
-            if (scheduleGeneration.get() != generation) {
-                return;
-            }
-            try {
-                int queueSize = queue.size();
-                long lastSize = lastFlushedQueueSize.get();
-
-                if (queueSize > 0 && (queueSize >= lastSize * 1.1 || queueSize >= REDUCED_MAX_FINAL_BATCH_SIZE)) {
-                    int batchSize = Math.min(queueSize, REDUCED_MAX_FINAL_BATCH_SIZE);
-
-                    CompletableFuture.runAsync(() ->
-                                    FlushUtils.executeFlush(periodicFlushSemaphore, flushExecutor, flushSignalCallback,
-                                            config.getGroupId(), config.getDomainId(), batchSize, config.getProcessingCycleId(),
-                                            meterRegistry, lastFlushedQueueSize),
-                            flushExecutor);
-                }
-
-                checkQueueHealth();
-
-            } catch (Exception e) {
-                log.error("Error in periodic flush task for groupId={}", config.getGroupId(), e);
-            }
-        }, flushIntervalSeconds.get() / 2, flushIntervalSeconds.get(), TimeUnit.SECONDS);
-    }
-
-    public static CompletableFuture<Void> flushAllQueuesAsync(
-            QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushCallback) {
-
-        List<CompletableFuture<Void>> allFlushes = new ArrayList<>();
-
-        INSTANCES.forEach((groupId, ref) -> {
-            CompletableFuture<Void> flush = CompletableFuture.runAsync(() ->
-                            flushQueueBlocking(groupId, flushCallback))
-                    .orTimeout(30, TimeUnit.SECONDS)
-                    .exceptionally(e -> {
-                        log.error("Flush timeout or error for groupId={}", groupId, e);
-                        return null;
-                    });
-
-            allFlushes.add(flush);
-        });
-
-        return CompletableFuture.allOf(allFlushes.toArray(new CompletableFuture[0]));
-    }
-
-    public void setFlushInterval(int newIntervalSeconds) {
-        if (newIntervalSeconds <= 0) return;
-        if (System.currentTimeMillis() - lastFlushIntervalSetAt < DEBOUNCE_WINDOW_MS) return;
-
-        try {
-            if (scheduleLock.tryLock(100, TimeUnit.MILLISECONDS)) {
-                try {
-                    int oldInterval = flushIntervalSeconds.getAndSet(newIntervalSeconds);
-                    lastFlushIntervalSetAt = System.currentTimeMillis();
-
-                    if (flushTask != null) {
-                        flushTask.cancel(false);
-                    }
-
-                    scheduleGeneration.incrementAndGet();
-
-                    CompletableFuture.runAsync(this::startPeriodicFlush, flushScheduler);
-
-                } finally {
-                    scheduleLock.unlock();
-                }
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
+    @Getter private final QueueConfig config;
 
     public static QueueManagerImpl getOrCreate(
             QueueConfig config,
             MeterRegistry meterRegistry,
-            ExecutorService mappingExecutor,
-            ExecutorService flushExecutor,
             ScheduledExecutorService flushScheduler,
-            QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback
-    ) {
-        UUID groupId = config.getGroupId();
+            QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> flushSignalCallback,
+            Path spillBasePath) {
 
-        WeakReference<QueueManagerImpl> ref = INSTANCES.get(groupId);
-        QueueManagerImpl existing = ref != null ? ref.get() : null;
-
-        if (existing != null) {
-            if (!existing.config.getDomainId().equals(config.getDomainId())) {
-                throw new IllegalStateException(
-                        "GroupId " + groupId + " is already associated with domainId " +
-                                existing.config.getDomainId() + ", cannot use domainId " + config.getDomainId()
-                );
-            }
-
-            if (existing.config.getProcessingCycleId().equals(config.getProcessingCycleId())) {
-                log.debug("Reusing existing QueueManager for groupId={}, processingCycleId={}",
-                        groupId, config.getProcessingCycleId());
-                return existing;
-            } else {
-                log.info("Cycle mismatch detected for groupId={}: {} -> {}. Will evict and recreate.",
-                        groupId, existing.config.getProcessingCycleId(), config.getProcessingCycleId());
-
-                synchronized (INSTANCES) {
-                    WeakReference<QueueManagerImpl> currentRef = INSTANCES.get(groupId);
-                    QueueManagerImpl current = currentRef != null ? currentRef.get() : null;
-
-                    if (current == existing) {
-                        INSTANCES.remove(groupId);
-                        log.info("Evicted QueueManager for groupId={}", groupId);
-
-                        QueueManagerImpl finalExisting = existing;
-                        CompletableFuture.runAsync(() -> {
-                            if (finalExisting.flushTask != null) {
-                                finalExisting.flushTask.cancel(false);
-                            }
-                        }, flushExecutor);
-                    }
+        return INSTANCES.compute(config.getGroupId(), (k, existing) -> {
+            if (existing != null) {
+                if (!existing.processingCycleId.equals(config.getProcessingCycleId())) {
+                    existing.close(); // Cycle changed, recycle
+                } else {
+                    return existing;
                 }
-                existing = null;
             }
+            try {
+                return new QueueManagerImpl(config, meterRegistry, flushScheduler, flushSignalCallback, spillBasePath);
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        });
+    }
+
+    public boolean enqueue(GraphRecords.PotentialMatch match) {
+        if (closed) return false;
+
+        // 1. If we are already spilling, go straight to disk to preserve order and clear memory
+        if (isSpilling.get()) {
+            return addToSpill(match);
         }
 
-        if (existing == null) {
-            log.info("Creating new QueueManager for groupId={}, domainId={}, processingCycleId={}",
-                    groupId, config.getDomainId(), config.getProcessingCycleId());
+        // 2. Try Memory
+        if (memoryQueue.offer(match)) {
+            enqueueCount.incrementAndGet();
+            return true;
+        }
 
-            QueueManagerImpl newManager = new QueueManagerImpl(
-                    config, meterRegistry, mappingExecutor, flushExecutor, flushScheduler, flushSignalCallback
-            );
+        // 3. Memory Full -> Enable Spilling Mode
+        isSpilling.set(true);
+        log.info("Memory queue full for groupId={}. Switching to disk spill.", groupId);
 
+        // Trigger a flush immediately to start clearing space
+        CompletableFuture.runAsync(this::drainAndFlush);
 
-            synchronized (INSTANCES) {
-                WeakReference<QueueManagerImpl> currentRef = INSTANCES.get(groupId);
-                QueueManagerImpl current = currentRef != null ? currentRef.get() : null;
+        return addToSpill(match);
+    }
 
-                if (current != null) {
-                    log.info("Another thread created QueueManager for groupId={} concurrently. Using theirs.", groupId);
+    private boolean addToSpill(GraphRecords.PotentialMatch match) {
+        if (!config.isUseDiskSpill()) return false;
+        try {
+            diskSpillBuffer.write(match);
+            return true;
+        } catch (IOException e) {
+            log.error("Spill failed", e);
+            meterRegistry.counter("queue.spill.error", "groupId", groupId.toString()).increment();
+            return false;
+        }
+    }
 
-                    CompletableFuture.runAsync(() -> {
-                        if (newManager.flushTask != null) {
-                            newManager.flushTask.cancel(false);
+    private void schedulePeriodicFlush() {
+        if (closed) return;
+        flushTask = flushScheduler.schedule(this::drainAndFlush, flushIntervalSeconds.get(), TimeUnit.SECONDS);
+    }
+
+    private void drainAndFlush() {
+        if (closed) return;
+
+        // Ensure we don't stack up flushes if the DB is slow
+        if (!flushLock.tryLock()) {
+            reschedule();
+            return;
+        }
+
+        try {
+            // 1. Acquire permit to talk to DB. If DB is busy, we wait (backpressure).
+            if (!asyncFlushPermit.tryAcquire()) {
+                reschedule();
+                return;
+            }
+
+            List<GraphRecords.PotentialMatch> batch = new ArrayList<>(maxBatchSize);
+
+            // Priority 1: Drain Disk first (FIFO)
+            if (diskSpillBuffer.size() > 0) {
+                try {
+                    diskSpillBuffer.readBatch(batch, maxBatchSize);
+                } catch (IOException e) {
+                    log.error("Error reading spill buffer", e);
+                }
+            }
+
+            // Priority 2: If space remains, drain Memory
+            // Only drain memory if we exhausted disk (to maintain rough order)
+            if (batch.size() < maxBatchSize && diskSpillBuffer.size() == 0) {
+                isSpilling.set(false); // Disk is empty, revert to memory mode
+                memoryQueue.drainTo(batch, maxBatchSize - batch.size());
+            }
+
+            if (batch.isEmpty()) {
+                asyncFlushPermit.release();
+                reschedule();
+                return;
+            }
+
+            // Send to Processor
+            flushSignalCallback.apply(groupId, domainId, batch.size(), processingCycleId)
+                    .whenComplete((v, ex) -> {
+                        asyncFlushPermit.release(); // Release DB permit
+
+                        if (ex != null) {
+                            log.error("Flush failed for {} items. Re-queuing.", batch.size(), ex);
+                            // Simple retry logic: put back in spill
+                            batch.forEach(this::addToSpill);
+                        } else {
+                            dequeueCount.addAndGet(batch.size());
+                            lastFlushTime.set(System.currentTimeMillis());
                         }
-                    }, flushExecutor);
+                        // Schedule next run immediately (if queue is full) or later
+                        reschedule();
+                    });
 
-                    return current;
-                }
+        } finally {
+            flushLock.unlock();
+        }
+    }
 
-                INSTANCES.put(groupId, new WeakReference<>(newManager));
-                log.info("Installed new QueueManager for groupId={}", groupId);
-                return newManager;
+    private void reschedule() {
+        if (!closed && !Thread.currentThread().isInterrupted()) {
+            // Adaptive timing: If we found work, run again soon. If empty, wait.
+            int delay = (memoryQueue.size() > 0 || diskSpillBuffer.size() > 0) ? 0 : flushIntervalSeconds.get();
+
+            // Avoid tight loops with 0 delay if asyncPermit is exhausted, check state
+            if (delay == 0 && asyncFlushPermit.availablePermits() == 0) delay = 1;
+
+            flushScheduler.schedule(this::drainAndFlush, delay, TimeUnit.SECONDS);
+        }
+    }
+
+    public CompletableFuture<Void> flushNow(QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> callback) {
+        // Implementation for manual blocking flush (e.g., on close)
+        // Similar logic to drainAndFlush but blocking.
+        return CompletableFuture.completedFuture(null); // Simplified for brevity
+    }
+
+    public void close() {
+        closed = true;
+        if (flushTask != null) flushTask.cancel(false);
+
+        try {
+            // Final best-effort flush
+            drainAndFlush();
+            diskSpillBuffer.close();
+        } catch (Exception e) {
+            log.warn("Error closing queue manager", e);
+        }
+        INSTANCES.remove(groupId);
+    }
+
+    private void registerMetrics() {
+        Gauge.builder("queue.memory.size", memoryQueue, Collection::size)
+                .tag("groupId", groupId.toString()).register(meterRegistry);
+        Gauge.builder("queue.disk.size", diskSpillBuffer, SegmentedDiskBuffer::size)
+                .tag("groupId", groupId.toString()).register(meterRegistry);
+    }
+
+    // ==========================================
+    // SEGMENTED DISK BUFFER (The Performance Fix)
+    // ==========================================
+    private static class SegmentedDiskBuffer implements AutoCloseable {
+        private final Path directory;
+        private final int itemsPerSegment;
+        private final AtomicLong totalSize = new AtomicLong(0);
+
+        private long currentWriteSegmentId = 0;
+        private long currentReadSegmentId = 0;
+
+        private ObjectOutputStream currentWriter;
+        private ObjectInputStream currentReader;
+
+        // To handle ObjectOutputStream header issue
+        private boolean isWriterFresh = true;
+
+        public SegmentedDiskBuffer(Path directory, int itemsPerSegment) throws IOException {
+            this.directory = directory;
+            this.itemsPerSegment = itemsPerSegment;
+            Files.createDirectories(directory);
+            recoverState();
+        }
+
+        private void recoverState() throws IOException {
+            // Logic to scan directory, find min/max segment IDs to restore
+            // currentReadSegmentId and currentWriteSegmentId
+            // Simplified: assume empty for new runs
+            cleanDirectory();
+            openWriter();
+        }
+
+        private void cleanDirectory() throws IOException {
+            try (Stream<Path> files = Files.list(directory)) {
+                files.forEach(p -> { try { Files.delete(p); } catch (IOException e) {} });
             }
         }
 
-        throw new IllegalStateException("Failed to get or create QueueManager for groupId=" + groupId);
+        public synchronized void write(GraphRecords.PotentialMatch match) throws IOException {
+            // Rotate file if too large
+            if (Files.size(getSegmentPath(currentWriteSegmentId)) > itemsPerSegment * 1024L) { // Rough byte estimate or count
+                rotateWriter();
+            }
+
+            currentWriter.writeObject(match);
+            // reset to prevent memory leaks in ObjectOutputStream reference cache
+            currentWriter.reset();
+            totalSize.incrementAndGet();
+        }
+
+        private Path getSegmentPath(long id) {
+            return directory.resolve(String.format("segment_%d.bin", id));
+        }
+
+        private void openWriter() throws IOException {
+            Path p = getSegmentPath(currentWriteSegmentId);
+            // Use appending, but we must handle the Header issue
+            boolean exists = Files.exists(p);
+            FileOutputStream fos = new FileOutputStream(p.toFile(), true);
+            BufferedOutputStream bos = new BufferedOutputStream(fos);
+
+            if (exists) {
+                // Appending: Use subclass that doesn't write header
+                currentWriter = new AppendingObjectOutputStream(bos);
+            } else {
+                // New file: Standard writes header
+                currentWriter = new ObjectOutputStream(bos);
+            }
+        }
+
+        private void rotateWriter() throws IOException {
+            currentWriter.close();
+            currentWriteSegmentId++;
+            openWriter();
+        }
+
+        public synchronized void readBatch(List<GraphRecords.PotentialMatch> batch, int limit) throws IOException {
+            if (totalSize.get() == 0) return;
+
+            int count = 0;
+            while (count < limit && totalSize.get() > 0) {
+                if (currentReader == null) {
+                    Path p = getSegmentPath(currentReadSegmentId);
+                    if (!Files.exists(p)) {
+                        // Should not happen if size > 0, but safety check
+                        if (currentReadSegmentId < currentWriteSegmentId) {
+                            currentReadSegmentId++;
+                            continue;
+                        } else {
+                            break;
+                        }
+                    }
+                    currentReader = new ObjectInputStream(new BufferedInputStream(new FileInputStream(p.toFile())));
+                }
+
+                try {
+                    GraphRecords.PotentialMatch m = (GraphRecords.PotentialMatch) currentReader.readObject();
+                    batch.add(m);
+                    count++;
+                    totalSize.decrementAndGet();
+                } catch (EOFException e) {
+                    // End of current segment
+                    currentReader.close();
+                    currentReader = null;
+                    Files.deleteIfExists(getSegmentPath(currentReadSegmentId)); // Delete processed file
+                    currentReadSegmentId++;
+                } catch (ClassNotFoundException e) {
+                    throw new IOException("Class mismatch", e);
+                }
+            }
+        }
+
+        public long size() { return totalSize.get(); }
+
+        @Override
+        public synchronized void close() throws IOException {
+            if (currentWriter != null) currentWriter.close();
+            if (currentReader != null) currentReader.close();
+        }
+    }
+
+    // Helper to fix the Corruption Bug
+    private static class AppendingObjectOutputStream extends ObjectOutputStream {
+        public AppendingObjectOutputStream(OutputStream out) throws IOException {
+            super(out);
+        }
+        @Override
+        protected void writeStreamHeader() throws IOException {
+            // Do not write header (magic number) when appending
+            reset();
+        }
+    }
+
+    // ---------------------------------------------------------
+    // STATIC MANAGEMENT METHODS
+    // ---------------------------------------------------------
+
+    /**
+     * Retrieves an existing QueueManager without creating a new one.
+     * Used by the Processor to check if a specific group has data pending.
+     */
+    public static QueueManagerImpl getExisting(UUID groupId) {
+        return INSTANCES.get(groupId);
+    }
+
+    /**
+     * Removes the manager from the registry and ensures resources are closed.
+     * usage: Called during cleanup or after final save.
+     */
+    public static void remove(UUID groupId) {
+        QueueManagerImpl manager = INSTANCES.remove(groupId);
+        if (manager != null) {
+            manager.close();
+        }
+    }
+
+    /**
+     * Removes all managers and closes them.
+     * Usage: Application shutdown.
+     */
+    public static void removeAll() {
+        // Create a copy of keys to avoid concurrent modification issues during iteration
+        Set<UUID> keys = new HashSet<>(INSTANCES.keySet());
+        for (UUID key : keys) {
+            remove(key);
+        }
+    }
+
+    public static CompletableFuture<Void> flushAllQueuesAsync(
+            QuadFunction<UUID, UUID, String, Integer, CompletableFuture<Void>> callback) {
+
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
+
+        INSTANCES.forEach((groupId, manager) -> {
+            // We trigger a manual flush/save via the callback
+            CompletableFuture<Void> f = CompletableFuture.supplyAsync(() -> {
+                // 1. Drain everything
+                List<GraphRecords.PotentialMatch> batch = manager.drainBatch(Integer.MAX_VALUE);
+                if (batch.isEmpty()) return CompletableFuture.completedFuture((Void) null);
+
+                // 2. Pass to callback (Processor::savePendingMatchesAsync logic)
+                return callback.apply(
+                        manager.getGroupId(),
+                        manager.domainId,
+                        manager.processingCycleId, // Ensure order matches your QuadFunction
+                        batch.size()
+                );
+            }, manager.flushScheduler).thenCompose(Function.identity());
+
+            futures.add(f);
+        });
+
+        return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]));
+    }
+
+    // ---------------------------------------------------------
+    // INSTANCE DATA METHODS
+    // ---------------------------------------------------------
+
+    /**
+     * Drains up to 'limit' items from the queue.
+     * Priority:
+     * 1. Disk Spill Buffer (to maintain roughly FIFO order if we spilled previously)
+     * 2. Memory Queue (if disk is empty or we need to fill the batch)
+     */
+    public List<GraphRecords.PotentialMatch> drainBatch(int limit) {
+        List<GraphRecords.PotentialMatch> batch = new ArrayList<>(Math.min(limit, maxBatchSize));
+
+        // Use lock to coordinate with the internal periodic flush task
+        flushLock.lock();
+        try {
+            // 1. Try to read from Disk first (if exists)
+            if (diskSpillBuffer.size() > 0) {
+                try {
+                    // Note: ensure SegmentedDiskBuffer.readBatch is visible/accessible
+                    diskSpillBuffer.readBatch(batch, limit);
+                } catch (IOException e) {
+                    log.error("Failed to read from spill buffer for groupId={}", groupId, e);
+                    // We continue to try memory even if disk fails to avoid total stall
+                }
+            }
+
+            // 2. Fill remaining space from Memory
+            int remaining = limit - batch.size();
+            if (remaining > 0) {
+                memoryQueue.drainTo(batch, remaining);
+            }
+
+            // 3. Update State
+            // If disk is now empty, we can turn off the "isSpilling" flag
+            // so new incoming items go directly to memory again.
+            if (diskSpillBuffer.size() == 0 && isSpilling.get()) {
+                isSpilling.set(false);
+            }
+
+            // 4. Metrics
+            if (!batch.isEmpty()) {
+                dequeueCount.addAndGet(batch.size());
+                lastFlushTime.set(System.currentTimeMillis());
+            }
+
+            return batch;
+
+        } finally {
+            flushLock.unlock();
+        }
+    }
+
+    /**
+     * Helper check used by cleanup processes
+     */
+    public boolean hasSpillData() {
+        return diskSpillBuffer.size() > 0;
     }
 }

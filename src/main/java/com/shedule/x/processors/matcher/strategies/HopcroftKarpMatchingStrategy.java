@@ -1,6 +1,7 @@
 package com.shedule.x.processors.matcher.strategies;
 
 import com.shedule.x.dto.BipartiteGraph;
+import com.shedule.x.dto.EdgeDTO;
 import com.shedule.x.dto.MatchResult;
 import com.shedule.x.dto.MatchingRequest;
 import com.shedule.x.exceptions.InternalServerErrorException;
@@ -108,15 +109,15 @@ public class HopcroftKarpMatchingStrategy implements MatchingStrategy {
         Set<String> leftNodes = new HashSet<>();
         Set<String> rightNodes = new HashSet<>();
 
-        for (Edge edge : graph.getEdges()) {
-            leftNodes.add(edge.getFromNode().getReferenceId());
-            rightNodes.add(edge.getToNode().getReferenceId());
+        for (EdgeDTO edge : graph.getEdges()) {
+            leftNodes.add(edge.getFromNodeHash());
+            rightNodes.add(edge.getToNodeHash());
         }
 
         BipartiteGraph bipartiteGraph = new BipartiteGraph(leftNodes, rightNodes);
 
-        for (Edge edge : graph.getEdges()) {
-            bipartiteGraph.addEdge(edge.getFromNode().getReferenceId(), edge.getToNode().getReferenceId());
+        for (EdgeDTO edge : graph.getEdges()) {
+            bipartiteGraph.addEdge(edge.getFromNodeHash(), edge.getToNodeHash());
         }
         return bipartiteGraph;
     }
