@@ -27,7 +27,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 @Slf4j
-public class FlatEdgeBuildingStrategy implements SymmetricEdgeBuildingStrategy {
+public class FlatEdgeBuildingStrategy  {
     private static final int STORAGE_BATCH_SIZE = 1000;
     private static final int LOG_THROTTLE_INTERVAL = 1000;
 
@@ -57,7 +57,7 @@ public class FlatEdgeBuildingStrategy implements SymmetricEdgeBuildingStrategy {
         private final UUID domainId;
     }
 
-    @Override
+
     public void processBatch(List<Node> batch, Graph graph, Collection<GraphRecords.PotentialMatch> matches, Set<Edge> edges, MatchingRequest request, Map<String, Object> context) {
         UUID groupId = request.getGroupId();
         log.info("Processing batch of {} nodes for groupId={}", batch.size(), groupId);
@@ -90,7 +90,7 @@ public class FlatEdgeBuildingStrategy implements SymmetricEdgeBuildingStrategy {
         }
     }
 
-    @Override
+
     public CompletableFuture<Void> indexNodes(List<Node> nodes, int page) {
         return null;
     }

@@ -8,6 +8,13 @@ public final class Murmur3 {
 
     private static final int SEED = 0;
 
+    public static int hash32(String str) {
+        byte[] data = str.getBytes(StandardCharsets.UTF_8);
+        // Use the 128-bit implementation and return the first 4 bytes (int)
+        byte[] hash128 = hash128(data, 0, data.length, SEED);
+        return ByteBuffer.wrap(hash128).order(ByteOrder.LITTLE_ENDIAN).getInt();
+    }
+
     public static byte[] hash128(String str) {
         byte[] data = str.getBytes(StandardCharsets.UTF_8);
         return hash128(data, 0, data.length, SEED);
@@ -26,13 +33,13 @@ public final class Murmur3 {
         hash128To(dst, data, offset, len, SEED);
     }
 
-    private static void hash128To(ByteBuffer dst, byte[] key, int offset, int len, int seed) {
+    public static void hash128To(ByteBuffer dst, byte[] key, int offset, int len, int seed) {
         int pos = dst.position();
         hash128(key, offset, len, seed, dst);
         dst.position(pos + 16);
     }
 
-    private static byte[] hash128(byte[] key, int offset, int len, int seed) {
+    public static byte[] hash128(byte[] key, int offset, int len, int seed) {
         ByteBuffer buf = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN);
         hash128(key, offset, len, seed, buf);
         return buf.array();

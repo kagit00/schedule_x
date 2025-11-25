@@ -1,5 +1,6 @@
 package com.shedule.x.processors;
 
+import com.shedule.x.dto.NodeDTO;
 import com.shedule.x.models.Node;
 import com.shedule.x.service.CompatibilityCalculator;
 import lombok.extern.slf4j.Slf4j;
@@ -16,7 +17,7 @@ public class MetadataCompatibilityCalculator implements CompatibilityCalculator 
     private final ConcurrentHashMap<String, Set<String>> keyCache = new ConcurrentHashMap<>();
 
     @Override
-    public double calculate(Node node1, Node node2) {
+    public double calculate(NodeDTO node1, NodeDTO node2) {
         Map<String, String> meta1 = node1.getMetaData();
         Map<String, String> meta2 = node2.getMetaData();
 

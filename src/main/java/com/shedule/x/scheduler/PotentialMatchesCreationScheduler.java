@@ -129,8 +129,6 @@ public class PotentialMatchesCreationScheduler {
                     sample.stop(meterRegistry.timer("batch_matches_total_duration"));
                     cleanupIdleGroupLocks();
 
-                    // Trigger finalizing logic (updating statuses, etc.)
-                    // Passing 'true' assuming batch mode logic
                     tasks.forEach(t -> matchesCreationFinalizer.finalize(true));
 
                 }, batchExecutor);
@@ -151,14 +149,6 @@ public class PotentialMatchesCreationScheduler {
         });
     }
 
-    /**
-     * The Core Pipeline:
-     * 1. Acquire Semaphore (throttle domains)
-     * 2. Compute Matches (Job Executor) -> Writes to Queue
-     * 3. Drain Queue (Processor) -> Async flush of remaining memory/disk
-     * 4. Final Save (Processor) -> Stream from LMDB to SQL
-     * 5. Cleanup -> Close resources
-     */
     private CompletableFuture<Void> executeGroupTaskChain(GroupTaskRequest req) {
         return acquireSemaphoreAsync(domainSemaphore, req.groupId())
                 .thenCompose(v -> {
@@ -175,7 +165,6 @@ public class PotentialMatchesCreationScheduler {
                 })
                 .thenCompose(v -> {
                     // STEP 3: Streaming Final Save (LMDB -> SQL)
-                    // Assuming 'null' stream means Processor opens its own stream from GraphStore
                     log.debug("Executing Final Save | groupId={}", req.groupId());
                     return processor.saveFinalMatches(req.groupId(), req.domain().getId(), req.cycleId(), null, -1);
                 })
@@ -183,7 +172,7 @@ public class PotentialMatchesCreationScheduler {
                     // STEP 4: Release & Cleanup (Always runs)
                     domainSemaphore.release();
 
-                    // Critical: Close QueueManager and delete spill files
+                    // Close QueueManager and delete spill files
                     processor.cleanup(req.groupId());
 
                     if (error != null) {
@@ -214,7 +203,6 @@ public class PotentialMatchesCreationScheduler {
     private CompletableFuture<Void> acquireSemaphoreAsync(Semaphore semaphore, UUID debugId) {
         return CompletableFuture.runAsync(() -> {
             try {
-                // Use tryAcquire to avoid indefinite deadlocks if threads get stuck
                 if (!semaphore.tryAcquire(120, TimeUnit.MINUTES)) {
                     throw new CompletionException(new TimeoutException("Semaphore acquisition timed out for " + debugId));
                 }

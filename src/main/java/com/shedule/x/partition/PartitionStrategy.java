@@ -1,10 +1,9 @@
 package com.shedule.x.partition;
 
-import com.shedule.x.models.Node;
+import com.shedule.x.dto.NodeDTO;
 import org.apache.commons.lang3.tuple.Pair;
-import java.util.List;
 import java.util.stream.Stream;
 
 public interface PartitionStrategy {
-    Pair<Stream<Node>, Stream<Node>> partition(Stream<Node> nodes, String key, String leftValue, String rightValue);
+    Pair<Stream<NodeDTO>, Stream<NodeDTO>> partition(Stream<NodeDTO> nodes, String key, String leftValue, String rightValue);
 }

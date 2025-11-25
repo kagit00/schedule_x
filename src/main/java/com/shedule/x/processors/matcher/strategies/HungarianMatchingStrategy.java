@@ -3,6 +3,7 @@ package com.shedule.x.processors.matcher.strategies;
 import com.shedule.x.dto.EdgeDTO;
 import com.shedule.x.dto.MatchResult;
 import com.shedule.x.dto.MatchingRequest;
+import com.shedule.x.dto.NodeDTO;
 import com.shedule.x.models.*;
 import com.shedule.x.models.Node;
 import com.shedule.x.service.BipartiteGraphBuilderService;
@@ -37,12 +38,12 @@ public class HungarianMatchingStrategy implements MatchingStrategy {
                 groupId, domainId, allPMs.size());
 
         try {
-            Set<Node> leftNodes = new HashSet<>();
-            Set<Node> rightNodes = new HashSet<>();
+            Set<NodeDTO> leftNodes = new HashSet<>();
+            Set<NodeDTO> rightNodes = new HashSet<>();
 
             for (PotentialMatch pm : allPMs) {
-                leftNodes.add(Node.builder().referenceId(pm.getReferenceId()).build());
-                rightNodes.add(Node.builder().referenceId(pm.getMatchedReferenceId()).build());
+                leftNodes.add(NodeDTO.builder().referenceId(pm.getReferenceId()).build());
+                rightNodes.add(NodeDTO.builder().referenceId(pm.getMatchedReferenceId()).build());
             }
 
             MatchingRequest matchingRequest = new MatchingRequest();
@@ -60,8 +61,8 @@ public class HungarianMatchingStrategy implements MatchingStrategy {
                 return Collections.emptyMap();
             }
 
-            List<Node> currentLeftNodes = graph.getLeftPartition();
-            List<Node> currentRightNodes = graph.getRightPartition();
+            List<NodeDTO> currentLeftNodes = graph.getLeftPartition();
+            List<NodeDTO> currentRightNodes = graph.getRightPartition();
 
             int n = currentLeftNodes.size();
             int m = currentRightNodes.size();
@@ -75,7 +76,7 @@ public class HungarianMatchingStrategy implements MatchingStrategy {
             }
 
             for (int i = 0; i < n; i++) {
-                Node from = currentLeftNodes.get(i);
+                NodeDTO from = currentLeftNodes.get(i);
                 for (EdgeDTO edge : graph.getEdgesFrom(from)) {
                     Integer j = rightNodeIndex.get(edge.getFromNodeHash());
                     if (j != null) {
@@ -205,7 +206,7 @@ public class HungarianMatchingStrategy implements MatchingStrategy {
     }
 
     private Map<String, List<MatchResult>> buildMatchResult(
-            List<Node> leftNodes, List<Node> rightNodes, int[][] costMatrix, int[] assignment, int n, int m) {
+            List<NodeDTO> leftNodes, List<NodeDTO> rightNodes, int[][] costMatrix, int[] assignment, int n, int m) {
 
         Map<String, List<MatchResult>> result = new HashMap<>();
         for (int i = 0; i < assignment.length; i++) {

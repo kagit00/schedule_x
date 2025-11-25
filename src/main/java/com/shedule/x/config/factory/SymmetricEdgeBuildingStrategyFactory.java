@@ -4,9 +4,11 @@ import com.shedule.x.builder.FlatEdgeBuildingStrategy;
 import com.shedule.x.builder.MetadataEdgeBuildingStrategy;
 import com.shedule.x.builder.SymmetricEdgeBuildingStrategy;
 import com.shedule.x.config.EdgeBuildingConfig;
+import com.shedule.x.dto.NodeDTO;
 import com.shedule.x.models.Node;
 import com.shedule.x.processors.*;
 import com.shedule.x.service.CompatibilityCalculator;
+import com.shedule.x.service.NodeDataService;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -29,6 +31,8 @@ public class SymmetricEdgeBuildingStrategyFactory {
 
     @Autowired
     private EdgeProcessor edgeProcessor;
+    @Autowired
+    private NodeDataService nodeDataService;
 
     @Autowired
     public SymmetricEdgeBuildingStrategyFactory(
@@ -47,12 +51,12 @@ public class SymmetricEdgeBuildingStrategyFactory {
     }
 
 
-    public SymmetricEdgeBuildingStrategy createStrategy(String weightFunctionKey, List<Node> nodes) {
-        Map<UUID, Node> nodeMap = nodes.stream()
-                .collect(Collectors.toMap(Node::getId, node -> node));
-        if ("flat".equalsIgnoreCase(weightFunctionKey)) {
-            return flatEdgeBuildingStrategy;
-        } else {
+    public SymmetricEdgeBuildingStrategy createStrategy(String weightFunctionKey, List<NodeDTO> nodes) {
+        Map<UUID, NodeDTO> nodeMap = nodes.stream()
+                .collect(Collectors.toMap(NodeDTO::getId, node -> node));
+//        if ("flat".equalsIgnoreCase(weightFunctionKey)) {
+//            return flatEdgeBuildingStrategy;
+//        } else {
             return new MetadataEdgeBuildingStrategy(
                     EdgeBuildingConfig.builder()
                             .candidateLimit(candidateLimit).similarityThreshold(similarityThreshold)
@@ -61,8 +65,9 @@ public class SymmetricEdgeBuildingStrategyFactory {
                     lshIndexProvider.getObject(),
                     encoder,
                     executor,
-                    edgeProcessor
+                    edgeProcessor,
+                    nodeDataService
             );
-        }
+       // }
     }
 }

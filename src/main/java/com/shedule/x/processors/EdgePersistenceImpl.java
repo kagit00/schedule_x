@@ -161,7 +161,6 @@ public class EdgePersistenceImpl implements EdgePersistence {
         Dbi<ByteBuffer> dbi = lmdb.edgeDbi();
 
         try {
-            // Iterate starting from the given prefix
             var cursorIterable = dbi.iterate(txn, KeyRange.atLeast(makePrefix(groupId)));
             Iterator<CursorIterable.KeyVal<ByteBuffer>> kvIter = cursorIterable.iterator();
 
@@ -196,13 +195,11 @@ public class EdgePersistenceImpl implements EdgePersistence {
                         var kv = kvIter.next();
                         ByteBuffer key = kv.key();
 
-                        // STOP if prefix no longer matches → End of this group's range
                         if (!matchesPrefix(key, groupId))
                             return null;
 
                         ByteBuffer val = kv.val();
 
-                        // Validate domain from bytes 4..20
                         long msb = val.getLong(4);
                         long lsb = val.getLong(12);
                         if (msb == domainId.getMostSignificantBits() &&
@@ -226,9 +223,9 @@ public class EdgePersistenceImpl implements EdgePersistence {
 
             return new AutoCloseableStream<>(stream, () -> {
                 try {
-                    cursorIterable.close(); // Explicitly close cursor!
+                    cursorIterable.close();
                 } finally {
-                    txn.close(); // Then close transaction
+                    txn.close();
                 }
             });
 

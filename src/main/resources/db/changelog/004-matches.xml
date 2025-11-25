@@ -204,4 +204,10 @@
         </sql>
     </changeSet>
 
+    <changeSet id="add-processing-cycle-id-column" author="you">
+        <addColumn tableName="match_participation_history">
+            <column name="processing_cycle_id" type="varchar(50)"/>
+        </addColumn>
+    </changeSet>
+
 </databaseChangeLog>

@@ -4,7 +4,9 @@ import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.util.*;
 
+import com.shedule.x.config.factory.GraphFactory;
 import com.shedule.x.dto.CursorPage;
+import com.shedule.x.dto.NodeDTO;
 import com.shedule.x.repo.NodeCursorProjection;
 import com.shedule.x.models.Node;
 import com.shedule.x.models.NodesCursor;
@@ -25,6 +27,7 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 @Service
 public class NodeFetchService {
+    private static final int BATCH_OVERLAP = 200;
     private final NodeRepository nodeRepository;
     private final MeterRegistry meterRegistry;
     private final Executor executor;
@@ -43,7 +46,9 @@ public class NodeFetchService {
         this.nodesCursorRepository = nodesCursorRepository;
     }
 
-    public CompletableFuture<List<Node>> fetchNodesInBatchesAsync(List<UUID> nodeIds, UUID groupId, LocalDateTime createdAfter) {
+    public CompletableFuture<List<NodeDTO>> fetchNodesInBatchesAsync(
+            List<UUID> nodeIds, UUID groupId, LocalDateTime createdAfter) {
+
         if (nodeIds == null || nodeIds.isEmpty()) {
             return CompletableFuture.completedFuture(Collections.emptyList());
         }
@@ -52,19 +57,25 @@ public class NodeFetchService {
 
         return CompletableFuture.supplyAsync(() -> {
                     try {
+                        // 1. Fetch JPA Nodes
                         List<Node> nodes = nodeRepository.findByIdsWithMetadata(nodeIds);
 
-                        // Filter in memory (cheaper than complex DB predicates if batch is small)
+                        // 2. Filter in memory
+                        List<Node> filteredNodes;
                         if (createdAfter != null) {
-                            return nodes.stream()
+                            filteredNodes = nodes.stream()
                                     .filter(n -> n.getCreatedAt() == null || !n.getCreatedAt().isBefore(createdAfter))
                                     .toList();
+                        } else {
+                            filteredNodes = nodes;
                         }
-                        return nodes;
+
+                        return filteredNodes.stream().map(GraphFactory::toNodeDTO).toList();
+
                     } catch (Exception e) {
                         log.error("Failed to hydrate nodes for groupId={}", groupId, e);
                         meterRegistry.counter("node_fetch_error", "groupId", groupId.toString()).increment();
-                        throw e;
+                        throw new RuntimeException("Node hydration failed", e);
                     }
                 }, executor)
                 .orTimeout(futureTimeoutSeconds, TimeUnit.SECONDS)
@@ -72,7 +83,6 @@ public class NodeFetchService {
                         sample.stop(meterRegistry.timer("node_fetch_hydration_duration", "groupId", groupId.toString()))
                 );
     }
-
 
     @Transactional
     public void markNodesAsProcessed(List<UUID> nodeIds, UUID groupId) {
@@ -90,46 +100,6 @@ public class NodeFetchService {
         }
     }
 
-    public CompletableFuture<CursorPage> fetchNodeIdsByCursor(
-            UUID groupId, UUID domainId, int limit, String cycleId) {
-
-        Timer.Sample sample = Timer.start(meterRegistry);
-
-        return CompletableFuture.supplyAsync(() -> {
-                    // 1. Get Current Cursor State
-                    NodesCursor cursor = nodesCursorRepository
-                            .findByIdGroupIdAndIdDomainId(groupId, domainId)
-                            .orElse(null);
-
-                    LocalDateTime cursorTime = (cursor != null && cursor.getCursorCreatedAt() != null)
-                            ? cursor.getCursorCreatedAt().toLocalDateTime() : null;
-                    UUID cursorId = (cursor != null) ? cursor.getCursorId() : null;
-
-                    // 2. Fetch Page (ID + CreatedAt) in ONE query
-                    // Return type: List<NodeCursorProjection> or List<Tuple>
-                    List<NodeCursorProjection> page = nodeRepository.findUnprocessedNodeIdsAndDatesByCursor(
-                            groupId, domainId, cursorTime, cursorId, limit);
-
-                    if (page.isEmpty()) {
-                        return new CursorPage(Collections.emptyList(), false, null, null);
-                    }
-
-                    // 3. Extract IDs and New Cursor Data
-                    List<UUID> ids = new ArrayList<>(page.size());
-                    for (NodeCursorProjection p : page) {
-                        ids.add(p.getId());
-                    }
-
-                    NodeCursorProjection lastItem = page.get(page.size() - 1);
-                    return new CursorPage(ids, true, lastItem.getCreatedAt(), lastItem.getId());
-
-                }, executor)
-                .orTimeout(futureTimeoutSeconds, TimeUnit.SECONDS)
-                .whenComplete((r, t) -> sample.stop(meterRegistry.timer(
-                        "node_fetch_cursor_duration",
-                        "groupId", groupId.toString())));
-    }
-
 
     @Transactional
     public void persistCursor(UUID groupId, UUID domainId, OffsetDateTime createdAt, UUID cursorId) {
@@ -142,5 +112,75 @@ public class NodeFetchService {
         cursor.setUpdatedAt(OffsetDateTime.now());
 
         nodesCursorRepository.save(cursor);
+    }
+
+
+    public CompletableFuture<CursorPage> fetchNodeIdsByCursor(
+            UUID groupId, UUID domainId, int limit, String cycleId) {
+
+        Timer.Sample sample = Timer.start(meterRegistry);
+
+        // 1. Calculate the total fetch size needed: Limit from job + Overlap
+        final int fetchSize = limit + BATCH_OVERLAP;
+
+        return CompletableFuture.supplyAsync(() -> {
+                    // 1. Get Current Cursor State
+                    NodesCursor cursor = nodesCursorRepository
+                            .findByIdGroupIdAndIdDomainId(groupId, domainId)
+                            .orElse(null);
+
+                    LocalDateTime cursorTime = (cursor != null && cursor.getCursorCreatedAt() != null)
+                            ? cursor.getCursorCreatedAt().toLocalDateTime() : null;
+                    UUID cursorId = (cursor != null) ? cursor.getCursorId() : null;
+
+                    // 2. Fetch Page (ID + CreatedAt) in ONE query, requesting the full overlap amount
+                    List<NodeCursorProjection> page = nodeRepository.findUnprocessedNodeIdsAndDatesByCursor(
+                            groupId, domainId, cursorTime, cursorId, fetchSize); // Use fetchSize
+
+                    if (page.isEmpty()) {
+                        return new CursorPage(Collections.emptyList(), false, null, null);
+                    }
+
+                    // 3. Determine the actual list of IDs to process (the "new" chunk)
+                    // The 'new' chunk size is the lesser of the requested limit or the total page size
+                    int actualProcessLimit = Math.min(limit, page.size());
+
+                    // If the page is smaller than the requested limit, we process all of it.
+                    if (page.size() <= limit) {
+                        // This is the last batch or a small batch. No overlap needed for the next cycle.
+                        log.debug("Fetched smaller batch ({} <= {}), ending cursor retrieval.", page.size(), limit);
+                        List<UUID> ids = page.stream().map(NodeCursorProjection::getId).toList();
+                        NodeCursorProjection lastItem = page.get(page.size() - 1);
+
+                        // The last item's timestamp is the new cursor position
+                        return new CursorPage(ids, false, lastItem.getCreatedAt(), lastItem.getId());
+                    }
+
+                    // 4. We fetched >= (limit + overlap), so we have a full page for processing.
+                    // The IDs to process are only the first 'limit' nodes.
+                    List<UUID> idsToProcess = page.stream()
+                            .limit(limit) // <--- Only take the first 'limit' nodes
+                            .map(NodeCursorProjection::getId)
+                            .toList();
+
+                    // The new cursor position must point to the LAST node of the PROCESSED set (node at index limit - 1)
+                    NodeCursorProjection newCursorItem = page.get(limit - 1);
+
+                    log.info("Sliding Window: Fetched {} nodes (Limit={}, Overlap={}). Processing first {} and setting cursor to node {}.",
+                            page.size(), limit, BATCH_OVERLAP, idsToProcess.size(), newCursorItem.getId());
+
+                    // isMoreToProcess is true because we know we have the 'overlap' nodes remaining.
+                    return new CursorPage(
+                            idsToProcess,
+                            true,
+                            newCursorItem.getCreatedAt(),
+                            newCursorItem.getId()
+                    );
+
+                }, executor)
+                .orTimeout(futureTimeoutSeconds, TimeUnit.SECONDS)
+                .whenComplete((r, t) -> sample.stop(meterRegistry.timer(
+                        "node_fetch_cursor_duration",
+                        "groupId", groupId.toString())));
     }
 }

@@ -1,12 +1,11 @@
 package com.shedule.x.config;
 
-import com.github.benmanes.caffeine.cache.Caffeine;
-import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.shedule.x.builder.FlatEdgeBuildingStrategy;
 import com.shedule.x.builder.MetadataEdgeBuildingStrategy;
 import com.shedule.x.config.factory.NodePriorityProvider;
 import com.shedule.x.processors.*;
+import com.shedule.x.service.NodeDataService;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -14,16 +13,19 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Lazy;
-import org.springframework.context.annotation.Scope;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
-import java.util.Collections;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.*;
 
 @Slf4j
 @Configuration
 public class GraphConfig {
+
+    @Bean
+    public NodePriorityProvider nodePriorityProvider(@Lazy LSHIndex lshIndex) {
+        return lshIndex::getNodePriorityScore;
+    }
 
     @Bean("lshExecutor")
     public ExecutorService lshExecutorService(MeterRegistry meterRegistry) {
@@ -37,6 +39,11 @@ public class GraphConfig {
                 threadFactory,
                 new ThreadPoolExecutor.CallerRunsPolicy()
         );
+    }
+
+    @Bean
+    public ThreadLocal<Map<Integer, List<UUID>>> lshBatchBuffer() {
+        return ThreadLocal.withInitial(HashMap::new);
     }
 
 
@@ -53,25 +60,23 @@ public class GraphConfig {
     }
 
     @Bean
-    public NodePriorityProvider nodePriorityProvider(@Lazy LSHIndex lshIndex) {
-        return lshIndex::getNodePriorityScore;
-    }
-
-    @Bean
     public LSHIndexImpl lshIndex(
-            @Value("${lsh.num-hash-tables:16}") int numHashTables,
-            @Value("${lsh.num-bands:16}") int numBands,
-            @Value("${graph.builder.candidate.limit:1000}") int topK,
+            @Value("${lsh.num-hash-tables:120}") int numHashTables,
+            @Value("${lsh.num-bands:1}") int numBands,
+            @Value("${graph.builder.candidate.limit:10000}") int topK,
             MeterRegistry meterRegistry,
             @Qualifier("lshExecutor") ExecutorService lshExecutor,
-            GraphStore graphStore) {
+            GraphStore graphStore,
+            ThreadLocal<Map<Integer, List<UUID>>> lshBatchBuffer) {
         return new LSHIndexImpl(
                 LSHConfig.builder().numBands(numBands).numHashTables(numHashTables).topK(topK).build(),
                 meterRegistry,
                 lshExecutor,
-                graphStore
+                graphStore,
+                lshBatchBuffer
         );
     }
+
 
     @Bean
     public FlatEdgeBuildingStrategy flatEdgeBuildingStrategy(
@@ -85,8 +90,9 @@ public class GraphConfig {
             EdgeProcessor edgeProcessor,
             LSHIndexImpl lshIndexImpl,
             MetadataEncoder encoder,
+            NodeDataService nodeDataService,
             @Qualifier("graphBuildExecutor") ExecutorService executor,
-            @Value("${graph.builder.candidate.limit:200}") Integer candidateLimit,
+            @Value("${graph.builder.candidate.limit:10000}") Integer candidateLimit,
             @Value("${graph.builder.similarity.threshold:0.01}") Double similarityThreshold) {
         return new MetadataEdgeBuildingStrategy(
                 EdgeBuildingConfig.builder()
@@ -96,12 +102,13 @@ public class GraphConfig {
                 lshIndexImpl,
                 encoder,
                 executor,
-                edgeProcessor
+                edgeProcessor,
+                nodeDataService
         );
     }
 
     @Bean
-    public Integer candidateLimit(@Value("${graph.builder.candidate.limit:1000}") Integer limit) {
+    public Integer candidateLimit(@Value("${graph.builder.candidate.limit:10000}") Integer limit) {
         return limit;
     }
 

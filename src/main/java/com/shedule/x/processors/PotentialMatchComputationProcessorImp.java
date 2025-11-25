@@ -159,9 +159,6 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
                 });
     }
 
-    // -------------------------------------------------------
-    // 4. FINAL SAVE (Streaming Phase)
-    // -------------------------------------------------------
     @Override
     public CompletableFuture<Void> saveFinalMatches(
             UUID groupId, UUID domainId, String processingCycleId,
@@ -177,11 +174,6 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
             return null;
         });
     }
-
-
-    // -------------------------------------------------------
-    // 5. HELPERS & CLEANUP
-    // -------------------------------------------------------
 
     private QueueManagerImpl getOrCreateQueueManager(UUID groupId, UUID domainId, String processingCycleId) {
         QueueConfig requestConfig = new QueueConfig(
@@ -228,19 +220,13 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
         storageExecutor.shutdown();
     }
 
-
-    // -------------------------------------------------------
-    // A. STREAM EDGES (Delegates to GraphStore)
-    // -------------------------------------------------------
     @Override
     public AutoCloseableStream<EdgeDTO> streamEdges(UUID groupId, UUID domainId, String processingCycleId, int topK) {
         // Note: GraphStore implementation handles the transaction/cursor closing via AutoCloseableStream
         return graphStore.streamEdges(domainId, groupId);
     }
 
-    // -------------------------------------------------------
-    // B. GET COUNT (Optimized Stream Count)
-    // -------------------------------------------------------
+
     @Override
     public long getFinalMatchCount(UUID groupId, UUID domainId, String processingCycleId) {
         // Uses try-with-resources to ensure LMDB transaction is closed immediately after counting
@@ -252,10 +238,7 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
         }
     }
 
-    // -------------------------------------------------------
-    // C. FINAL SAVE (Streaming LMDB -> DB)
-    // -------------------------------------------------------
-    // This method runs inside the Async Future in 'saveFinalMatches'
+
     private void performStreamingFinalSave(UUID groupId, UUID domainId, String processingCycleId) {
         // Buffer to batch SQL inserts/upserts
         List<PotentialMatchEntity> buffer = new ArrayList<>(finalSaveBatchSize);
@@ -303,12 +286,9 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
         }
     }
 
-    // Helper to flush the batch to DB
     private void flushFinalBatch(List<PotentialMatchEntity> buffer, UUID groupId, UUID domainId, String cycleId) {
         if (buffer.isEmpty()) return;
         try {
-            // Synchronous wait is acceptable here because we are running inside a dedicated
-            // 'storageExecutor' thread and we want to apply backpressure to the LMDB read speed.
             potentialMatchSaver.saveMatchesAsync(new ArrayList<>(buffer), groupId, domainId, cycleId, true)
                     .get(matchSaveTimeoutSeconds, TimeUnit.SECONDS);
             buffer.clear();

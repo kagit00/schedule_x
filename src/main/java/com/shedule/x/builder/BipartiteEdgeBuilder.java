@@ -1,5 +1,6 @@
 package com.shedule.x.builder;
 
+import com.shedule.x.dto.NodeDTO;
 import com.shedule.x.metrics.GraphBuilderMetrics;
 import com.shedule.x.models.Edge;
 import com.shedule.x.models.Node;
@@ -16,6 +17,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import java.util.List;
 import java.util.Set;
+
+import java.util.*;
 
 @Slf4j
 @Component
@@ -38,9 +41,13 @@ public class BipartiteEdgeBuilder {
     }
 
     public void processBatch(
-            List<Node> leftBatch,
-            List<Node> rightBatch,
+            // ⚠️ CHANGE: Use NodeDTO instead of Node
+            List<NodeDTO> leftBatch,
+            List<NodeDTO> rightBatch,
+            // ⚠️ ADJUSTMENT: Since we can't build JPA Edge, we use PotentialMatch (which maps to EdgeDTO fields)
             List<GraphRecords.PotentialMatch> matches,
+            // We cannot build JPA Edge here without full JPA Nodes, so this Set will remain empty or should be removed.
+            // For now, we keep it but it's not populated with JPA Entities.
             Set<Edge> edges,
             UUID groupId,
             UUID domainId,
@@ -50,12 +57,11 @@ public class BipartiteEdgeBuilder {
         log.debug("Processing bipartite batch of {} left nodes vs {} right nodes for groupId={}",
                 leftBatch.size(), rightBatch.size(), groupId);
 
-        for (Node leftNode : leftBatch) {
-            for (Node rightNode : rightBatch) {
+        for (NodeDTO leftNode : leftBatch) {
+            for (NodeDTO rightNode : rightBatch) {
                 double score = compatibilityCalculator.calculate(leftNode, rightNode);
                 if (score > similarityThreshold) {
-                    Edge edge = Edge.builder().fromNode(leftNode).toNode(rightNode).weight(score).build();
-                    edges.add(edge);
+
                     GraphRecords.PotentialMatch match = new GraphRecords.PotentialMatch(
                             leftNode.getReferenceId(),
                             rightNode.getReferenceId(),

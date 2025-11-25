@@ -5,6 +5,7 @@ import com.shedule.x.config.factory.AutoCloseableStream;
 import com.shedule.x.config.factory.GraphFactory;
 import com.shedule.x.dto.EdgeDTO;
 import com.shedule.x.dto.MatchingRequest;
+import com.shedule.x.dto.NodeDTO;
 import com.shedule.x.exceptions.InternalServerErrorException;
 import com.shedule.x.models.Edge;
 import com.shedule.x.models.Graph;
@@ -99,8 +100,8 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
     @Retry(name = "bipartiteBuild")
     @CircuitBreaker(name = "bipartiteBuild", fallbackMethod = "buildFallback")
     @Override
-    public CompletableFuture<GraphRecords.GraphResult> build(List<Node> leftPartition, List<Node> rightPartition,
-            MatchingRequest request) {
+    public CompletableFuture<GraphRecords.GraphResult> build(List<NodeDTO> leftPartition, List<NodeDTO> rightPartition,
+                                                             MatchingRequest request) {
         UUID groupId = request.getGroupId();
         if (groupId == null) {
             log.error("Invalid groupId in MatchingRequest");
@@ -125,8 +126,8 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
                 groupId, domainId, leftPartition.size(), rightPartition.size());
         Timer.Sample buildTimer = Timer.start(meterRegistry);
 
-        List<List<Node>> leftChunks = BatchUtils.partition(leftPartition, chunkSize);
-        List<List<Node>> rightChunks = BatchUtils.partition(rightPartition, chunkSize);
+        List<List<NodeDTO>> leftChunks = BatchUtils.partition(leftPartition, chunkSize);
+        List<List<NodeDTO>> rightChunks = BatchUtils.partition(rightPartition, chunkSize);
         CompletableFuture<GraphRecords.GraphResult> resultFuture = new CompletableFuture<>();
         processChunks(leftChunks, rightChunks, request, groupId, domainId, numberOfNodes, resultFuture);
 
@@ -139,8 +140,8 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
         });
     }
 
-    public CompletableFuture<GraphRecords.GraphResult> buildFallback(List<Node> leftPartition,
-            List<Node> rightPartition, MatchingRequest request, Throwable t) {
+    public CompletableFuture<GraphRecords.GraphResult> buildFallback(List<NodeDTO> leftPartition,
+            List<NodeDTO> rightPartition, MatchingRequest request, Throwable t) {
         log.warn("Build fallback for groupId={}", request.getGroupId(), t);
         meterRegistry.counter("bipartite_build_fallbacks", "groupId", request.getGroupId().toString()).increment();
         return CompletableFuture.completedFuture(new GraphRecords.GraphResult(
@@ -148,8 +149,8 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
     }
 
     private void processChunks(
-            List<List<Node>> leftChunks,
-            List<List<Node>> rightChunks,
+            List<List<NodeDTO>> leftChunks,
+            List<List<NodeDTO>> rightChunks,
             MatchingRequest request,
             UUID groupId,
             UUID domainId,
@@ -313,8 +314,8 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
 
     private Future<GraphRecords.ChunkResult> submitChunk(
             ExecutorCompletionService<GraphRecords.ChunkResult> completionService,
-            List<Node> leftBatch,
-            List<Node> rightBatch,
+            List<NodeDTO> leftBatch,
+            List<NodeDTO> rightBatch,
             MatchingRequest request,
             int chunkIndex,
             Semaphore computeSemaphore) {
@@ -349,8 +350,8 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
 
 
     private CompletableFuture<GraphRecords.ChunkResult> processBipartiteChunk(
-            List<Node> leftBatch,
-            List<Node> rightBatch,
+            List<NodeDTO> leftBatch,
+            List<NodeDTO> rightBatch,
             MatchingRequest request,
             int chunkIndex) {
         Instant start = Instant.now();

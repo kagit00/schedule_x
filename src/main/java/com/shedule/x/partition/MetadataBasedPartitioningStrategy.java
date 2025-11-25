@@ -1,5 +1,6 @@
 package com.shedule.x.partition;
 
+import com.shedule.x.dto.NodeDTO;
 import com.shedule.x.models.Node;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
@@ -16,18 +17,17 @@ import java.util.stream.Stream;
 public class MetadataBasedPartitioningStrategy implements PartitionStrategy {
 
     @Override
-    public Pair<Stream<Node>, Stream<Node>> partition(Stream<Node> nodes, String key, String leftValue, String rightValue) {
-        List<Node> nodeList = nodes.toList();
+    public Pair<Stream<NodeDTO>, Stream<NodeDTO>> partition(Stream<NodeDTO> nodes, String key, String leftValue, String rightValue) {
+        List<NodeDTO> nodeList = nodes.toList();
 
-        List<Node> left = nodeList.stream()
+        List<NodeDTO> left = nodeList.stream()
                 .filter(node -> leftValue.equals(node.getMetaData().getOrDefault(key, "")))
                 .toList();
 
-        List<Node> right = nodeList.stream()
+        List<NodeDTO> right = nodeList.stream()
                 .filter(node -> rightValue.equals(node.getMetaData().getOrDefault(key, "")))
                 .toList();
 
         return Pair.of(left.stream(), right.stream());
     }
-
 }

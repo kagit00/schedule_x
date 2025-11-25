@@ -2,29 +2,41 @@ package com.shedule.x.utils.basic;
 
 import lombok.experimental.UtilityClass;
 
+import java.nio.ByteBuffer;
+import java.util.Arrays;
+import java.util.Random;
+
+
 @UtilityClass
 public final class HashUtils {
     private static final long M = 0xc6a4a7935bd1e995L;
     private static final int R = 47;
 
-    public static short[] computeHashes(int[] metadata, int numHashTables, int numBands) {
-        if (metadata == null || metadata.length == 0) {
-            throw new IllegalArgumentException("Invalid metadata array");
+    private static final long[] SEEDS;
+    private static final int MAX_HASH = 0xFFFF; // 16-bit bucket
+
+    static {
+        SEEDS = new long[200]; // support up to 200 hash functions
+        Random r = new Random(42);
+        for (int i = 0; i < SEEDS.length; i++) {
+            SEEDS[i] = r.nextLong();
         }
-        short[] hashes = new short[numHashTables];
-        for (int i = 0; i < numHashTables; i++) {
-            hashes[i] = (short) computeHash(metadata, i, numBands);
-        }
-        return hashes;
     }
 
-    public static int computeHash(int[] metadata, int tableIndex, int numBands) {
-        long seed = tableIndex * 31L;
+
+    private static int computeHashForSlice(int[] metadata, int start, int length, int tableIndex) {
+        long seed = tableIndex * 0x9e3779b97f4a7c15L; // Distinct seed per table
         int hash = 0;
-        for (int i = 0; i < metadata.length; i++) {
-            hash ^= fastHash(metadata[i], seed + i);
+
+        for (int j = 0; j < length; j++) {
+            int idx = (start + j) % metadata.length;
+            int element = metadata[idx];
+
+            hash ^= fastHash(element, seed);
+            seed = Long.rotateLeft(seed, 5);
         }
-        return hash & (numBands - 1);
+
+        return hash & 0xFFFF;
     }
 
     private static int fastHash(int data, long seed) {
@@ -33,5 +45,35 @@ public final class HashUtils {
         h *= M;
         h ^= h >>> R;
         return (int) (h & 0x7FFFFFFF);
+    }
+
+    public static short[] computeHashes(int[] features, int numTables, int numBands) {
+        short[] minHashes = new short[numTables];
+
+        // Initialize with max value
+        Arrays.fill(minHashes, (short)MAX_HASH);
+
+        for (int feature : features) {
+            for (int i = 0; i < numTables; i++) {
+                long seed = SEEDS[i];
+                int hash = murmur3_32(feature, seed);  // 32-bit hash
+                int bucket = hash & MAX_HASH;
+                if (bucket < (minHashes[i] & 0xFFFF)) {
+                    minHashes[i] = (short) bucket;
+                }
+            }
+        }
+
+        return minHashes;
+    }
+
+    private static int murmur3_32(int key, long seed) {
+        long h = seed ^ Integer.BYTES;
+        h ^= key;
+        h *= 0x85ebca6bL;
+        h ^= h >>> 13;
+        h *= 0xc2b2ae35L;
+        h ^= h >>> 16;
+        return (int) h;
     }
 }

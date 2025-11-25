@@ -1,9 +1,6 @@
 package com.shedule.x.processors.matcher.strategies;
 
-import com.shedule.x.dto.BipartiteGraph;
-import com.shedule.x.dto.EdgeDTO;
-import com.shedule.x.dto.MatchResult;
-import com.shedule.x.dto.MatchingRequest;
+import com.shedule.x.dto.*;
 import com.shedule.x.exceptions.InternalServerErrorException;
 import com.shedule.x.models.Edge;
 import com.shedule.x.models.Graph;
@@ -43,17 +40,17 @@ public class HopcroftKarpMatchingStrategy implements MatchingStrategy {
                 groupId, domainId, allPMs.size());
 
         try {
-            List<Node> leftNodes = new ArrayList<>();
-            List<Node> rightNodes = new ArrayList<>();
+            List<NodeDTO> leftNodes = new ArrayList<>();
+            List<NodeDTO> rightNodes = new ArrayList<>();
             Set<String> uniqueLeftIds = new HashSet<>();
             Set<String> uniqueRightIds = new HashSet<>();
 
             for (GraphRecords.PotentialMatch pm : allPMs) {
                 if (uniqueLeftIds.add(pm.getReferenceId())) {
-                    leftNodes.add(Node.builder().referenceId(pm.getReferenceId()).build());
+                    leftNodes.add(NodeDTO.builder().referenceId(pm.getReferenceId()).build());
                 }
                 if (uniqueRightIds.add(pm.getMatchedReferenceId())) {
-                    rightNodes.add(Node.builder().referenceId(pm.getMatchedReferenceId()).build());
+                    rightNodes.add(NodeDTO.builder().referenceId(pm.getMatchedReferenceId()).build());
                 }
             }
 

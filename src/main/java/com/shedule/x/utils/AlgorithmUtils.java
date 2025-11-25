@@ -13,7 +13,6 @@ public final class AlgorithmUtils {
         if ((n & 1) != 0) throw new IllegalArgumentException("pairs length must be even");
         if (n == 0) return;
 
-        // sort by LSB (index 1 of each pair), then MSB (index 0)
         radixSort64OnPairIndex(pairs, tmp, 1);
         radixSort64OnPairIndex(pairs, tmp, 0);
     }
@@ -23,7 +22,6 @@ public final class AlgorithmUtils {
         final int RADIX = 256;
         final int nPairs = src.length / 2;
 
-        // We'll perform byte-wise LSD stable sorts (8 passes). We'll switch src/dst each pass.
         long[] in = src;
         long[] out = tmp;
         boolean inSrc = true;
@@ -61,7 +59,6 @@ public final class AlgorithmUtils {
             inSrc = !inSrc;
         }
 
-        // after even #passes, if result is in tmp, copy back to src
         if (!inSrc) {
             System.arraycopy(in, 0, src, 0, src.length);
         }

@@ -1,9 +1,9 @@
 package com.shedule.x.processors;
 
 import com.shedule.x.config.factory.NodePriorityProvider;
+import com.shedule.x.utils.graph.StoreUtility;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
-import org.lmdbjava.Cursor;
 import org.lmdbjava.Dbi;
 import org.lmdbjava.Env;
 import org.lmdbjava.Txn;
@@ -11,21 +11,20 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
+
 import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.StampedLock;
-import java.util.stream.Collectors;
+
 import java.util.stream.IntStream;
 import static com.shedule.x.utils.graph.StoreUtility.*;
+import java.util.*;
+
 
 @Slf4j
 @Component
 public class LshBucketManagerImpl implements LshBucketManager {
-    private static final int LOCK_STRIPES = 16_384;
-    private static final int MAX_BUCKET_IDS = 40_000;
-    private static final int TARGET_SIZE = 2_000;
-    private static final long BUCKET_TTL_NS = 86_400_000_000_000L;
+    private static final int LOCK_STRIPES = 65_536;
     private static final int LSH_BUCKET_TARGET_SIZE = 2_000;
     private final AtomicLong totalBucketEntries = new AtomicLong(0);
 
@@ -37,169 +36,179 @@ public class LshBucketManagerImpl implements LshBucketManager {
 
     private final StampedLock[] stripeLocks = new StampedLock[LOCK_STRIPES];
 
-    private final ThreadLocal<ByteBuffer> keyBuf = ThreadLocal.withInitial(() ->
-            ByteBuffer.allocateDirect(12).order(ByteOrder.BIG_ENDIAN));
-    private final ThreadLocal<ByteBuffer> valBuf = ThreadLocal.withInitial(() ->
-            ByteBuffer.allocateDirect(MAX_BUCKET_IDS * 16 + 64));
-    private final ThreadLocal<long[]> mergeBuf = ThreadLocal.withInitial(() -> new long[MAX_BUCKET_IDS * 4]);
-    private final ThreadLocal<ByteBuffer> lshKeyBuf =
-            ThreadLocal.withInitial(() -> ByteBuffer.allocateDirect(12).order(ByteOrder.BIG_ENDIAN));
-    private final ThreadLocal<long[]> radixTmp =
-            ThreadLocal.withInitial(() -> new long[MAX_BUCKET_IDS * 2]);
-
-    private final ThreadLocal<ByteBuffer> lshValBuf =
-            ThreadLocal.withInitial(() ->
-                    ByteBuffer.allocateDirect(MAX_BUCKET_IDS * 16 + 64)
-                            .order(ByteOrder.BIG_ENDIAN));
-
-
     @PostConstruct
     void init() {
-        IntStream.range(0, LOCK_STRIPES).forEach(i -> stripeLocks[i] = new StampedLock());
+        for (int i = 0; i < LOCK_STRIPES; i++) {
+            stripeLocks[i] = new StampedLock();
+        }
+        log.info("LshBucketManager initialized with {} lock stripes", LOCK_STRIPES);
     }
 
     @Override
     public Set<UUID> getBucket(int tableIdx, int band) {
         Env<ByteBuffer> env = lmdb.env();
         Dbi<ByteBuffer> lshDbi = lmdb.lshDbi();
-        ByteBuffer keyBufDirect = lshKeyBuf.get();
-        keyBufDirect.clear();
-        keyBufDirect.putInt(0x4C534800).putInt(tableIdx).putInt(band);
-        keyBufDirect.flip();
+
+        ByteBuffer key = StoreUtility.keyBuf();
+        key.putInt(0x4C534800).putInt(tableIdx).putInt(band);
+        key.flip();
 
         try (Txn<ByteBuffer> txn = env.txnRead()) {
-            ByteBuffer val = lshDbi.get(txn, keyBufDirect);
+            ByteBuffer val = lshDbi.get(txn, key);
             if (val == null) return Set.of();
+
             long[] raw = decodeBucket(val);
+            if (raw.length == 0) return Set.of();
+
             Set<UUID> set = new HashSet<>(raw.length / 2);
             for (int i = 0; i < raw.length; i += 2) {
                 set.add(new UUID(raw[i], raw[i + 1]));
             }
-            return Set.copyOf(set);
+            return set;
         } catch (Exception e) {
-            log.warn("LSH get fail", e);
+            log.warn("LSH get fail {}-{}", tableIdx, band, e);
             return Set.of();
         }
     }
 
     @Override
     public int getBucketSize(int tableIdx, int band) {
-        return getBucket(tableIdx, band).size();
+        Env<ByteBuffer> env = lmdb.env();
+        Dbi<ByteBuffer> lshDbi = lmdb.lshDbi();
+
+        ByteBuffer key = StoreUtility.keyBuf();
+        key.putInt(0x4C534800).putInt(tableIdx).putInt(band);
+        key.flip();
+
+        try (Txn<ByteBuffer> txn = env.txnRead()) {
+            ByteBuffer val = lshDbi.get(txn, key);
+            if (val == null || val.remaining() < 12) return 0;
+
+            long ts = val.getLong(0);
+            if (isExpired(ts)) return 0;
+
+            return val.getInt(8);
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     @Override
     public void addToBucket(int tableIdx, int band, Collection<UUID> nodeIds) {
-        Env<ByteBuffer> env = lmdb.env();
-        Dbi<ByteBuffer> lshDbi = lmdb.lshDbi();
-        if (nodeIds.isEmpty() || nodeIds.size() > MAX_BUCKET_IDS) return;
+        if (nodeIds.isEmpty()) return;
 
+        // 1. Determine Lock Stripe using Utility
         long hash = ((long) tableIdx << 32) | (band & 0xFFFFFFFFL);
-        int stripe = stripe(hash);
+        int stripe = StoreUtility.stripe(hash);
+
         StampedLock lock = stripeLocks[stripe];
         long stamp = lock.writeLock();
+
         try {
-            final ByteBuffer keyBufDirect = lshKeyBuf.get();
-            keyBufDirect.clear();
-            keyBufDirect.putInt(0x4C534800).putInt(tableIdx).putInt(band); // Magic + table + band
-            keyBufDirect.flip();
+            Env<ByteBuffer> env = lmdb.env();
+            Dbi<ByteBuffer> lshDbi = lmdb.lshDbi();
+
+            // 2. Prepare Key
+            ByteBuffer keyBuf = StoreUtility.keyBuf();
+            keyBuf.putInt(0x4C534800).putInt(tableIdx).putInt(band);
+            keyBuf.flip();
 
             try (Txn<ByteBuffer> txn = env.txnWrite()) {
-                ByteBuffer existingVal = lshDbi.get(txn, keyBufDirect);
+                ByteBuffer existingVal = lshDbi.get(txn, keyBuf);
 
-                // Parse existing bucket
-                long[] existing = (existingVal == null)
-                        ? new long[0]
-                        : decodeBucket(existingVal);
+                // 3. Decode Existing
+                long[] existing = (existingVal == null) ? new long[0] : decodeBucket(existingVal);
 
-                // Convert incoming UUIDs to sorted long-pairs
-                long[] incoming = toLongArray(nodeIds);
-                sortByPairs(incoming);
+                // 4. Prepare Incoming: Convert -> Sort
+                long[] incoming = StoreUtility.toLongArray(nodeIds);
+                StoreUtility.sortByPairs(incoming);
 
-                // Merge + dedup
-                long[] merged = mergeAndDedupPairs(existing, incoming);
+                // 5. Fast Primitive Merge
+                long[] merged = StoreUtility.mergeAndDedupPairs(existing, incoming);
                 int finalSize = merged.length / 2;
 
-                // Trim under lock if too large
+                // 6. Trim if needed
                 if (finalSize > LSH_BUCKET_TARGET_SIZE) {
                     merged = trimByPriority(merged);
                     finalSize = merged.length / 2;
                 }
 
-                // Required LMDB value bytes: UUID pairs + 4-byte count + 8-byte MSB-LSB marker if used
-                int requiredBytes = merged.length * Long.BYTES + 12;
+                // 7. Encode using Utility
+                ByteBuffer valDirect = StoreUtility.encodeBucket(merged);
 
-                ByteBuffer valDirect = lshValBuf.get();
-                if (valDirect.capacity() < requiredBytes) {
-                    // Grow buffer safely and replace ThreadLocal reference
-                    valDirect = ByteBuffer.allocateDirect(requiredBytes * 2)
-                            .order(ByteOrder.BIG_ENDIAN);
-                    lshValBuf.set(valDirect);
-                }
-
-                // Encode back to LMDB value
-                valDirect.clear();
-                valDirect = encodeBucket(merged);
-
-                // Write to LMDB
-                keyBufDirect.rewind();
-                lshDbi.put(txn, keyBufDirect, valDirect);
+                // 8. Write
+                keyBuf.rewind();
+                lshDbi.put(txn, keyBuf, valDirect);
                 txn.commit();
 
+                // Metrics
                 long added = finalSize - (existing.length / 2);
-                totalBucketEntries.addAndGet(added);
-
-                if (finalSize == LSH_BUCKET_TARGET_SIZE && added < 0) {
-                    log.info("Bucket {}-{} auto-trimmed to {} nodes",
-                            tableIdx, band, LSH_BUCKET_TARGET_SIZE);
+                if (added != 0) {
+                    totalBucketEntries.addAndGet(added);
                 }
             }
         } catch (Exception e) {
-            log.warn("LSH add failed {}-{}", tableIdx, band, e);
+            log.error("LSH add failed {}-{}", tableIdx, band, e);
         } finally {
             lock.unlockWrite(stamp);
         }
     }
 
-
     @Override
     public void removeFromBucket(int tableIdx, int band, UUID nodeId) {
-        Env<ByteBuffer> env = lmdb.env();
-        Dbi<ByteBuffer> lshDbi = lmdb.lshDbi();
         long hash = ((long) tableIdx << 32) | (band & 0xFFFFFFFFL);
-        int stripe = stripe(hash);
+        int stripe = StoreUtility.stripe(hash);
         StampedLock lock = stripeLocks[stripe];
         long stamp = lock.writeLock();
+
         try {
-            ByteBuffer keyBufDirect = lshKeyBuf.get();
-            keyBufDirect.clear();
-            keyBufDirect.putInt(0x4C534800).putInt(tableIdx).putInt(band);
-            keyBufDirect.flip();
+            Env<ByteBuffer> env = lmdb.env();
+            Dbi<ByteBuffer> lshDbi = lmdb.lshDbi();
+
+            ByteBuffer keyBuf = StoreUtility.keyBuf();
+            keyBuf.putInt(0x4C534800).putInt(tableIdx).putInt(band);
+            keyBuf.flip();
 
             try (Txn<ByteBuffer> txn = env.txnWrite()) {
-                ByteBuffer existingVal = lshDbi.get(txn, keyBufDirect);
+                ByteBuffer existingVal = lshDbi.get(txn, keyBuf);
                 if (existingVal == null) return;
 
                 long[] existing = decodeBucket(existingVal);
-                int originalSize = existing.length / 2;
+                if (existing.length == 0) return;
 
-                long[] filtered = new long[existing.length];
-                int pos = 0;
-                for (int i = 0; i < existing.length; i += 2) {
-                    UUID id = new UUID(existing[i], existing[i + 1]);
-                    if (!id.equals(nodeId)) {
-                        filtered[pos++] = existing[i];
-                        filtered[pos++] = existing[i + 1];
+                // Filter logic
+                long targetMsb = nodeId.getMostSignificantBits();
+                long targetLsb = nodeId.getLeastSignificantBits();
+
+                // Check if removal is needed (linear scan is fine for bucket sizes)
+                boolean found = false;
+                int count = existing.length / 2;
+                for (int i=0; i<count; i++) {
+                    if (existing[i*2] == targetMsb && existing[i*2+1] == targetLsb) {
+                        found = true;
+                        break;
                     }
                 }
 
-                if (pos == existing.length) return; // No change
+                if (!found) return;
 
-                ByteBuffer valDirect = encodeBucket(Arrays.copyOf(filtered, pos));
-                keyBufDirect.rewind();
-                lshDbi.put(txn, keyBufDirect, valDirect);
+                // Rebuild array without the target
+                long[] filtered = new long[existing.length - 2];
+                int pos = 0;
+                for (int i = 0; i < existing.length; i += 2) {
+                    long msb = existing[i];
+                    long lsb = existing[i+1];
+                    if (msb == targetMsb && lsb == targetLsb) continue;
+                    filtered[pos++] = msb;
+                    filtered[pos++] = lsb;
+                }
+
+                ByteBuffer valDirect = StoreUtility.encodeBucket(filtered);
+                keyBuf.rewind();
+                lshDbi.put(txn, keyBuf, valDirect);
                 txn.commit();
 
-                totalBucketEntries.addAndGet(-1);
+                totalBucketEntries.decrementAndGet();
             }
         } catch (Exception e) {
             log.error("LSH remove failed {}-{}", tableIdx, band, e);
@@ -208,43 +217,38 @@ public class LshBucketManagerImpl implements LshBucketManager {
         }
     }
 
-    private long[] decodeBucket(ByteBuffer data) {
-        if (data.remaining() < 12) return new long[0];
-
-        ByteBuffer dup = data.duplicate().order(ByteOrder.BIG_ENDIAN);
-        long ts = dup.getLong(0);
-
-        // Safe overflow-aware TTL check
-        long now = System.nanoTime();
-        if (now - ts > BUCKET_TTL_NS || ts > now) {
-            return new long[0];
-        }
-
-        int count = dup.getInt(8);
-        if (count < 0 || count > MAX_BUCKET_IDS) return new long[0];
-
-        long[] arr = new long[count * 2];
-        dup.position(12);
-        dup.asLongBuffer().get(arr);
-        return arr;
-    }
-
     @Override
     public void trimBucket(int tableIdx, int band, long targetSize) {
-        Set<UUID> bucket = getBucket(tableIdx, band);
-        if (bucket.size() <= targetSize) return;
+        long hash = ((long) tableIdx << 32) | (band & 0xFFFFFFFFL);
+        int stripe = StoreUtility.stripe(hash);
+        StampedLock lock = stripeLocks[stripe];
+        long stamp = lock.writeLock();
 
-        List<UUID> sorted = bucket.stream()
-                .sorted(Comparator.comparingLong(nodePriorityProvider::getPriority).reversed())
-                .collect(Collectors.toList());
+        try {
+            Env<ByteBuffer> env = lmdb.env();
+            Dbi<ByteBuffer> lshDbi = lmdb.lshDbi();
+            ByteBuffer keyBuf = StoreUtility.keyBuf();
+            keyBuf.putInt(0x4C534800).putInt(tableIdx).putInt(band);
+            keyBuf.flip();
 
-        List<UUID> keep = sorted.subList(0, (int) Math.min(targetSize, sorted.size()));
-        addToBucket(tableIdx, band, keep);
+            try (Txn<ByteBuffer> txn = env.txnWrite()) {
+                ByteBuffer existingVal = lshDbi.get(txn, keyBuf);
+                if (existingVal == null) return;
 
-        int trimmed = bucket.size() - keep.size();
-        if (trimmed > 1000) {
-            log.info("LSH trimmed bucket {}-{}: {} → {} (kept top {} by priority)",
-                    tableIdx, band, bucket.size(), keep.size(), targetSize);
+                long[] existing = decodeBucket(existingVal);
+                if (existing.length / 2 <= targetSize) return;
+
+                long[] trimmed = trimByPriority(existing);
+
+                ByteBuffer valDirect = StoreUtility.encodeBucket(trimmed);
+                keyBuf.rewind();
+                lshDbi.put(txn, keyBuf, valDirect);
+                txn.commit();
+            }
+        } catch (Exception e) {
+            log.error("LSH trim failed", e);
+        } finally {
+            lock.unlockWrite(stamp);
         }
     }
 
@@ -253,36 +257,71 @@ public class LshBucketManagerImpl implements LshBucketManager {
         Env<ByteBuffer> env = lmdb.env();
         Dbi<ByteBuffer> lshDbi = lmdb.lshDbi();
         try (Txn<ByteBuffer> txn = env.txnWrite()) {
-            Cursor<ByteBuffer> cur = lshDbi.openCursor(txn);
-            if (!cur.first()) return;
-            int cleared = 0;
-            do {
-                cur.delete();
-                cleared++;
-            } while (cur.next());
+            lshDbi.drop(txn); // Efficiently drop the DB content
             txn.commit();
             totalBucketEntries.set(0);
-            log.info("Cleared {} LSH buckets", cleared);
+            log.info("Cleared all LSH buckets");
         } catch (Exception e) {
             log.error("Clear buckets failed", e);
         }
     }
 
+
     private long[] trimByPriority(long[] pairs) {
         return IntStream.range(0, pairs.length / 2)
-                .mapToObj(i -> new UUIDWithPriority(new UUID(pairs[i*2], pairs[i*2+1]),
-                        nodePriorityProvider.getPriority(new UUID(pairs[i*2], pairs[i*2+1]))))
-                .sorted(Comparator.comparingLong(u -> -u.priority))
-                .limit(TARGET_SIZE)
-                .map(u -> new long[]{u.uuid.getMostSignificantBits(), u.uuid.getLeastSignificantBits()})
+                .mapToObj(i -> {
+                    long msb = pairs[i * 2];
+                    long lsb = pairs[i * 2 + 1];
+                    UUID uuid = new UUID(msb, lsb);
+                    long prio = nodePriorityProvider.getPriority(uuid);
+                    return new UUIDWithPriority(msb, lsb, prio);
+                })
+                .sorted(Comparator.comparingLong(UUIDWithPriority::priority).reversed())
+                .limit(LSH_BUCKET_TARGET_SIZE)
+                .map(u -> new long[]{u.msb, u.lsb})
                 .flatMapToLong(Arrays::stream)
                 .toArray();
     }
 
     @Override
-    public void close() throws Exception {
+    public void mergeAndWriteBucket(Txn<ByteBuffer> txn, int tableIdx, int band, List<UUID> newIds) {
 
+        // MAX_BUCKET_SIZE_HARD should be defined in LshBucketManagerImpl
+        final int MAX_BUCKET_SIZE_HARD = 5_000;
+        Dbi<ByteBuffer> lshDbi = lmdb.lshDbi(); // Assuming lmdb is a field
+
+        // 1. Prepare Key
+        ByteBuffer keyBuf = StoreUtility.keyBuf();
+        keyBuf.putInt(0x4C534800).putInt(tableIdx).putInt(band).flip();
+
+        // 2. Read Existing (using the shared TXN)
+        ByteBuffer existingVal = lshDbi.get(txn, keyBuf);
+        long[] existing = (existingVal == null) ? new long[0] : decodeBucket(existingVal); // decodeBucket is an existing helper
+
+        // 3. Prepare Incoming
+        long[] incoming = StoreUtility.toLongArray(newIds); // Existing utility
+        StoreUtility.sortByPairs(incoming); // Existing utility
+
+        // 4. Merge & Dedup (CPU intensive but unavoidable for packed storage)
+        long[] merged = StoreUtility.mergeAndDedupPairs(existing, incoming);
+
+        // 5. Fast Trim (Size only - NO slow priority provider calls)
+        if (merged.length / 2 > MAX_BUCKET_SIZE_HARD) {
+            merged = Arrays.copyOf(merged, MAX_BUCKET_SIZE_HARD * 2);
+        }
+
+        // 6. Write Back (using the shared TXN)
+        ByteBuffer valDirect = StoreUtility.encodeBucket(merged); // Existing utility
+        keyBuf.rewind();
+        lshDbi.put(txn, keyBuf, valDirect);
+
+        // IMPORTANT: NO Java lock, NO txn.commit().
     }
 
-    private record UUIDWithPriority(UUID uuid, long priority) { }
+    @Override
+    public void close() throws Exception {
+        // No op, LMDB handles closing
+    }
+
+    private record UUIDWithPriority(long msb, long lsb, long priority) { }
 }

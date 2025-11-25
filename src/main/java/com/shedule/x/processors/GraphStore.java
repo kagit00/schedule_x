@@ -2,17 +2,16 @@ package com.shedule.x.processors;
 
 import com.shedule.x.config.factory.AutoCloseableStream;
 import com.shedule.x.dto.EdgeDTO;
-import com.shedule.x.models.Edge;
 import com.shedule.x.service.GraphRecords;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.lmdbjava.Txn;
 import org.springframework.stereotype.Component;
 
-import java.util.List;
-import java.util.Collection;
-import java.util.Set;
-import java.util.UUID;
+import java.nio.ByteBuffer;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
 @Component
 @Slf4j
@@ -40,6 +39,26 @@ public class GraphStore implements AutoCloseable {
 
     public void cleanEdges(UUID groupId) {
         edgePersistence.cleanEdges(groupId);
+    }
+
+    public void bulkIngestLSH(Map<Integer, List<UUID>> groupedUpdates) {
+        try (Txn<ByteBuffer> txn = lmdbEnv.env().txnWrite()) {
+
+            for (Map.Entry<Integer, List<UUID>> entry : groupedUpdates.entrySet()) {
+                int compositeKey = entry.getKey();
+                int tableIdx = compositeKey >>> 16;
+                int band = compositeKey & 0xFFFF;
+                List<UUID> newNodes = entry.getValue();
+
+                // -> CALL 3: Delegate the actual I/O work, passing the single TXN down
+                lshBucketManager.mergeAndWriteBucket(txn, tableIdx, band, newNodes);
+            }
+
+            txn.commit();
+        } catch (Exception e) {
+            log.error("Bulk LSH Ingest Failed. Transaction aborted.", e);
+            throw new CompletionException(e);
+        }
     }
 
     // --- LSH Bucket operations ---

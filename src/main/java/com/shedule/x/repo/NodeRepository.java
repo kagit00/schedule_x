@@ -30,7 +30,6 @@ public interface NodeRepository extends JpaRepository<Node, UUID> {
     @Query("SELECT DISTINCT KEY(m) FROM Node n JOIN n.metaData m WHERE n.groupId = :groupId")
     Set<String> findDistinctMetadataKeysByGroupId(@Param("groupId") UUID groupId);
 
-    // 3. Optimized Cursor Fetch (The "Engine" of the job)
     @Query(value = """
         SELECT CAST(n.id AS uuid) as id, n.created_at as createdAt
         FROM nodes n

@@ -1,6 +1,10 @@
 package com.shedule.x.processors;
 
+import org.lmdbjava.Txn;
+
+import java.nio.ByteBuffer;
 import java.util.Collection;
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
@@ -11,4 +15,5 @@ public interface LshBucketManager extends AutoCloseable {
     void removeFromBucket(int tableIdx, int band, UUID nodeId);
     void trimBucket(int tableIdx, int band, long targetSize);
     void clearAllBuckets();
+    void mergeAndWriteBucket(Txn<ByteBuffer> txn, int tableIdx, int band, List<UUID> newIds);
 }

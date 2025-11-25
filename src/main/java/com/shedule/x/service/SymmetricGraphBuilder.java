@@ -2,14 +2,14 @@ package com.shedule.x.service;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import com.shedule.x.config.factory.AutoCloseableStream;
-import com.shedule.x.models.Edge;
+import com.shedule.x.config.factory.TaskIterator;
+import com.shedule.x.dto.ChunkTask;
+import com.shedule.x.dto.NodeDTO;
 import com.shedule.x.processors.PotentialMatchComputationProcessor;
 import io.micrometer.core.instrument.Timer;
 import com.shedule.x.builder.SymmetricEdgeBuildingStrategy;
 import com.shedule.x.config.factory.SymmetricEdgeBuildingStrategyFactory;
 import com.shedule.x.dto.MatchingRequest;
-import com.shedule.x.exceptions.InternalServerErrorException;
 import com.shedule.x.models.Node;
 import com.shedule.x.utils.db.BatchUtils;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -26,19 +26,19 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.*;
+import java.util.concurrent.*;
+
 
 @Slf4j
 @Service
 public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
-
     private final SymmetricEdgeBuildingStrategyFactory strategyFactory;
     private final PotentialMatchComputationProcessor processor;
     private final MeterRegistry meterRegistry;
 
-    // Executors
-    private final ExecutorService computeExecutor; // CPU heavy (similarity calc)
+    private final ExecutorService computeExecutor;
 
-    // State management
     private final Cache<UUID, Boolean> cleanupGuards = Caffeine.newBuilder()
             .expireAfterWrite(1, TimeUnit.HOURS).build();
     private volatile boolean shutdownInitiated = false;
@@ -47,12 +47,12 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
     private int chunkSize;
 
     @Value("${graph.max-concurrent-batches:8}")
-    private int maxConcurrentWorkers; // Replaces Semaphore
+    private int maxConcurrentWorkers;
 
     @Value("${graph.match-batch-size:500}")
     private int matchBatchSize;
 
-    @Value("${graph.top-k:200}")
+    @Value("${graph.top-k:1000}")
     private int topK;
 
     public SymmetricGraphBuilder(
@@ -70,118 +70,15 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
     @PostConstruct
     private void initMetrics() {
         if (computeExecutor instanceof ThreadPoolExecutor tpe) {
-            //meterRegistry.gauge("graph.builder.queue", tpe, ThreadPoolExecutor::getQueue);
             meterRegistry.gauge("graph.builder.active", tpe, ThreadPoolExecutor::getActiveCount);
         }
     }
 
-    @Override
-    public CompletableFuture<GraphRecords.GraphResult> build(List<Node> newNodes, MatchingRequest request) {
-        UUID groupId = request.getGroupId();
-        log.info("Starting symmetric graph build | groupId={} | nodes={}", groupId, newNodes.size());
-
-        if (shutdownInitiated) return CompletableFuture.failedFuture(new IllegalStateException("Shutting down"));
-
-        Timer.Sample timer = Timer.start(meterRegistry);
-
-        // 1. Partition Data
-        List<List<Node>> allChunks = BatchUtils.partition(newNodes, chunkSize);
-        AtomicInteger chunkIndexCounter = new AtomicInteger(0);
-
-        // 2. Initialize Strategy
-        SymmetricEdgeBuildingStrategy strategy = strategyFactory.createStrategy(request.getWeightFunctionKey(), newNodes);
-
-        CompletableFuture<GraphRecords.GraphResult> resultFuture = new CompletableFuture<>();
-
-        // 3. Index Nodes (Blocking Phase) -> Then Start Workers
-        strategy.indexNodes(newNodes, request.getPage())
-                .thenRun(() -> startConcurrentWorkers(allChunks, chunkIndexCounter, strategy, request, resultFuture))
-                .exceptionally(ex -> {
-                    handleFailure(groupId, ex, timer, resultFuture);
-                    return null;
-                });
-
-        return resultFuture.whenComplete((r, t) -> {
-            timer.stop(meterRegistry.timer("graph.build.duration", "status", t == null ? "success" : "error"));
-        });
-    }
-
-    /**
-     * Starts 'maxConcurrentWorkers' parallel chains.
-     * Each chain processes one chunk, then picks the next available chunk index.
-     */
-    private void startConcurrentWorkers(
-            List<List<Node>> allChunks,
-            AtomicInteger chunkIndexCounter,
-            SymmetricEdgeBuildingStrategy strategy,
-            MatchingRequest request,
-            CompletableFuture<GraphRecords.GraphResult> resultFuture) {
-
-        int totalChunks = allChunks.size();
-        int workersToStart = Math.min(totalChunks, maxConcurrentWorkers);
-        List<CompletableFuture<Void>> workerFutures = new ArrayList<>();
-
-        log.info("Spawning {} workers for {} chunks | groupId={}", workersToStart, totalChunks, request.getGroupId());
-
-        for (int i = 0; i < workersToStart; i++) {
-            workerFutures.add(runWorkerChain(allChunks, chunkIndexCounter, strategy, request));
-        }
-
-        // Wait for all workers to finish
-        CompletableFuture.allOf(workerFutures.toArray(new CompletableFuture[0]))
-                .thenCompose(v -> finalizeBuild(request, resultFuture))
-                .exceptionally(ex -> {
-                    handleFailure(request.getGroupId(), ex, null, resultFuture);
-                    return null;
-                });
-    }
-
-    /**
-     * recursive chain: Get Index -> Process -> Ingest -> Recurse
-     */
-    private CompletableFuture<Void> runWorkerChain(
-            List<List<Node>> allChunks,
-            AtomicInteger counter,
-            SymmetricEdgeBuildingStrategy strategy,
-            MatchingRequest request) {
-
-        if (shutdownInitiated || Thread.currentThread().isInterrupted()) {
-            return CompletableFuture.completedFuture(null);
-        }
-
-        // 1. Pick next chunk atomically
-        int myIndex = counter.getAndIncrement();
-        if (myIndex >= allChunks.size()) {
-            return CompletableFuture.completedFuture(null); // No more work
-        }
-
-        List<Node> chunk = allChunks.get(myIndex);
-
-        // 2. Compute Matches (CPU Bound)
-        return CompletableFuture.supplyAsync(() -> {
-                    try {
-                        // Ensure strategies are thread-safe or locally instantiated if not
-                        List<GraphRecords.PotentialMatch> matches = new ArrayList<>();
-                        strategy.processBatch(chunk, null, matches, Collections.emptySet(), request, Map.of());
-
-                        return new GraphRecords.ChunkResult(Collections.emptySet(), matches, myIndex, Instant.now());
-                    } catch (Exception e) {
-                        throw new CompletionException(e);
-                    }
-                }, computeExecutor)
-                // 3. Send to Processor (Memory/Disk Queue)
-                .thenCompose(chunkResult ->
-                        processor.processChunkMatches(chunkResult, request.getGroupId(), request.getDomainId(), request.getProcessingCycleId(), matchBatchSize)
-                )
-                // 4. Recurse (Pick next chunk)
-                .thenCompose(v -> runWorkerChain(allChunks, counter, strategy, request));
-    }
-
     private CompletableFuture<Void> finalizeBuild(MatchingRequest request, CompletableFuture<GraphRecords.GraphResult> resultFuture) {
         UUID groupId = request.getGroupId();
-        log.info("All chunks processed. Finalizing build | groupId={}", groupId);
+        log.info("All tasks processed. Finalizing build | groupId={}", groupId);
 
-        // 1. Save Pending (Flush Queue) - The Processor method we added earlier
+        // 1. Save Pending (Flush Queue)
         return processor.savePendingMatchesAsync(groupId, request.getDomainId(), request.getProcessingCycleId(), matchBatchSize)
                 .thenCompose(v ->
                         // 2. Final Save (Streaming)
@@ -205,7 +102,6 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
     }
 
     private void performCleanup(UUID groupId) {
-        // Ensure cleanup runs only once per group execution
         if (Boolean.TRUE.equals(cleanupGuards.asMap().putIfAbsent(groupId, true))) {
             return;
         }
@@ -221,4 +117,147 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
         shutdownInitiated = true;
         computeExecutor.shutdownNow();
     }
+
+    @Override
+    public CompletableFuture<GraphRecords.GraphResult> build(
+            List<NodeDTO> newNodes,
+            MatchingRequest request) {
+
+        UUID groupId = request.getGroupId();
+        log.info("Starting symmetric graph build | groupId={} | nodes={}", groupId, newNodes.size());
+
+        if (shutdownInitiated) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Shutting down"));
+        }
+
+        Timer.Sample timer = Timer.start(meterRegistry);
+
+        // Partition new nodes into batch chunks
+        List<List<NodeDTO>> allChunks = BatchUtils.partition(newNodes, chunkSize);
+        int numChunks = allChunks.size();
+
+
+        final TaskIterator taskIterator = new TaskIterator(allChunks);
+        final int totalTasks = taskIterator.getTotalTasks();
+
+        // Tracks how many tasks have been consumed, NOT how many exist
+        final AtomicInteger taskIndexCounter = new AtomicInteger(0);
+
+        // Create matching strategy
+        SymmetricEdgeBuildingStrategy strategy =
+                strategyFactory.createStrategy(request.getWeightFunctionKey(), newNodes);
+
+        CompletableFuture<GraphRecords.GraphResult> resultFuture = new CompletableFuture<>();
+
+        // Index nodes → then start worker chains
+        strategy.indexNodes(newNodes, request.getPage())
+                .thenRun(() ->
+                        startConcurrentWorkers(taskIterator, totalTasks, taskIndexCounter, strategy, request, resultFuture)
+                )
+                .exceptionally(ex -> {
+                    handleFailure(groupId, ex, timer, resultFuture);
+                    return null;
+                });
+
+        // Finalize and record metrics
+        return resultFuture.whenComplete((r, t) -> {
+            timer.stop(
+                    meterRegistry.timer(
+                            "graph.build.duration",
+                            "status",
+                            t == null ? "success" : "error"
+                    )
+            );
+        });
+    }
+
+    private void startConcurrentWorkers(
+            TaskIterator taskIterator,
+            int totalTasks,
+            AtomicInteger taskIndexCounter,
+            SymmetricEdgeBuildingStrategy strategy,
+            MatchingRequest request,
+            CompletableFuture<GraphRecords.GraphResult> resultFuture) {
+
+        int workersToStart = Math.min(totalTasks, maxConcurrentWorkers);
+        List<CompletableFuture<Void>> workerFutures = new ArrayList<>(workersToStart);
+
+        log.info(
+                "Spawning {} workers for {} cross-product tasks | groupId={}",
+                workersToStart, totalTasks, request.getGroupId()
+        );
+
+        for (int i = 0; i < workersToStart; i++) {
+            workerFutures.add(
+                    runWorkerChain(taskIterator, totalTasks, taskIndexCounter, strategy, request)
+            );
+        }
+
+        CompletableFuture.allOf(workerFutures.toArray(new CompletableFuture[0]))
+                .thenCompose(v -> finalizeBuild(request, resultFuture))
+                .exceptionally(ex -> {
+                    handleFailure(request.getGroupId(), ex, null, resultFuture);
+                    return null;
+                });
+    }
+
+    private CompletableFuture<Void> runWorkerChain(
+            TaskIterator taskIterator,
+            int totalTasks,
+            AtomicInteger counter,
+            SymmetricEdgeBuildingStrategy strategy,
+            MatchingRequest request) {
+
+        if (shutdownInitiated || Thread.currentThread().isInterrupted()) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        int myIndex = counter.getAndIncrement();
+        if (myIndex >= totalTasks) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        ChunkTask task = taskIterator.getTaskByIndex(myIndex);
+
+        if (myIndex % 1000 == 0) {
+            log.info("Progress: {}/{} tasks processed | groupId={}",
+                    myIndex, totalTasks, request.getGroupId());
+        }
+
+        return CompletableFuture.supplyAsync(() -> {
+                    try {
+                        List<GraphRecords.PotentialMatch> matches = new ArrayList<>();
+                        strategy.processBatch(
+                                task.sourceNodes(),
+                                task.targetNodes(),
+                                matches,
+                                Collections.emptySet(),
+                                request,
+                                Map.of()
+                        );
+
+                        return new GraphRecords.ChunkResult(
+                                Collections.emptySet(),
+                                matches,
+                                myIndex,
+                                Instant.now()
+                        );
+                    } catch (Exception e) {
+                        throw new CompletionException(e);
+                    }
+                }, computeExecutor)
+                .thenCompose(chunkResult ->
+                        processor.processChunkMatches(
+                                chunkResult,
+                                request.getGroupId(),
+                                request.getDomainId(),
+                                request.getProcessingCycleId(),
+                                matchBatchSize
+                        )
+                )
+                .thenCompose(v ->
+                        runWorkerChain(taskIterator, totalTasks, counter, strategy, request)
+                );
+    }
+
 }

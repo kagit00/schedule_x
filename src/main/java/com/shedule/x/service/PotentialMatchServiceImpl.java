@@ -3,6 +3,7 @@ package com.shedule.x.service;
 import com.google.common.collect.Lists;
 import com.shedule.x.dto.CursorPage;
 import com.shedule.x.dto.MatchingRequest;
+import com.shedule.x.dto.NodeDTO;
 import com.shedule.x.dto.NodesCount;
 import com.shedule.x.processors.GraphPreProcessor;
 import com.shedule.x.processors.WeightFunctionResolver;
@@ -101,11 +102,11 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
                 });
     }
 
-    private CompletableFuture<List<Node>> fetchNodesInSubBatches(
+    private CompletableFuture<List<NodeDTO>> fetchNodesInSubBatches(
             List<UUID> nodeIds, UUID groupId, LocalDateTime createdAfter) {
 
         List<List<UUID>> partitions = Lists.partition(nodeIds, NODE_FETCH_BATCH_SIZE);
-        List<CompletableFuture<List<Node>>> futures = new ArrayList<>();
+        List<CompletableFuture<List<NodeDTO>>> futures = new ArrayList<>();
 
         for (List<UUID> subBatch : partitions) {
             // Async acquire semaphore to prevent DB thrashing
@@ -124,7 +125,7 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
     }
 
     private CompletableFuture<Void> processGraphAndMatches(
-            List<Node> nodes, MatchingRequest request, UUID groupId, String cycleId) {
+            List<NodeDTO> nodes, MatchingRequest request, UUID groupId, String cycleId) {
 
         if (nodes.isEmpty()) return CompletableFuture.completedFuture(null);
 
@@ -136,7 +137,7 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
         return graphPreProcessor.buildGraph(nodes, request)
                 .thenAcceptAsync(graphResult -> {
                     // Mark as processed only after GraphBuilder accepts them
-                    List<UUID> processedIds = nodes.stream().map(Node::getId).toList();
+                    List<UUID> processedIds = nodes.stream().map(NodeDTO::getId).toList();
                     nodeFetchService.markNodesAsProcessed(processedIds, groupId);
                 }, batchExecutor);
     }
@@ -154,7 +155,7 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
         });
     }
 
-    private void bufferMatchParticipationHistory(List<Node> nodes, UUID groupId, UUID domainId, String cycleId) {
+    private void bufferMatchParticipationHistory(List<NodeDTO> nodes, UUID groupId, UUID domainId, String cycleId) {
         LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC); // Use consistent clock
         nodes.forEach(node -> historyBuffer.offer(
                 MatchParticipationHistory.builder()

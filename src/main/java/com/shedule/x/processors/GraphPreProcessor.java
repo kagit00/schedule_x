@@ -1,5 +1,6 @@
 package com.shedule.x.processors;
 
+import com.shedule.x.dto.NodeDTO;
 import com.shedule.x.dto.enums.MatchType;
 import com.shedule.x.dto.MatchingRequest;
 import com.shedule.x.models.Node;
@@ -28,6 +29,11 @@ import org.apache.commons.lang3.tuple.Pair;
 import java.util.*;
 import java.util.concurrent.*;
 
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 @Slf4j
 @Component
@@ -62,7 +68,10 @@ public class GraphPreProcessor {
         meterRegistry.gauge("graph_build_queue_length", buildSemaphore, Semaphore::getQueueLength);
     }
 
-    public CompletableFuture<GraphResult> buildGraph(List<Node> nodes, MatchingRequest request) {
+    public CompletableFuture<GraphResult> buildGraph(
+            List<NodeDTO> nodes,
+            MatchingRequest request) {
+
         UUID groupId = request.getGroupId();
         Timer.Sample totalSample = Timer.start(meterRegistry);
 
@@ -79,7 +88,10 @@ public class GraphPreProcessor {
     }
 
 
-    private CompletableFuture<GraphResult> submitBuildTask(List<Node> nodes, MatchingRequest request) {
+    private CompletableFuture<GraphResult> submitBuildTask(
+            List<NodeDTO> nodes,
+            MatchingRequest request) {
+
         UUID groupId = request.getGroupId();
         CompletableFuture<GraphResult> buildFuture;
 
@@ -93,15 +105,15 @@ public class GraphPreProcessor {
             buildFuture = symmetricGraphBuilder.build(nodes, request);
 
         } else {
-            Pair<Stream<Node>, Stream<Node>> partitioned = partitionStrategy.partition(
+            Pair<Stream<NodeDTO>, Stream<NodeDTO>> partitioned = partitionStrategy.partition(
                     nodes.stream(),
                     request.getPartitionKey(),
                     request.getLeftPartitionValue(),
                     request.getRightPartitionValue()
             );
 
-            List<Node> left = partitioned.getLeft().toList();
-            List<Node> right = partitioned.getRight().toList();
+            List<NodeDTO> left = partitioned.getLeft().toList();
+            List<NodeDTO> right = partitioned.getRight().toList();
 
             MatchType matchType = request.getMatchType() == MatchType.AUTO
                     ? inferMatchType(left, right)
@@ -130,11 +142,11 @@ public class GraphPreProcessor {
     }
 
 
-    public MatchType inferMatchType(List<Node> leftNodes, List<Node> rightNodes) {
-        Set<String> firstTypes = leftNodes.stream().map(Node::getType).filter(Objects::nonNull)
+    public MatchType inferMatchType(List<NodeDTO> leftNodes, List<NodeDTO> rightNodes) {
+        Set<String> firstTypes = leftNodes.stream().map(NodeDTO::getType).filter(Objects::nonNull)
                 .collect(Collectors.toSet());
 
-        Set<String> secondTypes = rightNodes.stream().map(Node::getType).filter(Objects::nonNull)
+        Set<String> secondTypes = rightNodes.stream().map(NodeDTO::getType).filter(Objects::nonNull)
                 .collect(Collectors.toSet());
 
         if (firstTypes.isEmpty() || secondTypes.isEmpty()) {
@@ -145,6 +157,7 @@ public class GraphPreProcessor {
         return firstTypes.equals(secondTypes) ? MatchType.SYMMETRIC : MatchType.BIPARTITE;
     }
 
+
     @Transactional(readOnly = true)
     public MatchType determineMatchTypeFromExistingData(UUID groupId, UUID domainId) {
         try (Stream<PotentialMatchEntity> matchStream = potentialMatchStreamingService
@@ -154,6 +167,7 @@ public class GraphPreProcessor {
                     .flatMap(pm -> {
                         var ref = nodeRepository.findByReferenceIdAndGroupIdAndDomainId(pm.getReferenceId(), groupId, domainId);
                         var mat = nodeRepository.findByReferenceIdAndGroupIdAndDomainId(pm.getMatchedReferenceId(), groupId, domainId);
+                        // Original logic retained: uses JPA Node types
                         if (ref.isPresent() && mat.isPresent()) {
                             boolean sameType = Objects.equals(ref.get().getType(), mat.get().getType());
                             return Optional.of(sameType ? MatchType.SYMMETRIC : MatchType.BIPARTITE);

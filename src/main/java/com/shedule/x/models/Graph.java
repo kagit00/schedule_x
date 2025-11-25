@@ -1,6 +1,7 @@
 package com.shedule.x.models;
 
 import com.shedule.x.dto.EdgeDTO;
+import com.shedule.x.dto.NodeDTO;
 import com.shedule.x.dto.enums.MatchType;
 
 import lombok.AllArgsConstructor;
@@ -20,17 +21,17 @@ import java.util.*;
 @AllArgsConstructor
 public class Graph {
 
-    private final List<Node> nodes = new ArrayList<>();
+    private final List<NodeDTO> nodes = new ArrayList<>();
     private final List<EdgeDTO> edges = new ArrayList<>();
 
     // Internal index for O(1) lookups by Reference ID
-    private final Map<String, Node> nodeMap = new HashMap<>();
+    private final Map<String, NodeDTO> nodeMap = new HashMap<>();
 
-    private List<Node> leftPartition = new ArrayList<>();
-    private List<Node> rightPartition = new ArrayList<>();
+    private List<NodeDTO> leftPartition = new ArrayList<>();
+    private List<NodeDTO> rightPartition = new ArrayList<>();
     private MatchType type;
 
-    public void addNode(Node node) {
+    public void addNode(NodeDTO node) {
         nodes.add(node);
         // Maintain the index automatically
         if (node.getReferenceId() != null) {
@@ -42,7 +43,7 @@ public class Graph {
         edges.add(edge);
     }
 
-    public List<Node> getNodesByType(String type) {
+    public List<NodeDTO> getNodesByType(String type) {
         if (type == null) return Collections.emptyList();
         return nodes.stream()
                 .filter(node -> type.equalsIgnoreCase(node.getType()))
@@ -53,7 +54,7 @@ public class Graph {
      * Returns edges where the given node is the source.
      * Matches based on ReferenceId <-> FromNodeHash
      */
-    public List<EdgeDTO> getEdgesFrom(Node fromNode) {
+    public List<EdgeDTO> getEdgesFrom(NodeDTO fromNode) {
         if (fromNode == null || fromNode.getReferenceId() == null) return Collections.emptyList();
         String refId = fromNode.getReferenceId();
 
@@ -78,12 +79,12 @@ public class Graph {
      * Returns a map of Node Reference ID -> List of Connected Node Objects.
      * Note: Only includes nodes that exist in this Graph's node list.
      */
-    public Map<String, List<Node>> getAdjacencyList() {
-        Map<String, List<Node>> adjacencyList = new HashMap<>();
+    public Map<String, List<NodeDTO>> getAdjacencyList() {
+        Map<String, List<NodeDTO>> adjacencyList = new HashMap<>();
 
         for (EdgeDTO edge : edges) {
-            Node from = nodeMap.get(edge.getFromNodeHash());
-            Node to = nodeMap.get(edge.getToNodeHash());
+            NodeDTO from = nodeMap.get(edge.getFromNodeHash());
+            NodeDTO to = nodeMap.get(edge.getToNodeHash());
 
             // Only map if both nodes are present in this graph context
             if (from != null && to != null) {
