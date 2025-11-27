@@ -3,6 +3,7 @@ package com.shedule.x.builder;
 
 import com.shedule.x.config.factory.GraphRequestFactory;
 import com.shedule.x.dto.MatchingRequest;
+import com.shedule.x.dto.NodeDTO;
 import com.shedule.x.exceptions.InternalServerErrorException;
 import com.shedule.x.models.Edge;
 import com.shedule.x.models.Graph;
@@ -27,7 +28,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 @Slf4j
-public class FlatEdgeBuildingStrategy  {
+public class FlatEdgeBuildingStrategy  implements SymmetricEdgeBuildingStrategy {
     private static final int STORAGE_BATCH_SIZE = 1000;
     private static final int LOG_THROTTLE_INTERVAL = 1000;
 
@@ -44,6 +45,17 @@ public class FlatEdgeBuildingStrategy  {
         this.nodeById = nodes.stream().collect(Collectors.toConcurrentMap(Node::getId, n -> n));
         this.executor = executor;
     }
+
+    @Override
+    public void processBatch(List<NodeDTO> sourceNodes, List<NodeDTO> targetNodes, Collection<GraphRecords.PotentialMatch> matches, Set<Edge> edges, MatchingRequest request, Map<String, Object> context) {
+
+    }
+
+    @Override
+    public CompletableFuture<Void> indexNodes(List<NodeDTO> nodes, int page) {
+        return null;
+    }
+
 
     @AllArgsConstructor
     @Getter
@@ -88,11 +100,6 @@ public class FlatEdgeBuildingStrategy  {
             log.error("Batch processing failed for groupId={}: {}", groupId, e.getMessage(), e);
             throw new InternalServerErrorException("Batch edge building failed");
         }
-    }
-
-
-    public CompletableFuture<Void> indexNodes(List<Node> nodes, int page) {
-        return null;
     }
 
     private void processNode(Node node, ProcessContext ctx) {

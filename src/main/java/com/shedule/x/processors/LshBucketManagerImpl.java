@@ -97,7 +97,6 @@ public class LshBucketManagerImpl implements LshBucketManager {
     public void addToBucket(int tableIdx, int band, Collection<UUID> nodeIds) {
         if (nodeIds.isEmpty()) return;
 
-        // 1. Determine Lock Stripe using Utility
         long hash = ((long) tableIdx << 32) | (band & 0xFFFFFFFFL);
         int stripe = StoreUtility.stripe(hash);
 
@@ -257,7 +256,7 @@ public class LshBucketManagerImpl implements LshBucketManager {
         Env<ByteBuffer> env = lmdb.env();
         Dbi<ByteBuffer> lshDbi = lmdb.lshDbi();
         try (Txn<ByteBuffer> txn = env.txnWrite()) {
-            lshDbi.drop(txn); // Efficiently drop the DB content
+            lshDbi.drop(txn);
             txn.commit();
             totalBucketEntries.set(0);
             log.info("Cleared all LSH buckets");
@@ -285,10 +284,8 @@ public class LshBucketManagerImpl implements LshBucketManager {
 
     @Override
     public void mergeAndWriteBucket(Txn<ByteBuffer> txn, int tableIdx, int band, List<UUID> newIds) {
-
-        // MAX_BUCKET_SIZE_HARD should be defined in LshBucketManagerImpl
         final int MAX_BUCKET_SIZE_HARD = 5_000;
-        Dbi<ByteBuffer> lshDbi = lmdb.lshDbi(); // Assuming lmdb is a field
+        Dbi<ByteBuffer> lshDbi = lmdb.lshDbi();
 
         // 1. Prepare Key
         ByteBuffer keyBuf = StoreUtility.keyBuf();
@@ -296,11 +293,11 @@ public class LshBucketManagerImpl implements LshBucketManager {
 
         // 2. Read Existing (using the shared TXN)
         ByteBuffer existingVal = lshDbi.get(txn, keyBuf);
-        long[] existing = (existingVal == null) ? new long[0] : decodeBucket(existingVal); // decodeBucket is an existing helper
+        long[] existing = (existingVal == null) ? new long[0] : decodeBucket(existingVal);
 
         // 3. Prepare Incoming
-        long[] incoming = StoreUtility.toLongArray(newIds); // Existing utility
-        StoreUtility.sortByPairs(incoming); // Existing utility
+        long[] incoming = StoreUtility.toLongArray(newIds);
+        StoreUtility.sortByPairs(incoming);
 
         // 4. Merge & Dedup (CPU intensive but unavoidable for packed storage)
         long[] merged = StoreUtility.mergeAndDedupPairs(existing, incoming);
@@ -314,8 +311,6 @@ public class LshBucketManagerImpl implements LshBucketManager {
         ByteBuffer valDirect = StoreUtility.encodeBucket(merged); // Existing utility
         keyBuf.rewind();
         lshDbi.put(txn, keyBuf, valDirect);
-
-        // IMPORTANT: NO Java lock, NO txn.commit().
     }
 
     @Override

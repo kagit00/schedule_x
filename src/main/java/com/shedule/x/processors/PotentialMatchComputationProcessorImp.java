@@ -34,15 +34,13 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
     private final PotentialMatchSaver potentialMatchSaver;
     private final MeterRegistry meterRegistry;
 
-    // Executors
-    private final ExecutorService mappingExecutor; // For computing/enqueuing
-    private final ExecutorService storageExecutor; // For DB IO
+    private final ExecutorService mappingExecutor;
+    private final ExecutorService storageExecutor;
     private final ScheduledExecutorService watchdogExecutor;
 
-    // Config & State
     private final QueueManagerFactory queueManagerFactory;
     private final QueueManagerConfig baseQueueConfig;
-    private final Semaphore saveSemaphore; // Global limits on DB concurrency
+    private final Semaphore saveSemaphore;
 
     private volatile boolean shutdownInitiated = false;
 
@@ -61,7 +59,6 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
             @Qualifier("watchdogExecutor") ScheduledExecutorService watchdogExecutor,
             QueueManagerFactory queueManagerFactory,
             @Value("${match.semaphore.permits:16}") int semaphorePermits,
-            // Queue Configs
             @Value("${match.queue.capacity:1000000}") int queueCapacity,
             @Value("${match.flush.interval-seconds:5}") int flushIntervalSeconds,
             @Value("${match.queue.drain-warning-threshold:0.8}") double drainWarningThreshold,
@@ -76,20 +73,17 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
         this.queueManagerFactory = queueManagerFactory;
         this.saveSemaphore = new Semaphore(semaphorePermits);
 
-        // Create a template config
         this.baseQueueConfig = new QueueManagerConfig(
                 queueCapacity,
                 flushIntervalSeconds,
                 drainWarningThreshold,
-                2, // boostBatchFactor
+                2,
                 maxFinalBatchSize,
-                true // useDiskSpill
+                true
         );
     }
 
-    // -------------------------------------------------------
-    // 1. CHUNK PROCESSING (Producer) - Non-Blocking
-    // -------------------------------------------------------
+
     @Override
     public CompletableFuture<Void> processChunkMatches(
             GraphRecords.ChunkResult chunkResult, UUID groupId, UUID domainId,
@@ -103,16 +97,11 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
             QueueManagerImpl manager = getOrCreateQueueManager(groupId, domainId, processingCycleId);
 
             for (GraphRecords.PotentialMatch match : matches) {
-                // Enqueue is now O(1) for memory or O(1) for disk (append).
-                // It returns false only if closed or catastrophically full.
                 boolean accepted = manager.enqueue(match);
                 if (!accepted) {
                     meterRegistry.counter("queue.rejected", "groupId", groupId.toString()).increment();
                 }
             }
-
-            // We do NOT manually trigger flush here.
-            // The QueueManager's internal scheduler or threshold logic handles that.
 
         }, mappingExecutor).exceptionally(t -> {
             log.error("Chunk ingest failed for groupId={}", groupId, t);
@@ -120,22 +109,18 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
         });
     }
 
-    // -------------------------------------------------------
-    // 3. BATCH SAVING (The Worker)
-    // -------------------------------------------------------
+
     private CompletableFuture<Void> saveMatchBatch(
             List<GraphRecords.PotentialMatch> matches,
             UUID groupId, UUID domainId, String processingCycleId, int chunkIndex) {
 
         Instant start = Instant.now();
 
-        // 1. Convert to DB Entities (CPU Bound)
         List<PotentialMatchEntity> entities = matches.parallelStream()
                 .map(GraphRequestFactory::convertToPotentialMatch)
                 .filter(Objects::nonNull)
                 .toList();
 
-        // 2. Parallel Writes: DB (Relational) and GraphStore (LMDB)
         CompletableFuture<Void> dbFuture = potentialMatchSaver.saveMatchesAsync(entities, groupId, domainId, processingCycleId, false)
                 .orTimeout(matchSaveTimeoutSeconds, TimeUnit.SECONDS)
                 .exceptionally(t -> {
@@ -146,7 +131,6 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
         CompletableFuture<Void> graphFuture = graphStore.persistEdgesAsync(matches, groupId, chunkIndex)
                 .orTimeout(matchSaveTimeoutSeconds, TimeUnit.SECONDS)
                 .exceptionally(t -> {
-                    // LMDB failure is fatal for the matching logic
                     throw new CompletionException("LMDB persist failed", t);
                 });
 
@@ -204,7 +188,6 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
     @Override
     public void cleanup(UUID groupId) {
         QueueManagerImpl.remove(groupId);
-        // Standard cleanup
     }
 
     @PreDestroy
@@ -212,24 +195,20 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
         shutdownInitiated = true;
         log.info("Shutting down Processor...");
 
-        // 1. Flush all Queues
         QueueManagerImpl.flushAllQueuesAsync(this::savePendingMatchesAsync).join();
 
-        // 2. Shutdown Executors
         mappingExecutor.shutdown();
         storageExecutor.shutdown();
     }
 
     @Override
     public AutoCloseableStream<EdgeDTO> streamEdges(UUID groupId, UUID domainId, String processingCycleId, int topK) {
-        // Note: GraphStore implementation handles the transaction/cursor closing via AutoCloseableStream
         return graphStore.streamEdges(domainId, groupId);
     }
 
 
     @Override
     public long getFinalMatchCount(UUID groupId, UUID domainId, String processingCycleId) {
-        // Uses try-with-resources to ensure LMDB transaction is closed immediately after counting
         try (AutoCloseableStream<EdgeDTO> stream = graphStore.streamEdges(domainId, groupId)) {
             return stream.getStream().count();
         } catch (Exception e) {
@@ -240,21 +219,14 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
 
 
     private void performStreamingFinalSave(UUID groupId, UUID domainId, String processingCycleId) {
-        // Buffer to batch SQL inserts/upserts
         List<PotentialMatchEntity> buffer = new ArrayList<>(finalSaveBatchSize);
         long totalProcessed = 0;
 
-        // 1. Open Stream from LMDB (GraphStore)
         try (AutoCloseableStream<EdgeDTO> edgeStream = graphStore.streamEdges(domainId, groupId)) {
-
-            // 2. Iterate through LMDB results
-            // We use .iterator() to allow explicit loop control and batch flushing
             Iterator<EdgeDTO> iterator = edgeStream.getStream().iterator();
 
             while (iterator.hasNext()) {
                 EdgeDTO edge = iterator.next();
-
-                // 3. Convert Edge (LMDB) -> Entity (DB)
                 PotentialMatchEntity entity = GraphRequestFactory.convertToPotentialMatch(
                         edge, groupId, domainId, processingCycleId);
 
@@ -262,7 +234,6 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
                     buffer.add(entity);
                 }
 
-                // 4. Flush Batch if full
                 if (buffer.size() >= finalSaveBatchSize) {
                     flushFinalBatch(buffer, groupId, domainId, processingCycleId);
                 }
@@ -273,11 +244,8 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
                 }
             }
 
-            // 5. Flush remaining items
             flushFinalBatch(buffer, groupId, domainId, processingCycleId);
-
-            // 6. Cleanup LMDB data for this group after successful save
-            graphStore.cleanEdges(groupId);
+            //graphStore.cleanEdges(groupId);
             log.info("Final save completed. Total: {} | groupId={}", totalProcessed, groupId);
 
         } catch (Exception e) {
@@ -299,17 +267,13 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
 
     @Override
     public CompletableFuture<Void> savePendingMatchesAsync(UUID groupId, UUID domainId, String processingCycleId, int batchSize) {
-        // 1. Get the manager for this group
         QueueManagerImpl manager = QueueManagerImpl.getExisting(groupId);
 
-        // If manager doesn't exist, nothing to save.
         if (manager == null) {
             return CompletableFuture.completedFuture(null);
         }
 
         //log.info("Starting drain of pending matches for groupId={} | Queue Memory={} | Spill Size={}", groupId, manager.getQueueSize(), manager.getDiskSpillSize());
-
-        // 2. Start recursive draining
         return drainAndSaveRecursively(manager, groupId, domainId, processingCycleId, batchSize, 0);
     }
 
@@ -321,10 +285,8 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
             int batchSize,
             long totalDrainedSoFar) {
 
-        // A. Drain a batch (Unified Memory + Disk via QueueManager)
         List<GraphRecords.PotentialMatch> batch = manager.drainBatch(batchSize);
 
-        // B. Base Case: Queue is empty
         if (batch.isEmpty()) {
             if (totalDrainedSoFar > 0) {
                 log.info("Finished draining pending matches | groupId={} | Total Drained={}", groupId, totalDrainedSoFar);
@@ -332,7 +294,6 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
             return CompletableFuture.completedFuture(null);
         }
 
-        // C. Recursive Step: Save Batch -> Then Drain Next
         return saveMatchBatch(batch, groupId, domainId, processingCycleId, -1)
                 .thenComposeAsync(v ->
                                 drainAndSaveRecursively(
@@ -347,7 +308,6 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
                 )
                 .exceptionally(t -> {
                     log.error("Error during recursive drain for groupId={}", groupId, t);
-                    // In case of error, we stop recursion but try to signal failure
                     throw new CompletionException(t);
                 });
     }

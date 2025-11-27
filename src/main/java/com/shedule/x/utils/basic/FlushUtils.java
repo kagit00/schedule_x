@@ -1,5 +1,6 @@
 package com.shedule.x.utils.basic;
 
+import com.shedule.x.config.factory.QuadFunction;
 import com.shedule.x.processors.QueueManagerImpl;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.experimental.UtilityClass;
@@ -14,7 +15,7 @@ import java.util.concurrent.atomic.AtomicLong;
 @UtilityClass
 public final class FlushUtils {
 
-    public static void executeFlush(Semaphore semaphore, ExecutorService executor, QueueManagerImpl.QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> callback,
+    public static void executeFlush(Semaphore semaphore, ExecutorService executor, QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> callback,
                                     UUID groupId, UUID domainId, int batchSize, String processingCycleId,
                                     MeterRegistry meterRegistry, AtomicLong lastFlushedQueueSize) {
         boolean acquired = false;
@@ -60,7 +61,7 @@ public final class FlushUtils {
         }
     }
 
-    public static void executeBlockingFlush(Semaphore semaphore, QueueManagerImpl.QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> callback,
+    public static void executeBlockingFlush(Semaphore semaphore, QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> callback,
                                             UUID groupId, UUID domainId, int batchSize, String processingCycleId) {
         boolean acquired = false;
         try {
@@ -99,7 +100,7 @@ public final class FlushUtils {
         }
     }
 
-    public static void executeBoostedFlush(Semaphore semaphore, ExecutorService executor, QueueManagerImpl.QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> callback,
+    public static void executeBoostedFlush(Semaphore semaphore, ExecutorService executor, QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> callback,
                                            UUID groupId, UUID domainId, int batchSize, String processingCycleId, AtomicBoolean boostedDrainInProgress) {
         if (!semaphore.tryAcquire()) {
             log.warn("Failed to acquire boostedFlushSemaphore for groupId={}", groupId);

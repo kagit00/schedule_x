@@ -51,7 +51,7 @@ public class QueueManagerFactory {
         );
     }
 
-    public QueueManagerImpl.QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> getFlushSignalCallback() {
+    public QuadFunction<UUID, UUID, Integer, String, CompletableFuture<Void>> getFlushSignalCallback() {
         return (gid, did, size, cycleId) -> processor.savePendingMatchesAsync(gid, did, cycleId, size);
     }
 }

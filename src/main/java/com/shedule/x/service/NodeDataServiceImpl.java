@@ -25,15 +25,12 @@ public class NodeDataServiceImpl implements NodeDataService {
     private final LmdbEnvironment lmdb;
     private final MeterRegistry meterRegistry;
 
-    // In-memory cache for LSH vectors (nodeId -> encoded vector)
     private final Map<UUID, int[]> encodedVectorsCache = new ConcurrentHashMap<>();
 
     public NodeDataServiceImpl(LmdbEnvironment lmdb, MeterRegistry meterRegistry) {
         this.lmdb = lmdb;
         this.meterRegistry = meterRegistry;
 
-        // Register a dynamic gauge pointing to the cache size
-        // Note: micrometer will call Map::size each time it needs a sample.
         try {
             meterRegistry.gauge("lsh_cache.size", encodedVectorsCache, Map::size);
         } catch (Exception e) {
@@ -41,15 +38,14 @@ public class NodeDataServiceImpl implements NodeDataService {
         }
     }
 
-    // --- Node Persistence (LMDB Write) ---
-    // Persist NodeDTO (not JPA Node) into LMDB
+
     @Override
     public void persistNode(NodeDTO node, UUID groupId) {
         Env<ByteBuffer> env = lmdb.env();
         Dbi<ByteBuffer> nodeDbi = lmdb.nodeDbi();
 
         ByteBuffer keyBuf = StoreUtility.keyBuf();
-        ByteBuffer valBuf = StoreUtility.valBuf(); // Reusable per-thread buffer
+        ByteBuffer valBuf = StoreUtility.valBuf();
 
         // Key: [GroupId (16)] + [NodeId (16)]
         StoreUtility.putUUID(keyBuf, groupId);
@@ -67,16 +63,12 @@ public class NodeDataServiceImpl implements NodeDataService {
         } catch (Exception e) {
             log.error("Failed to persist node {} for group {} to LMDB", node.getId(), groupId, e);
         } finally {
-            // clear buffers to be safe (if they are pooled)
             keyBuf.clear();
             valBuf.clear();
         }
     }
 
-    // --- Node Retrieval (LMDB Read) ---
-    /**
-     * method accepts groupId to construct the full LMDB key.
-     */
+
     @Override
     public NodeDTO getNode(UUID nodeId, UUID groupId) {
         Env<ByteBuffer> env = lmdb.env();
@@ -101,11 +93,8 @@ public class NodeDataServiceImpl implements NodeDataService {
         }
     }
 
-    // return entire in-memory cache (simple single-instance cache)
     @Override
     public Map<UUID, int[]> getEncodedVectorsCache(UUID groupId) {
-        // For single-instance, we return entire map. In a modular system you'll want to
-        // separate caches per-group or use Redis/other store for sharding.
         return encodedVectorsCache;
     }
 
@@ -114,7 +103,6 @@ public class NodeDataServiceImpl implements NodeDataService {
         if (newVectors == null || newVectors.isEmpty()) return;
         encodedVectorsCache.putAll(newVectors);
         log.info("LSH encoded vector cache updated. Size: {}", encodedVectorsCache.size());
-        // gauge updates automatically via Map::size
     }
 
     @Override
@@ -135,7 +123,6 @@ public class NodeDataServiceImpl implements NodeDataService {
              Cursor<ByteBuffer> cursor = nodeDbi.openCursor(rtxn)) {
 
             // Position cursor at first key >= prefix using GetOp.MDB_SET_RANGE
-            // This is the correct call for positioning
             boolean found = cursor.get(prefix, GetOp.MDB_SET_RANGE);
 
             while (found) {

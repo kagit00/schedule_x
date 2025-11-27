@@ -27,7 +27,6 @@ public class EdgePersistenceImpl implements EdgePersistence {
     private final MeterRegistry meters;
     private final Semaphore writeSemaphore = new Semaphore(2, true);
 
-    // Reusable buffers to avoid allocation churn
     private static final ThreadLocal<ByteBuffer> KEY_BUFFER = ThreadLocal.withInitial(() ->
             ByteBuffer.allocateDirect(512).order(ByteOrder.BIG_ENDIAN));
     private static final ThreadLocal<ByteBuffer> VAL_BUFFER = ThreadLocal.withInitial(() ->

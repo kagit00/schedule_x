@@ -32,7 +32,7 @@ public class LmdbEnvironment implements AutoCloseable {
     @Value("${graph.store.path:/app/graph-store}")
     private String dbPath;
 
-    @Value("${graph.store.map-size:214748364800}")
+    @Value("${graph.store.map-size:549755813888}")
     private long maxDbSize;
 
     @PostConstruct
@@ -47,7 +47,7 @@ public class LmdbEnvironment implements AutoCloseable {
         this.env = Env.create()
                 .setMapSize(maxDbSize)
                 .setMaxDbs(4)
-                .setMaxReaders(512)
+                .setMaxReaders(1024)
                 .open(path.toFile(),
                         EnvFlags.MDB_WRITEMAP,
                         EnvFlags.MDB_MAPASYNC);

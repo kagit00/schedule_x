@@ -20,7 +20,6 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class IndexUtils {
 
     public static CompletableFuture<Void> indexNodes(
-            // ⚠️ Input is List<NodeDTO> (Correct)
             List<NodeDTO> nodes, int page, LSHIndex lshIndex, MetadataEncoder metadataEncoder,
             Map<UUID, Long> lastModified, AtomicReference<Snapshot> currentSnapshotRef,
             AtomicReference<State> prepState, AtomicReference<CompletableFuture<Boolean>> preparationFuture,
@@ -95,17 +94,16 @@ public final class IndexUtils {
             preparationFuture.set(CompletableFuture.completedFuture(true));
             log.info("Indexing completed for page={}", page);
             newFuture.complete(null);
+
         }).exceptionally(e -> {
             prepState.set(State.FAILED);
             log.error("Indexing failed for page={}", page, e);
             newFuture.completeExceptionally(e);
-            // Assume InternalServerErrorException exists
             throw new RuntimeException("Indexing failed for page=" + page, e);
         });
     }
 
     public static boolean ensurePrepared(UUID groupId, int attempt, int maxRetries) {
-        // Placeholder for preparation state check
         return true;
     }
 }

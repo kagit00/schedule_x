@@ -57,10 +57,8 @@ public class NodeFetchService {
 
         return CompletableFuture.supplyAsync(() -> {
                     try {
-                        // 1. Fetch JPA Nodes
                         List<Node> nodes = nodeRepository.findByIdsWithMetadata(nodeIds);
 
-                        // 2. Filter in memory
                         List<Node> filteredNodes;
                         if (createdAfter != null) {
                             filteredNodes = nodes.stream()
@@ -120,11 +118,9 @@ public class NodeFetchService {
 
         Timer.Sample sample = Timer.start(meterRegistry);
 
-        // 1. Calculate the total fetch size needed: Limit from job + Overlap
         final int fetchSize = limit + BATCH_OVERLAP;
 
         return CompletableFuture.supplyAsync(() -> {
-                    // 1. Get Current Cursor State
                     NodesCursor cursor = nodesCursorRepository
                             .findByIdGroupIdAndIdDomainId(groupId, domainId)
                             .orElse(null);
@@ -133,7 +129,6 @@ public class NodeFetchService {
                             ? cursor.getCursorCreatedAt().toLocalDateTime() : null;
                     UUID cursorId = (cursor != null) ? cursor.getCursorId() : null;
 
-                    // 2. Fetch Page (ID + CreatedAt) in ONE query, requesting the full overlap amount
                     List<NodeCursorProjection> page = nodeRepository.findUnprocessedNodeIdsAndDatesByCursor(
                             groupId, domainId, cursorTime, cursorId, fetchSize); // Use fetchSize
 
@@ -141,35 +136,25 @@ public class NodeFetchService {
                         return new CursorPage(Collections.emptyList(), false, null, null);
                     }
 
-                    // 3. Determine the actual list of IDs to process (the "new" chunk)
-                    // The 'new' chunk size is the lesser of the requested limit or the total page size
                     int actualProcessLimit = Math.min(limit, page.size());
-
-                    // If the page is smaller than the requested limit, we process all of it.
                     if (page.size() <= limit) {
-                        // This is the last batch or a small batch. No overlap needed for the next cycle.
                         log.debug("Fetched smaller batch ({} <= {}), ending cursor retrieval.", page.size(), limit);
                         List<UUID> ids = page.stream().map(NodeCursorProjection::getId).toList();
                         NodeCursorProjection lastItem = page.get(page.size() - 1);
 
-                        // The last item's timestamp is the new cursor position
                         return new CursorPage(ids, false, lastItem.getCreatedAt(), lastItem.getId());
                     }
 
-                    // 4. We fetched >= (limit + overlap), so we have a full page for processing.
-                    // The IDs to process are only the first 'limit' nodes.
                     List<UUID> idsToProcess = page.stream()
-                            .limit(limit) // <--- Only take the first 'limit' nodes
+                            .limit(limit)
                             .map(NodeCursorProjection::getId)
                             .toList();
 
-                    // The new cursor position must point to the LAST node of the PROCESSED set (node at index limit - 1)
                     NodeCursorProjection newCursorItem = page.get(limit - 1);
 
                     log.info("Sliding Window: Fetched {} nodes (Limit={}, Overlap={}). Processing first {} and setting cursor to node {}.",
                             page.size(), limit, BATCH_OVERLAP, idsToProcess.size(), newCursorItem.getId());
 
-                    // isMoreToProcess is true because we know we have the 'overlap' nodes remaining.
                     return new CursorPage(
                             idsToProcess,
                             true,

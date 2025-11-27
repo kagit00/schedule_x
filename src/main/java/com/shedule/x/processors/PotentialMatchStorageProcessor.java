@@ -155,7 +155,6 @@ public class PotentialMatchStorageProcessor {
                 for (int i = 0; i < parts.size(); i++) {
                     List<PotentialMatchEntity> part = parts.get(i);
                     log.debug("Copying batch {}/{} for groupId={}", i + 1, parts.size(), groupId);
-                    // ⭐ CORE FIX: Use the cancellable COPY method for each batch.
                     copyBatchWithCancellation(copyMgr, part, groupId, domainId, cycleId);
                 }
 

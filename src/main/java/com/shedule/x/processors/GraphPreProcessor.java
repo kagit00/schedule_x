@@ -21,6 +21,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -42,7 +45,7 @@ public class GraphPreProcessor {
 
     private final SymmetricGraphBuilderService symmetricGraphBuilder;
     private final BipartiteGraphBuilderService bipartiteGraphBuilder;
-    private final PotentialMatchStreamingService potentialMatchStreamingService;
+    private final EdgePersistence edgePersistence;
     private final PartitionStrategy partitionStrategy;
     private final NodeRepository nodeRepository;
     private final MeterRegistry meterRegistry;
@@ -51,15 +54,15 @@ public class GraphPreProcessor {
     public GraphPreProcessor(
             SymmetricGraphBuilderService symmetricGraphBuilder,
             BipartiteGraphBuilderService bipartiteGraphBuilder,
-            PotentialMatchStreamingService potentialMatchStreamingService,
             @Qualifier("metadataBasedPartitioningStrategy") PartitionStrategy partitionStrategy,
             NodeRepository nodeRepository,
             MeterRegistry meterRegistry,
-            @Value("${graph.max-concurrent-builds:2}") int maxConcurrentBuilds) {
+            @Value("${graph.max-concurrent-builds:2}") int maxConcurrentBuilds,
+            EdgePersistence edgePersistence) {
 
         this.symmetricGraphBuilder = symmetricGraphBuilder;
         this.bipartiteGraphBuilder = bipartiteGraphBuilder;
-        this.potentialMatchStreamingService = potentialMatchStreamingService;
+        this.edgePersistence = edgePersistence;
         this.partitionStrategy = partitionStrategy;
         this.nodeRepository = nodeRepository;
         this.meterRegistry = meterRegistry;
@@ -129,7 +132,6 @@ public class GraphPreProcessor {
             }
         }
 
-        // 3. Attach Timeout (Native Async)
         return buildFuture
                 .orTimeout(HARD_TIMEOUT_MINUTES, TimeUnit.MINUTES)
                 .exceptionally(ex -> {
@@ -160,26 +162,72 @@ public class GraphPreProcessor {
 
     @Transactional(readOnly = true)
     public MatchType determineMatchTypeFromExistingData(UUID groupId, UUID domainId) {
-        try (Stream<PotentialMatchEntity> matchStream = potentialMatchStreamingService
-                .streamMatches(groupId, domainId, 0, 1)) {
+        try (var edgeStream = edgePersistence.streamEdges(domainId, groupId)) {
+            log.info("→ Opened LMDB edge stream successfully | groupId={} | domainId={}", groupId, domainId);
 
-            return matchStream.findFirst()
-                    .flatMap(pm -> {
-                        var ref = nodeRepository.findByReferenceIdAndGroupIdAndDomainId(pm.getReferenceId(), groupId, domainId);
-                        var mat = nodeRepository.findByReferenceIdAndGroupIdAndDomainId(pm.getMatchedReferenceId(), groupId, domainId);
-                        // Original logic retained: uses JPA Node types
-                        if (ref.isPresent() && mat.isPresent()) {
-                            boolean sameType = Objects.equals(ref.get().getType(), mat.get().getType());
-                            return Optional.of(sameType ? MatchType.SYMMETRIC : MatchType.BIPARTITE);
-                        }
-                        return Optional.empty();
-                    })
-                    .orElse(MatchType.BIPARTITE);
+            AtomicInteger edgeCount = new AtomicInteger(0);
+            AtomicReference<MatchType> detected = new AtomicReference<>(MatchType.BIPARTITE);
+            AtomicBoolean foundAny = new AtomicBoolean(false);
+
+            edgeStream.forEach(edge -> {
+                int currentIndex = edgeCount.incrementAndGet();
+                if (currentIndex <= 5) {
+                    log.info("→ Edge[{}]: from={} to={} | groupId={}",
+                            currentIndex,
+                            edge.getFromNodeHash(),
+                            edge.getToNodeHash(),
+                            groupId
+                    );
+                }
+
+                if (foundAny.get()) {
+                    return;
+                }
+
+                String fromHash = edge.getFromNodeHash();
+                String toHash = edge.getToNodeHash();
+
+                var fromNodeOpt = nodeRepository.findByReferenceIdAndGroupIdAndDomainId(fromHash, groupId, domainId);
+                var toNodeOpt = nodeRepository.findByReferenceIdAndGroupIdAndDomainId(toHash, groupId, domainId);
+
+                if (fromNodeOpt.isEmpty()) {
+                    log.info("⚠ fromNodeHash '{}' not found in DB | groupId={} | domainId={}",
+                            fromHash, groupId, domainId);
+                }
+                if (toNodeOpt.isEmpty()) {
+                    log.info("⚠ toNodeHash '{}' not found in DB | groupId={} | domainId={}",
+                            toHash, groupId, domainId);
+                }
+
+                if (fromNodeOpt.isPresent() && toNodeOpt.isPresent()) {
+
+                    String type1 = fromNodeOpt.get().getType();
+                    String type2 = toNodeOpt.get().getType();
+
+                    log.info("→ Comparing node types: '{}' vs '{}' | groupId={}", type1, type2, groupId);
+                    boolean sameType = Objects.equals(type1, type2);
+                    detected.set(sameType ? MatchType.SYMMETRIC : MatchType.BIPARTITE);
+                    foundAny.set(true);
+
+                    log.info("✔ First conclusive edge found → Detected MatchType={} | groupId={}",
+                            detected.get(), groupId);
+
+                    log.debug("Match type detected from first valid edge: {} | groupId={}", detected.get(), groupId);
+                }
+            });
+
+            log.info("Total edges scanned from LMDB: {} | groupId={}", edgeCount.get(), groupId);
+            MatchType result = foundAny.get() ? detected.get() : MatchType.BIPARTITE;
+            log.info("Final match type determined: {} | groupId={}", result, groupId);
+            return result;
+
         } catch (Exception e) {
-            log.warn("Could not determine match type from DB, defaulting to Bipartite", e);
+            log.warn("Failed to determine match type from LMDB edges, falling back to BIPARTITE | groupId={}", groupId, e);
             return MatchType.BIPARTITE;
         }
     }
+
+
 
     private CompletableFuture<GraphResult> acquireAndBuildAsync(
             UUID groupId,

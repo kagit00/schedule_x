@@ -1,6 +1,6 @@
 package com.shedule.x.processors;
 
-import com.google.common.util.concurrent.Uninterruptibles;
+
 import com.shedule.x.dto.MatchingRequest;
 import com.shedule.x.dto.NodesCount;
 import com.shedule.x.service.NodeFetchService;
@@ -59,23 +59,19 @@ public class PotentialMatchesCreationJobExecutor {
     }
 
     private CompletableFuture<Void> processGroupRecursive(UUID groupId, UUID domainId, String cycleId, int emptyStreak) {
-        // Stop condition: Too many empty pages
         if (emptyStreak >= EMPTY_BATCH_TOLERANCE) {
             log.info("Finished Job Execution (Streak Limit) | groupId={}", groupId);
             return CompletableFuture.completedFuture(null);
         }
 
-        // 1. Fetch IDs (Orchestrator Role)
         return nodeFetchService.fetchNodeIdsByCursor(groupId, domainId, batchLimit, cycleId)
                 .thenComposeAsync(page -> {
                     if (page.ids().isEmpty()) {
                         return processGroupRecursive(groupId, domainId, cycleId, emptyStreak + 1);
                     }
 
-                    // 2. Pass IDs to Service (Business Role)
                     return processPageWithRetries(groupId, domainId, cycleId, page.ids())
                             .thenComposeAsync(result -> {
-                                // 3. Persist Cursor on Success
                                 if (page.lastCreatedAt() != null && page.lastId() != null) {
                                     nodeFetchService.persistCursor(groupId, domainId,
                                             page.lastCreatedAt().atOffset(ZoneOffset.UTC), page.lastId());
@@ -84,7 +80,6 @@ public class PotentialMatchesCreationJobExecutor {
                                 if (!page.hasMore()) {
                                     return CompletableFuture.completedFuture(null);
                                 }
-                                // 4. Recurse
                                 return processGroupRecursive(groupId, domainId, cycleId, 0);
                             }, batchExecutor);
                 }, batchExecutor);
@@ -107,22 +102,18 @@ public class PotentialMatchesCreationJobExecutor {
                 .isRealTime(false)
                 .build();
 
-        // Call the service with the IDs we already fetched
         return potentialMatchService.processNodeBatch(nodeIds, request)
                 .thenApply(result -> {
                     log.debug("Batch Success: groupId={}, attempt={}", groupId, attempt);
                     return result;
                 })
-                .exceptionally(t -> null) // Catch for retry logic below
+                .exceptionally(t -> null)
                 .thenCompose(result -> {
                     if (result != null) return CompletableFuture.completedFuture(result);
 
-                    // Retry Logic
                     if (attempt >= maxRetries) {
                         log.error("Max Retries Reached for groupId={}", groupId);
                         meterRegistry.counter("match.job.failed_max_retries").increment();
-                        // We return a dummy count to allow the cursor to move forward
-                        // (or throw exception if you want to stop the whole job)
                         return CompletableFuture.completedFuture(NodesCount.builder().nodeCount(0).build());
                     }
 

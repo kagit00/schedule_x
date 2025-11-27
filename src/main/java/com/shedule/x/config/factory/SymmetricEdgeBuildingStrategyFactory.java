@@ -54,9 +54,9 @@ public class SymmetricEdgeBuildingStrategyFactory {
     public SymmetricEdgeBuildingStrategy createStrategy(String weightFunctionKey, List<NodeDTO> nodes) {
         Map<UUID, NodeDTO> nodeMap = nodes.stream()
                 .collect(Collectors.toMap(NodeDTO::getId, node -> node));
-//        if ("flat".equalsIgnoreCase(weightFunctionKey)) {
-//            return flatEdgeBuildingStrategy;
-//        } else {
+        if ("flat".equalsIgnoreCase(weightFunctionKey)) {
+            return flatEdgeBuildingStrategy;
+        } else {
             return new MetadataEdgeBuildingStrategy(
                     EdgeBuildingConfig.builder()
                             .candidateLimit(candidateLimit).similarityThreshold(similarityThreshold)
@@ -68,6 +68,6 @@ public class SymmetricEdgeBuildingStrategyFactory {
                     edgeProcessor,
                     nodeDataService
             );
-       // }
+        }
     }
 }

@@ -77,7 +77,6 @@ public class MetadataEdgeBuildingStrategy implements SymmetricEdgeBuildingStrate
                 return;
             }
 
-            // ⚠️ CHANGE: Pass NodeDTO lists to EdgeProcessor
             matches.addAll(edgeProcessor.processBatchSync(
                     sourceNodes,
                     targetNodes,
@@ -101,7 +100,6 @@ public class MetadataEdgeBuildingStrategy implements SymmetricEdgeBuildingStrate
             log.error("Interrupted acquiring chunkSemaphore for groupId={}", groupId, e);
         } catch (Exception e) {
             log.error("Batch processing failed for groupId={}", groupId, e);
-            // Assume InternalServerErrorException exists
             throw new RuntimeException("Batch processing failed for groupId=" + groupId, e);
         } finally {
             if (acquired) {

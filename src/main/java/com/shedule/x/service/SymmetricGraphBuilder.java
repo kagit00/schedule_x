@@ -131,25 +131,19 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
         }
 
         Timer.Sample timer = Timer.start(meterRegistry);
-
-        // Partition new nodes into batch chunks
         List<List<NodeDTO>> allChunks = BatchUtils.partition(newNodes, chunkSize);
         int numChunks = allChunks.size();
 
 
         final TaskIterator taskIterator = new TaskIterator(allChunks);
         final int totalTasks = taskIterator.getTotalTasks();
-
-        // Tracks how many tasks have been consumed, NOT how many exist
         final AtomicInteger taskIndexCounter = new AtomicInteger(0);
 
-        // Create matching strategy
         SymmetricEdgeBuildingStrategy strategy =
                 strategyFactory.createStrategy(request.getWeightFunctionKey(), newNodes);
 
         CompletableFuture<GraphRecords.GraphResult> resultFuture = new CompletableFuture<>();
 
-        // Index nodes → then start worker chains
         strategy.indexNodes(newNodes, request.getPage())
                 .thenRun(() ->
                         startConcurrentWorkers(taskIterator, totalTasks, taskIndexCounter, strategy, request, resultFuture)
@@ -159,7 +153,6 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
                     return null;
                 });
 
-        // Finalize and record metrics
         return resultFuture.whenComplete((r, t) -> {
             timer.stop(
                     meterRegistry.timer(
@@ -182,8 +175,7 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
         int workersToStart = Math.min(totalTasks, maxConcurrentWorkers);
         List<CompletableFuture<Void>> workerFutures = new ArrayList<>(workersToStart);
 
-        log.info(
-                "Spawning {} workers for {} cross-product tasks | groupId={}",
+        log.info("Spawning {} workers for {} cross-product tasks | groupId={}",
                 workersToStart, totalTasks, request.getGroupId()
         );
 

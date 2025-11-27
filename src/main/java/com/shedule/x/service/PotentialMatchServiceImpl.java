@@ -29,7 +29,6 @@ import java.util.stream.Collectors;
 @Service
 public class PotentialMatchServiceImpl implements PotentialMatchService {
 
-    // DB Safe-guards
     private static final int NODE_FETCH_BATCH_SIZE = 1000;
     private static final int HISTORY_FLUSH_INTERVAL = 5;
 
@@ -41,7 +40,6 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
     private final ExecutorService ioExecutor;
     private final MatchParticipationHistoryRepository matchParticipationHistoryRepository;
 
-    // Buffers & Locks
     private final ConcurrentLinkedQueue<MatchParticipationHistory> historyBuffer = new ConcurrentLinkedQueue<>();
     private final AtomicInteger pageCounter = new AtomicInteger(0);
     // Limit concurrent DB calls for Node Hydration to avoid IO saturation
@@ -78,15 +76,12 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
 
         Timer.Sample sample = Timer.start(meterRegistry);
 
-        // 1. Hydrate Nodes (Fetch Entity Data from IDs)
         return fetchNodesInSubBatches(nodeIds, groupId, request.getCreatedAfter())
                 .thenComposeAsync(nodes -> {
                     log.info("Hydrated {} nodes for matching | groupId={}", nodes.size(), groupId);
 
-                    // 2. Audit Trail
                     bufferMatchParticipationHistory(nodes, groupId, domainId, cycleId);
 
-                    // 3. Delegate to Graph Engine
                     return processGraphAndMatches(nodes, request, groupId, cycleId)
                             .thenApply(v -> NodesCount.builder().nodeCount(nodes.size()).build());
 
@@ -109,7 +104,6 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
         List<CompletableFuture<List<NodeDTO>>> futures = new ArrayList<>();
 
         for (List<UUID> subBatch : partitions) {
-            // Async acquire semaphore to prevent DB thrashing
             futures.add(acquireDbSemaphore()
                     .thenCompose(v -> nodeFetchService.fetchNodesInBatchesAsync(subBatch, groupId, createdAfter))
                     .whenComplete((res, ex) -> dbFetchSemaphore.release())
@@ -129,14 +123,11 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
 
         if (nodes.isEmpty()) return CompletableFuture.completedFuture(null);
 
-        // Decorate request
         request.setNumberOfNodes(nodes.size());
         request.setWeightFunctionKey(weightFunctionResolver.resolveWeightFunctionKey(groupId));
 
-        // Call the GraphPreProcessor we fixed earlier
         return graphPreProcessor.buildGraph(nodes, request)
                 .thenAcceptAsync(graphResult -> {
-                    // Mark as processed only after GraphBuilder accepts them
                     List<UUID> processedIds = nodes.stream().map(NodeDTO::getId).toList();
                     nodeFetchService.markNodesAsProcessed(processedIds, groupId);
                 }, batchExecutor);

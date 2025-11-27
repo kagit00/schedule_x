@@ -96,12 +96,12 @@ public class PerfectMatchCreationService {
                                 lastRunStatus.equals(JobStatus.PENDING.name()) ||
                                 lastRunStatus.equals(JobStatus.FAILED.name()));
 
-                if (shouldProcess) {
+                //if (shouldProcess) {
                     tasks.add(new AbstractMap.SimpleEntry<>(domain, groupId));
-                } else {
-                    log.info("Skipping groupId={} for domainId={}: Last run nodes: {}, Processed: {}",
-                            groupId, domain.getId(), lastRunNodeCount, processedNodes);
-                }
+                //} else {
+               //     log.info("Skipping groupId={} for domainId={}: Last run nodes: {}, Processed: {}",
+                       //     groupId, domain.getId(), lastRunNodeCount, processedNodes);
+                //}
             }
         }
         return tasks;

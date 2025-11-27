@@ -36,7 +36,6 @@ public class PotentialMatchesCreationScheduler {
     private final MatchingGroupRepository matchingGroupRepository;
     private final PotentialMatchesCreationJobExecutor jobExecutor;
 
-    // We now inject the Processor directly to handle lifecycle
     private final PotentialMatchComputationProcessor processor;
 
     private final MeterRegistry meterRegistry;
@@ -68,8 +67,6 @@ public class PotentialMatchesCreationScheduler {
         this.meterRegistry = meterRegistry;
         this.batchExecutor = batchExecutor;
         this.matchesCreationFinalizer = matchesCreationFinalizer;
-
-        // Fair semaphore to prevents thread starvation for heavy domains
         this.domainSemaphore = new Semaphore(maxConcurrentDomains, true);
 
         validateExecutorPool(batchExecutor, maxConcurrentDomains);
@@ -90,7 +87,7 @@ public class PotentialMatchesCreationScheduler {
         groupLocks.entrySet().removeIf(entry -> entry.getValue().isDone());
     }
 
-    @Scheduled(fixedDelayString = "${match.save.delay:300000}")
+    @Scheduled(cron = "0 0 0 * * *", zone = "Asia/Kolkata")
     public void processAllDomainsScheduled() {
         Timer.Sample sample = Timer.start(meterRegistry);
         String cycleId = DefaultValuesPopulator.getUid();
@@ -116,7 +113,6 @@ public class PotentialMatchesCreationScheduler {
 
         log.info("Found {} groups to process across {} domains.", tasks.size(), domains.size());
 
-        // 2. Trigger Tasks (Non-blocking, chained)
         for (GroupTaskRequest task : tasks) {
             allTasks.add(processGroupTask(task));
         }
@@ -134,9 +130,7 @@ public class PotentialMatchesCreationScheduler {
                 }, batchExecutor);
     }
 
-    /**
-     * Ensures serial execution for the same Group ID, but parallel execution across different Groups.
-     */
+
     private CompletableFuture<Void> processGroupTask(GroupTaskRequest request) {
         return groupLocks.compute(request.groupId(), (k, previousTask) -> {
             if (previousTask == null || previousTask.isDone()) {

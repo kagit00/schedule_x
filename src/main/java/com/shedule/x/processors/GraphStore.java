@@ -50,7 +50,6 @@ public class GraphStore implements AutoCloseable {
                 int band = compositeKey & 0xFFFF;
                 List<UUID> newNodes = entry.getValue();
 
-                // -> CALL 3: Delegate the actual I/O work, passing the single TXN down
                 lshBucketManager.mergeAndWriteBucket(txn, tableIdx, band, newNodes);
             }
 

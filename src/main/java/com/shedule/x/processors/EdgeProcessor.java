@@ -69,7 +69,6 @@ public final class EdgeProcessor {
                     continue;
                 }
 
-                // 2. Partition the SOURCE batch for semaphore control
                 List<List<NodeDTO>> nodeChunks = BatchUtils.partition(sourceBatch, 50);
                 List<GraphRecords.PotentialMatch> allMatches = new ArrayList<>();
 
@@ -83,7 +82,7 @@ public final class EdgeProcessor {
                         }
 
                         List<Pair<int[], UUID>> nodesForBulkQuery = chunk.stream()
-                                .map(node -> { // 'node' is now NodeDTO
+                                .map(node -> {
                                     int[] encoded = snap.encodedNodesCache().get(node.getId());
                                     if (encoded == null) {
                                         log.warn("Encoded metadata not found for node: {} in groupId={}", node.getId(), groupId);
@@ -151,7 +150,6 @@ public final class EdgeProcessor {
     }
 
     public List<GraphRecords.PotentialMatch> processChunkCandidates(
-            // ⚠️ CHANGE: Input sourceChunk must be NodeDTO
             List<NodeDTO> sourceChunk,
             Map<UUID, Set<UUID>> bulkCandidates,
             Set<UUID> targetNodeIds,
@@ -165,7 +163,7 @@ public final class EdgeProcessor {
         List<GraphRecords.PotentialMatch> chunkMatches = chunkMatchesBuffer.get();
         chunkMatches.clear();
 
-        for (NodeDTO node : sourceChunk) { // 'node' is now NodeDTO
+        for (NodeDTO node : sourceChunk) {
             try {
                 Set<UUID> rawCandidates = bulkCandidates.getOrDefault(node.getId(), Collections.emptySet());
                 if (rawCandidates.isEmpty()) {
