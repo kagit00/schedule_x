@@ -2,9 +2,7 @@ package com.shedule.x.processors.matcher.strategies;
 
 import com.shedule.x.dto.*;
 import com.shedule.x.exceptions.InternalServerErrorException;
-import com.shedule.x.models.Edge;
-import com.shedule.x.models.Graph;
-import com.shedule.x.models.Node;
+import com.shedule.x.dto.Graph;
 import com.shedule.x.service.BipartiteGraphBuilderService;
 import com.shedule.x.service.GraphRecords;
 import lombok.extern.slf4j.Slf4j;

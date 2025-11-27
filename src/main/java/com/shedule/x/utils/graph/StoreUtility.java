@@ -8,6 +8,7 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
@@ -71,10 +72,8 @@ public final class StoreUtility {
             long aMsb = existing[i];
             long bMsb = incoming[j];
 
-            // Compare MSB first
             int cmp = Long.compare(aMsb, bMsb);
             if (cmp == 0) {
-                // If MSB matches, compare LSB
                 cmp = Long.compare(existing[i + 1], incoming[j + 1]);
             }
 
@@ -143,7 +142,20 @@ public final class StoreUtility {
     public static ByteBuffer valBuf() { ByteBuffer b = valBuf.get(); b.clear(); return b; }
 
     public static void putUUID(ByteBuffer buf, UUID id) {
-        buf.putLong(id.getMostSignificantBits()).putLong(id.getLeastSignificantBits());
+        if (id == null) {
+            buf.putLong(0L);
+            buf.putLong(0L);
+        } else {
+            buf.putLong(id.getMostSignificantBits());
+            buf.putLong(id.getLeastSignificantBits());
+        }
+    }
+
+    public static UUID getUUID(ByteBuffer buf) {
+        long msb = buf.getLong();
+        long lsb = buf.getLong();
+        if (msb == 0L && lsb == 0L) return null;
+        return new UUID(msb, lsb);
     }
 
     public static long[] toLongArray(Collection<UUID> ids) {

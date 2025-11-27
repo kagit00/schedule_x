@@ -1,15 +1,13 @@
 package com.shedule.x.service;
 
-import com.shedule.x.builder.BipartiteEdgeBuilder;
+import com.shedule.x.builder.BipartiteEdgeBuildingStrategy;
 import com.shedule.x.config.factory.AutoCloseableStream;
 import com.shedule.x.config.factory.GraphFactory;
 import com.shedule.x.dto.EdgeDTO;
 import com.shedule.x.dto.MatchingRequest;
 import com.shedule.x.dto.NodeDTO;
 import com.shedule.x.exceptions.InternalServerErrorException;
-import com.shedule.x.models.Edge;
-import com.shedule.x.models.Graph;
-import com.shedule.x.models.Node;
+import com.shedule.x.dto.Graph;
 import com.shedule.x.processors.GraphStore;
 import com.shedule.x.processors.PotentialMatchSaver;
 import com.shedule.x.utils.db.BatchUtils;
@@ -38,7 +36,7 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
     private static final int MAX_RETRIES = 3;
     private static final long RETRY_BACKOFF_MS = 1000;
 
-    private final BipartiteEdgeBuilder bipartiteEdgeBuilder;
+    private final BipartiteEdgeBuildingStrategy bipartiteEdgeBuildingStrategy;
     private final ExecutorService mappingExecutor;
     private final MeterRegistry meterRegistry;
     private final ExecutorService computeExecutor;
@@ -57,13 +55,13 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
     private final AtomicInteger bipartiteFuturesPending = new AtomicInteger(0);
 
     public BipartiteGraphBuilder(
-            BipartiteEdgeBuilder bipartiteEdgeBuilder,
+            BipartiteEdgeBuildingStrategy bipartiteEdgeBuildingStrategy,
             MeterRegistry meterRegistry,
             @Qualifier("graphBuildExecutor") ExecutorService computeExecutor,
             PotentialMatchSaver matchSaver,
             GraphStore graphStoreImp,
             @Qualifier("persistenceExecutor") ExecutorService mappingExecutor) {
-        this.bipartiteEdgeBuilder = Objects.requireNonNull(bipartiteEdgeBuilder,
+        this.bipartiteEdgeBuildingStrategy = Objects.requireNonNull(bipartiteEdgeBuildingStrategy,
                 "bipartiteEdgeBuilder must not be null");
         this.meterRegistry = Objects.requireNonNull(meterRegistry, "meterRegistry must not be null");
         this.computeExecutor = Objects.requireNonNull(computeExecutor, "computeExecutor must not be null");
@@ -368,7 +366,7 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
                     .toList());
         } else {
             Map<String, Object> context = Map.of("executor", computeExecutor);
-            bipartiteEdgeBuilder.processBatch(leftBatch, rightBatch, matches, ConcurrentHashMap.newKeySet(), groupId,
+            bipartiteEdgeBuildingStrategy.processBatch(leftBatch, rightBatch, matches, ConcurrentHashMap.newKeySet(), groupId,
                     request.getDomainId(), context);
         }
 

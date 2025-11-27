@@ -1,4 +1,4 @@
-package com.shedule.x.models;
+package com.shedule.x.dto;
 
 import com.shedule.x.dto.enums.MatchType;
 import lombok.AllArgsConstructor;

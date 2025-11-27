@@ -1,6 +1,6 @@
 package com.shedule.x.exceptions;
 
-import com.shedule.x.models.Error;
+import com.shedule.x.dto.Error;
 import com.shedule.x.utils.basic.ErrorUtility;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;

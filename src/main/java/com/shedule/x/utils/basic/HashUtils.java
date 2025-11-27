@@ -13,10 +13,10 @@ public final class HashUtils {
     private static final int R = 47;
 
     private static final long[] SEEDS;
-    private static final int MAX_HASH = 0xFFFF; // 16-bit bucket
+    private static final int MAX_HASH = 0xFFFF;
 
     static {
-        SEEDS = new long[200]; // support up to 200 hash functions
+        SEEDS = new long[200];
         Random r = new Random(42);
         for (int i = 0; i < SEEDS.length; i++) {
             SEEDS[i] = r.nextLong();
@@ -25,7 +25,7 @@ public final class HashUtils {
 
 
     private static int computeHashForSlice(int[] metadata, int start, int length, int tableIndex) {
-        long seed = tableIndex * 0x9e3779b97f4a7c15L; // Distinct seed per table
+        long seed = tableIndex * 0x9e3779b97f4a7c15L;
         int hash = 0;
 
         for (int j = 0; j < length; j++) {
@@ -49,14 +49,12 @@ public final class HashUtils {
 
     public static short[] computeHashes(int[] features, int numTables, int numBands) {
         short[] minHashes = new short[numTables];
-
-        // Initialize with max value
         Arrays.fill(minHashes, (short)MAX_HASH);
 
         for (int feature : features) {
             for (int i = 0; i < numTables; i++) {
                 long seed = SEEDS[i];
-                int hash = murmur3_32(feature, seed);  // 32-bit hash
+                int hash = murmur3_32(feature, seed);
                 int bucket = hash & MAX_HASH;
                 if (bucket < (minHashes[i] & 0xFFFF)) {
                     minHashes[i] = (short) bucket;

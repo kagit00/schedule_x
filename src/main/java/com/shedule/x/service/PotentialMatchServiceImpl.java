@@ -42,7 +42,6 @@ public class PotentialMatchServiceImpl implements PotentialMatchService {
 
     private final ConcurrentLinkedQueue<MatchParticipationHistory> historyBuffer = new ConcurrentLinkedQueue<>();
     private final AtomicInteger pageCounter = new AtomicInteger(0);
-    // Limit concurrent DB calls for Node Hydration to avoid IO saturation
     private final Semaphore dbFetchSemaphore = new Semaphore(4, true);
 
     public PotentialMatchServiceImpl(

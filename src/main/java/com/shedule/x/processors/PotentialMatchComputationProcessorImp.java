@@ -304,7 +304,7 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
                                         batchSize,
                                         totalDrainedSoFar + batch.size()
                                 ),
-                        mappingExecutor // Use mapping executor for the orchestration logic
+                        mappingExecutor
                 )
                 .exceptionally(t -> {
                     log.error("Error during recursive drain for groupId={}", groupId, t);

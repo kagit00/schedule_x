@@ -3,6 +3,7 @@ package com.shedule.x.service;
 import com.shedule.x.config.factory.GraphRequestFactory;
 import com.shedule.x.dto.EdgeDTO;
 import com.shedule.x.dto.MatchResult;
+import com.shedule.x.dto.MatchingContext;
 import com.shedule.x.dto.MatchingRequest;
 import com.shedule.x.dto.enums.MatchType;
 import com.shedule.x.models.*;
@@ -26,11 +27,6 @@ import java.util.concurrent.*;
 
 
 import lombok.RequiredArgsConstructor;
-import java.util.*;
-import java.util.concurrent.*;
-import java.util.*;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
 
 @Slf4j
 @Service

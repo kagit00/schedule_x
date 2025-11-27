@@ -1,4 +1,4 @@
-package com.shedule.x.models;
+package com.shedule.x.dto;
 
 import lombok.AllArgsConstructor;
 import lombok.Builder;

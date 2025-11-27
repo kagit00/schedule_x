@@ -1,8 +1,7 @@
 package com.shedule.x.service;
 
 import com.shedule.x.models.Edge;
-import com.shedule.x.models.Graph;
-import com.shedule.x.models.PotentialMatchEntity;
+import com.shedule.x.dto.Graph;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;

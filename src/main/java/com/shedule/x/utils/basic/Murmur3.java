@@ -1,16 +1,18 @@
 package com.shedule.x.utils.basic;
 
+import lombok.experimental.UtilityClass;
+
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 
+@UtilityClass
 public final class Murmur3 {
 
     private static final int SEED = 0;
 
     public static int hash32(String str) {
         byte[] data = str.getBytes(StandardCharsets.UTF_8);
-        // Use the 128-bit implementation and return the first 4 bytes (int)
         byte[] hash128 = hash128(data, 0, data.length, SEED);
         return ByteBuffer.wrap(hash128).order(ByteOrder.LITTLE_ENDIAN).getInt();
     }

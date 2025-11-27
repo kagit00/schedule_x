@@ -1,10 +1,8 @@
-package com.shedule.x.models;
+package com.shedule.x.dto;
 
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
-
-import java.util.Map;
 
 
 @Data

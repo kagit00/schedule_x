@@ -3,13 +3,10 @@ package com.shedule.x.builder;
 import com.shedule.x.dto.NodeDTO;
 import com.shedule.x.metrics.GraphBuilderMetrics;
 import com.shedule.x.models.Edge;
-import com.shedule.x.models.Node;
 import com.shedule.x.processors.MetadataCompatibilityCalculator;
 import com.shedule.x.service.CompatibilityCalculator;
 import com.shedule.x.service.GraphRecords;
 import io.micrometer.core.instrument.MeterRegistry;
-import lombok.AllArgsConstructor;
-import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import java.util.*;
 import io.micrometer.core.instrument.Timer;
@@ -18,11 +15,9 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 import java.util.Set;
 
-import java.util.*;
-
 @Slf4j
 @Component
-public class BipartiteEdgeBuilder {
+public class BipartiteEdgeBuildingStrategy {
     private static final int MATCH_BATCH_SIZE = 250;
 
     private final MeterRegistry meterRegistry;
@@ -32,7 +27,7 @@ public class BipartiteEdgeBuilder {
     @Value("${bipartite.edge.build.similarity-threshold:0.05}")
     private Double similarityThreshold;
 
-    public BipartiteEdgeBuilder(
+    public BipartiteEdgeBuildingStrategy(
             MeterRegistry meterRegistry,
             GraphBuilderMetrics metrics) {
         this.meterRegistry = meterRegistry;
@@ -41,13 +36,9 @@ public class BipartiteEdgeBuilder {
     }
 
     public void processBatch(
-            // ⚠️ CHANGE: Use NodeDTO instead of Node
             List<NodeDTO> leftBatch,
             List<NodeDTO> rightBatch,
-            // ⚠️ ADJUSTMENT: Since we can't build JPA Edge, we use PotentialMatch (which maps to EdgeDTO fields)
             List<GraphRecords.PotentialMatch> matches,
-            // We cannot build JPA Edge here without full JPA Nodes, so this Set will remain empty or should be removed.
-            // For now, we keep it but it's not populated with JPA Entities.
             Set<Edge> edges,
             UUID groupId,
             UUID domainId,

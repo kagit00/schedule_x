@@ -2,7 +2,7 @@ package com.shedule.x.processors.matcher.strategies.decider;
 
 import com.shedule.x.exceptions.BadRequestException;
 import com.shedule.x.models.MatchingConfiguration;
-import com.shedule.x.models.MatchingContext;
+import com.shedule.x.dto.MatchingContext;
 import com.shedule.x.models.MatchingGroup;
 import com.shedule.x.processors.matcher.strategies.MatchingStrategy;
 import com.shedule.x.repo.MatchingConfigurationRepository;

@@ -1,14 +1,10 @@
 package com.shedule.x.utils.graph;
 
 import com.shedule.x.dto.NodeDTO;
-import com.shedule.x.models.Node;
 import lombok.experimental.UtilityClass;
 
 import java.nio.ByteBuffer;
 import java.util.UUID;
-
-
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -17,24 +13,19 @@ import java.util.Map;
 
 import lombok.extern.slf4j.Slf4j;
 
+import static com.shedule.x.utils.graph.StoreUtility.getUUID;
+import static com.shedule.x.utils.graph.StoreUtility.putUUID;
+
 
 @Slf4j
 @UtilityClass
 public final class NodeSerializer {
-
-    // Keep LMDB value buffers no larger than this.
     public static final int MAX_NODE_SIZE = 512;
 
-    /**
-     * Serializes NodeDTO into the provided ByteBuffer.
-     * The method ensures the written data does not exceed MAX_NODE_SIZE.
-     * The caller must call buf.flip() after this method returns.
-     */
     public static void serialize(NodeDTO node, ByteBuffer buf) {
         buf.clear();
         final int startPos = buf.position();
 
-        // -------------------- FIXED FIELDS --------------------
         putUUID(buf, node.getId());
         putUUID(buf, node.getGroupId());
         putUUID(buf, node.getDomainId());
@@ -46,7 +37,6 @@ public final class NodeSerializer {
 
         buf.put(node.isProcessed() ? (byte) 1 : (byte) 0);
 
-        // -------------------- VARIABLE FIELDS --------------------
         if (!safeWriteString(buf, node.getType())) {
             finalizeAndClamp(buf, startPos);
             return;
@@ -57,7 +47,6 @@ public final class NodeSerializer {
             return;
         }
 
-        // -------------------- METADATA --------------------
         int metaCountPos = buf.position();
         buf.putShort((short) 0); // placeholder
         int metaWritten = 0;
@@ -86,7 +75,6 @@ public final class NodeSerializer {
         buf.putShort((short) metaWritten);
         buf.position(current);
 
-        // -------------------- FINAL CLAMP --------------------
         finalizeAndClamp(buf, startPos);
     }
 
@@ -96,12 +84,6 @@ public final class NodeSerializer {
         buf.position(limit);
     }
 
-
-
-    /**
-     * Deserialize buffer into NodeDTO.
-     * Expects ByteBuffer position to be at the start of the value.
-     */
     public static NodeDTO deserialize(ByteBuffer val) {
         if (val == null || val.remaining() < 16) return null;
 
@@ -127,7 +109,6 @@ public final class NodeSerializer {
             Map<String, String> meta = new java.util.HashMap<>(Math.max(4, metaCount));
 
             for (int i = 0; i < metaCount; i++) {
-                // Defensive check against buffer limit
                 if (val.position() - startPos >= avail) break;
 
                 String k = readShortPrefixedString(val);
@@ -152,34 +133,13 @@ public final class NodeSerializer {
         }
     }
 
-
-
-
-
-    private static void putUUID(ByteBuffer buf, UUID id) {
-        if (id == null) {
-            buf.putLong(0L);
-            buf.putLong(0L);
-        } else {
-            buf.putLong(id.getMostSignificantBits());
-            buf.putLong(id.getLeastSignificantBits());
-        }
-    }
-
-    private static UUID getUUID(ByteBuffer buf) {
-        long msb = buf.getLong();
-        long lsb = buf.getLong();
-        if (msb == 0L && lsb == 0L) return null;
-        return new UUID(msb, lsb);
-    }
-
     private static boolean safeWriteString(ByteBuffer buf, String s) {
         if (s == null) s = "";
 
         byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
         int len = Math.min(bytes.length, Short.MAX_VALUE);
 
-        int required = 2 + len; // 2 bytes length prefix + content
+        int required = 2 + len;
 
         if (buf.remaining() < required)
             return false;

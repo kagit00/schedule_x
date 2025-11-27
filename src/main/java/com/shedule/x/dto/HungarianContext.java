@@ -1,8 +1,5 @@
-package com.shedule.x.models;
+package com.shedule.x.dto;
 
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
 import lombok.Getter;
 
 import java.util.Arrays;

@@ -6,7 +6,7 @@ import com.shedule.x.dto.MatchingRequest;
 import com.shedule.x.dto.NodeDTO;
 import com.shedule.x.exceptions.InternalServerErrorException;
 import com.shedule.x.models.Edge;
-import com.shedule.x.models.Graph;
+import com.shedule.x.dto.Graph;
 import com.shedule.x.models.Node;
 import com.shedule.x.models.PotentialMatchEntity;
 import com.shedule.x.processors.PotentialMatchSaver;
