@@ -29,16 +29,16 @@ public class GraphStore implements AutoCloseable {
     }
 
     // --- Edge operations ---
-    public CompletableFuture<Void> persistEdgesAsync(List<GraphRecords.PotentialMatch> matches, UUID groupId, int chunkIndex) {
-        return edgePersistence.persistAsync(matches, groupId, chunkIndex);
+    public CompletableFuture<Void> persistEdgesAsync(List<GraphRecords.PotentialMatch> matches, UUID groupId, int chunkIndex, String cycleId) {
+        return edgePersistence.persistAsync(matches, groupId, chunkIndex, cycleId);
     }
 
-    public AutoCloseableStream<EdgeDTO> streamEdges(UUID domainId, UUID groupId) {
-        return edgePersistence.streamEdges(domainId, groupId);
+    public AutoCloseableStream<EdgeDTO> streamEdges(UUID domainId, UUID groupId, String cycleId) {
+        return edgePersistence.streamEdges(domainId, groupId, cycleId);
     }
 
-    public void cleanEdges(UUID groupId) {
-        edgePersistence.cleanEdges(groupId);
+    public void cleanEdges(UUID groupId, String cycleId) {
+        edgePersistence.cleanEdges(groupId, cycleId);
     }
 
     public void bulkIngestLSH(Map<Integer, List<UUID>> groupedUpdates) {

@@ -75,7 +75,7 @@ public class PotentialMatchesCreationScheduler {
     private void validateExecutorPool(ExecutorService executor, int concurrentDomains) {
         if (executor instanceof ThreadPoolExecutor tpe) {
             int poolSize = tpe.getMaximumPoolSize();
-            int requiredSize = concurrentDomains + 2; // +2 for overhead/overhead tasks
+            int requiredSize = concurrentDomains + 2;
             if (poolSize < requiredSize) {
                 log.warn("BatchExecutor pool size ({}) is small for maxConcurrentDomains ({}). Potential deadlock.",
                         poolSize, concurrentDomains);
@@ -87,7 +87,7 @@ public class PotentialMatchesCreationScheduler {
         groupLocks.entrySet().removeIf(entry -> entry.getValue().isDone());
     }
 
-    @Scheduled(cron = "0 0 0 * * *", zone = "Asia/Kolkata")
+    @Scheduled(cron = "0 55 0 * * *", zone = "Asia/Kolkata")
     public void processAllDomainsScheduled() {
         Timer.Sample sample = Timer.start(meterRegistry);
         String cycleId = DefaultValuesPopulator.getUid();

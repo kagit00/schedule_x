@@ -25,11 +25,11 @@ public final class StoreUtility {
     private static final int MAX_BUCKET_IDS = 40_000;
     private static final int MAX_VAL_BUF = 512;
 
-    private final ThreadLocal<ByteBuffer> valBuf = ThreadLocal.withInitial(() ->
-            ByteBuffer.allocateDirect(MAX_VAL_BUF).order(ByteOrder.BIG_ENDIAN));
+    private static final ThreadLocal<ByteBuffer> KEY_BUFFER = ThreadLocal.withInitial(() ->
+            ByteBuffer.allocateDirect(512).order(ByteOrder.BIG_ENDIAN));
 
-    private final ThreadLocal<ByteBuffer> keyBuf = ThreadLocal.withInitial(() ->
-            ByteBuffer.allocateDirect(MAX_KEY_BUF).order(ByteOrder.BIG_ENDIAN));
+    private static final ThreadLocal<ByteBuffer> VAL_BUFFER = ThreadLocal.withInitial(() ->
+            ByteBuffer.allocateDirect(1024).order(ByteOrder.BIG_ENDIAN));
 
     private final ThreadLocal<long[]> mergeBuf = ThreadLocal.withInitial(() -> new long[MAX_BUCKET_IDS * 4]);
 
@@ -138,8 +138,8 @@ public final class StoreUtility {
         AlgorithmUtils.radixSortPairs(pairs, tmp);
     }
 
-    public static ByteBuffer keyBuf() { ByteBuffer b = keyBuf.get(); b.clear(); return b; }
-    public static ByteBuffer valBuf() { ByteBuffer b = valBuf.get(); b.clear(); return b; }
+    public static ByteBuffer keyBuf() { ByteBuffer b = KEY_BUFFER.get(); b.clear(); return b; }
+    public static ByteBuffer valBuf() { ByteBuffer b = VAL_BUFFER.get(); b.clear(); return b; }
 
     public static void putUUID(ByteBuffer buf, UUID id) {
         if (id == null) {
@@ -149,6 +149,13 @@ public final class StoreUtility {
             buf.putLong(id.getMostSignificantBits());
             buf.putLong(id.getLeastSignificantBits());
         }
+    }
+
+
+    public static void putString(ByteBuffer bb, String s) {
+        byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
+        bb.putInt(bytes.length);
+        bb.put(bytes);
     }
 
     public static UUID getUUID(ByteBuffer buf) {

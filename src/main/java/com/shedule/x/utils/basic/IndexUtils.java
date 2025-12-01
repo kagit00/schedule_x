@@ -59,10 +59,12 @@ public final class IndexUtils {
 
         UUID groupId = nodes.isEmpty() ? null : nodes.get(0).getGroupId();
         if (groupId != null) {
-            for (NodeDTO node : nodesToPersist) {
-                nodeDataService.persistNode(node, groupId);
+            for (NodeDTO node : nodes) {
+                if (node.getId() != null && node.getGroupId() != null) {
+                    nodeDataService.persistNode(node, groupId);
+                }
             }
-            log.info("Persisted {} new/updated NodeDTOs to disk for groupId={}", nodesToPersist.size(), groupId);
+            log.info("Persisted {} new/updated NodeDTOs to disk for groupId={}", nodes.size(), groupId);
         }
 
         log.info("Encoding {} new or updated nodes for LSH indexing", rawEntries.size());
@@ -104,6 +106,6 @@ public final class IndexUtils {
     }
 
     public static boolean ensurePrepared(UUID groupId, int attempt, int maxRetries) {
-        return true;
+        return false;
     }
 }

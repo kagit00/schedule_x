@@ -10,7 +10,8 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 public interface EdgePersistence extends AutoCloseable {
-    CompletableFuture<Void> persistAsync(List<GraphRecords.PotentialMatch> matches, UUID groupId, int chunkIndex);
+    CompletableFuture<Void> persistAsync(List<GraphRecords.PotentialMatch> matches, UUID groupId, int chunkIndex, String cycleId);
+    AutoCloseableStream<EdgeDTO> streamEdges(UUID domainId, UUID groupId, String cycleId);
     AutoCloseableStream<EdgeDTO> streamEdges(UUID domainId, UUID groupId);
-    void cleanEdges(UUID groupId);
+    void cleanEdges(UUID groupId, String cycleId);
 }

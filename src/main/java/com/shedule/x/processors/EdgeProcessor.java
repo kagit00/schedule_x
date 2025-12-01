@@ -24,17 +24,12 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 @Slf4j
 @Component
 public final class EdgeProcessor {
-
-    private final NodeDataService nodeDataService;
-
-    public EdgeProcessor(NodeDataService nodeDataService) {
-        this.nodeDataService = nodeDataService;
-    }
 
     public List<GraphRecords.PotentialMatch> processBatchSync(
             List<NodeDTO> sourceBatch,
@@ -43,116 +38,124 @@ public final class EdgeProcessor {
             UUID domainId,
             LSHIndex lshIndex,
             CompatibilityCalculator compatibilityCalculator,
-            MetadataEncoder metadataEncoder,
             AtomicReference<Snapshot> currentSnapshot,
             EdgeBuildingConfig config,
             Semaphore chunkSemaphore,
-            ExecutorService executor,
             ThreadLocal<List<GraphRecords.PotentialMatch>> chunkMatchesBuffer) {
 
-        final Set<UUID> targetNodeIds = (targetBatch == null || targetBatch.isEmpty())
-                ? Collections.emptySet()
-                : targetBatch.stream().map(NodeDTO::getId).collect(Collectors.toSet());
+        final Map<UUID, NodeDTO> targetNodeMap = (targetBatch == null || targetBatch.isEmpty())
+                ? Collections.emptyMap()
+                : targetBatch.stream().collect(Collectors.toMap(NodeDTO::getId, Function.identity()));
 
-        for (int attempt = 1; attempt <= config.getMaxRetries(); attempt++) {
+        List<List<NodeDTO>> nodeChunks = BatchUtils.partition(sourceBatch, 50);
+        List<GraphRecords.PotentialMatch> allMatches = new ArrayList<>();
+
+        for (List<NodeDTO> chunk : nodeChunks) {
+            boolean acquired = false;
             try {
-                if (!IndexUtils.ensurePrepared(groupId, attempt, config.getMaxRetries())) {
-                    log.warn("LSH preparation incomplete for groupId={} (attempt {}/{}), retrying", groupId, attempt, config.getMaxRetries());
-                    Thread.sleep(config.getRetryDelayMillis());
+                acquired = chunkSemaphore.tryAcquire(config.getChunkTimeoutSeconds(), TimeUnit.SECONDS);
+                if (!acquired) {
+                    log.warn("Timed out acquiring semaphore for chunk in groupId={}", groupId);
+                    continue;
+                }
+
+                if (!waitForLshReady(currentSnapshot, chunk.size(), groupId)) {
+                    log.warn("LSH indexing not ready in time for chunk in groupId={} — skipping this chunk", groupId);
                     continue;
                 }
 
                 Snapshot snap = currentSnapshot.get();
-                if (snap.encodedNodesCache().isEmpty()) {
-                    log.error("encodedNodesCache empty for groupId={} after preparation, retrying", groupId);
-                    Thread.sleep(config.getRetryDelayMillis());
+                List<Pair<int[], UUID>> nodesForBulkQuery = chunk.stream()
+                        .map(node -> {
+                            int[] encoded = snap.encodedNodesCache().get(node.getId());
+                            if (encoded == null) {
+                                log.warn("Encoded vector missing for node {} in groupId={} (should not happen)", node.getId(), groupId);
+                                return null;
+                            }
+                            return Pair.of(encoded, node.getId());
+                        })
+                        .filter(Objects::nonNull)
+                        .toList();
+
+                if (nodesForBulkQuery.isEmpty()) {
                     continue;
                 }
 
-                List<List<NodeDTO>> nodeChunks = BatchUtils.partition(sourceBatch, 50);
-                List<GraphRecords.PotentialMatch> allMatches = new ArrayList<>();
+                CompletableFuture<Map<UUID, Set<UUID>>> queryFuture = lshIndex
+                        .queryAsyncAll(nodesForBulkQuery)
+                        .orTimeout(config.getChunkTimeoutSeconds(), TimeUnit.SECONDS);
 
-                for (List<NodeDTO> chunk : nodeChunks) {
-                    boolean acquired = false;
-                    try {
-                        acquired = chunkSemaphore.tryAcquire(config.getChunkTimeoutSeconds(), TimeUnit.SECONDS);
-                        if (!acquired) {
-                            log.warn("Timed out acquiring semaphore for chunk in groupId={}", groupId);
-                            continue;
-                        }
+                Map<UUID, Set<UUID>> bulkCandidates = queryFuture.get(config.getChunkTimeoutSeconds(), TimeUnit.SECONDS);
 
-                        List<Pair<int[], UUID>> nodesForBulkQuery = chunk.stream()
-                                .map(node -> {
-                                    int[] encoded = snap.encodedNodesCache().get(node.getId());
-                                    if (encoded == null) {
-                                        log.warn("Encoded metadata not found for node: {} in groupId={}", node.getId(), groupId);
-                                        return null;
-                                    }
-                                    return Pair.of(encoded, node.getId());
-                                })
-                                .filter(Objects::nonNull)
-                                .toList();
+                allMatches.addAll(processChunkCandidates(
+                        chunk,
+                        bulkCandidates,
+                        targetNodeMap,
+                        groupId,
+                        domainId,
+                        compatibilityCalculator,
+                        config.getSimilarityThreshold(),
+                        config.getCandidateLimit(),
+                        chunkMatchesBuffer
+                ));
 
-                        if (nodesForBulkQuery.isEmpty()) {
-                            log.warn("No valid nodes for chunk processing in groupId={}", groupId);
-                            continue;
-                        }
-
-                        // 3. Query LSH (Returns global candidates)
-                        CompletableFuture<Map<UUID, Set<UUID>>> queryFuture = lshIndex
-                                .queryAsyncAll(nodesForBulkQuery)
-                                .orTimeout(config.getChunkTimeoutSeconds(), TimeUnit.SECONDS);
-
-                        Map<UUID, Set<UUID>> bulkCandidates = queryFuture.get(config.getChunkTimeoutSeconds(), TimeUnit.SECONDS);
-
-                        // 4. Process Matches with Target Filtering
-                        allMatches.addAll(processChunkCandidates(
-                                chunk,
-                                bulkCandidates,
-                                targetNodeIds,
-                                groupId,
-                                domainId,
-                                compatibilityCalculator,
-                                config.getSimilarityThreshold(),
-                                config.getCandidateLimit(),
-                                chunkMatchesBuffer
-                        ));
-
-                        log.debug("Chunk for groupId={} produced {} matches (chunk size={})", groupId, allMatches.size(), chunk.size());
-
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        log.error("Interrupted during chunk processing for groupId={}", groupId, e);
-                    } catch (Exception e) {
-                        log.error("Error processing chunk for groupId={}", groupId, e);
-                    } finally {
-                        if (acquired) {
-                            chunkSemaphore.release();
-                        }
-                    }
-                }
-                log.info("Generated {} matches for groupId={}", allMatches.size(), groupId);
-                return allMatches;
-
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.error("Interrupted during chunk processing for groupId={}", groupId, e);
+                break;
             } catch (Exception e) {
-                log.error("Attempt {}/{} failed for groupId={}", attempt, config.getMaxRetries(), groupId, e);
-                if (attempt < config.getMaxRetries()) {
-                    try {
-                        Thread.sleep(config.getRetryDelayMillis());
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                    }
+                log.error("Error processing chunk for groupId={}", groupId, e);
+            } finally {
+                if (acquired) {
+                    chunkSemaphore.release();
                 }
             }
         }
-        log.error("All retries failed for groupId={}", groupId);
-        return Collections.emptyList();
+
+        log.info("Generated {} potential matches for groupId={}", allMatches.size(), groupId);
+        return allMatches;
+    }
+
+    private boolean waitForLshReady(AtomicReference<Snapshot> currentSnapshot, int expectedSize, UUID groupId) {
+        int attempts = 0;
+        final int maxAttempts = 30;
+        final long baseDelayMs = 3000L;
+
+        while (attempts < maxAttempts) {
+            Snapshot snap = currentSnapshot.get();
+            if (snap != null && snap.encodedNodesCache() != null) {
+                int cached = snap.encodedNodesCache().size();
+                if (cached >= expectedSize * 0.7) {
+                    if (attempts > 0) {
+                        log.info("LSH ready for groupId={} after {} attempts (cache={})", groupId, attempts, cached);
+                    }
+                    return true;
+                }
+            }
+
+            attempts++;
+            long delay = Math.min(baseDelayMs * (1L << (attempts - 1)), 15000L); // exponential → max 15s
+            if (attempts <= 3 || attempts % 5 == 0) {
+                log.info("Waiting for LSH indexing — groupId={}, attempt {}/{}, cache has {} nodes",
+                        groupId, attempts, maxAttempts, snap == null ? 0 : snap.encodedNodesCache().size());
+            }
+
+            try {
+                Thread.sleep(delay);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+
+        log.error("LSH indexing took too long for groupId={} — giving up after {} attempts", groupId, maxAttempts);
+        return false;
     }
 
     public List<GraphRecords.PotentialMatch> processChunkCandidates(
             List<NodeDTO> sourceChunk,
             Map<UUID, Set<UUID>> bulkCandidates,
-            Set<UUID> targetNodeIds,
+            Map<UUID, NodeDTO> targetNodeMap,
             UUID groupId,
             UUID domainId,
             CompatibilityCalculator compatibilityCalculator,
@@ -172,12 +175,13 @@ public final class EdgeProcessor {
 
                 List<GraphRecords.PotentialMatch> nodeMatches = rawCandidates.stream()
                         .filter(candidateId -> !node.getId().equals(candidateId))
-                        .filter(targetNodeIds::contains)
+
+                        .filter(targetNodeMap::containsKey)
+
                         .map(candidateId -> {
-                            NodeDTO candidateNode = nodeDataService.getNode(candidateId, groupId);
+                            NodeDTO candidateNode = targetNodeMap.get(candidateId);
 
                             if (candidateNode == null) {
-                                log.warn("Candidate node {} not found in disk store for groupId={}", candidateId, groupId);
                                 return null;
                             }
 

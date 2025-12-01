@@ -84,11 +84,9 @@ public class MetadataEdgeBuildingStrategy implements SymmetricEdgeBuildingStrate
                     request.getDomainId(),
                     lshIndex,
                     compatibilityCalculator,
-                    metadataEncoder,
                     currentSnapshot,
                     config,
                     chunkSemaphore,
-                    executor,
                     chunkMatchesBuffer
             ));
 

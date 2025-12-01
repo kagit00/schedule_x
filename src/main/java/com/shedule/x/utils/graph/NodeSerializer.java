@@ -4,6 +4,7 @@ import com.shedule.x.dto.NodeDTO;
 import lombok.experimental.UtilityClass;
 
 import java.nio.ByteBuffer;
+import java.util.HashMap;
 import java.util.UUID;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -20,7 +21,7 @@ import static com.shedule.x.utils.graph.StoreUtility.putUUID;
 @Slf4j
 @UtilityClass
 public final class NodeSerializer {
-    public static final int MAX_NODE_SIZE = 512;
+    public static final int MAX_NODE_SIZE = 2048;
 
     public static void serialize(NodeDTO node, ByteBuffer buf) {
         buf.clear();
@@ -69,13 +70,15 @@ public final class NodeSerializer {
             }
         }
 
-        // Patch metadata count
         int current = buf.position();
         buf.position(metaCountPos);
         buf.putShort((short) metaWritten);
         buf.position(current);
 
-        finalizeAndClamp(buf, startPos);
+        if (buf.position() > startPos + MAX_NODE_SIZE) {
+            buf.position(startPos + MAX_NODE_SIZE);
+        }
+        buf.flip();
     }
 
     private static void finalizeAndClamp(ByteBuffer buf, int startPos) {
@@ -85,10 +88,10 @@ public final class NodeSerializer {
     }
 
     public static NodeDTO deserialize(ByteBuffer val) {
-        if (val == null || val.remaining() < 16) return null;
+        if (val == null || val.remaining() < 48) return null;
 
         int startPos = val.position();
-        int avail = Math.min(val.remaining(), MAX_NODE_SIZE);
+        int limit = val.limit();
 
         try {
             UUID id = getUUID(val);
@@ -102,19 +105,21 @@ public final class NodeSerializer {
 
             boolean processed = val.get() == (byte)1;
 
-            String type = readShortPrefixedString(val);
-            String refId = readShortPrefixedString(val);
+            String type = safeReadString(val);
+            String refId = safeReadString(val);
 
-            int metaCount = Short.toUnsignedInt(val.getShort());
-            Map<String, String> meta = new java.util.HashMap<>(Math.max(4, metaCount));
-
-            for (int i = 0; i < metaCount; i++) {
-                if (val.position() - startPos >= avail) break;
-
-                String k = readShortPrefixedString(val);
-                String v = readShortPrefixedString(val);
-                if (k == null) break;
-                meta.put(k, v);
+            // Read metadata count safely
+            Map<String, String> meta = new HashMap<>();
+            if (val.remaining() >= 2) {
+                int metaCount = Short.toUnsignedInt(val.getShort());
+                for (int i = 0; i < metaCount && val.remaining() >= 2; i++) {
+                    String key = safeReadString(val);
+                    if (key == null || val.remaining() < 2) break;
+                    String value = safeReadString(val);
+                    if (value != null) {
+                        meta.put(key, value);
+                    }
+                }
             }
 
             return NodeDTO.builder()
@@ -127,10 +132,25 @@ public final class NodeSerializer {
                     .referenceId(refId)
                     .metaData(meta)
                     .build();
+
         } catch (Exception ex) {
-            log.warn("Failed to deserialize NodeDTO from buffer at position {}", startPos, ex);
+            log.warn("Failed to deserialize NodeDTO from buffer (pos={}, remaining={})", startPos, val.remaining(), ex);
+            val.position(startPos); // don't corrupt stream
             return null;
         }
+    }
+
+    private static String safeReadString(ByteBuffer buf) {
+        if (buf.remaining() < 2) return null;
+        int len = Short.toUnsignedInt(buf.getShort());
+        if (len == 0) return "";
+        if (len > buf.remaining()) {
+            log.debug("Truncated string in node data: expected {} bytes, only {} left", len, buf.remaining());
+            return null; // or return partial? better to skip
+        }
+        byte[] bytes = new byte[len];
+        buf.get(bytes);
+        return new String(bytes, StandardCharsets.UTF_8);
     }
 
     private static boolean safeWriteString(ByteBuffer buf, String s) {

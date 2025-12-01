@@ -128,7 +128,7 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
                     return null;
                 });
 
-        CompletableFuture<Void> graphFuture = graphStore.persistEdgesAsync(matches, groupId, chunkIndex)
+        CompletableFuture<Void> graphFuture = graphStore.persistEdgesAsync(matches, groupId, chunkIndex, processingCycleId)
                 .orTimeout(matchSaveTimeoutSeconds, TimeUnit.SECONDS)
                 .exceptionally(t -> {
                     throw new CompletionException("LMDB persist failed", t);
@@ -203,13 +203,13 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
 
     @Override
     public AutoCloseableStream<EdgeDTO> streamEdges(UUID groupId, UUID domainId, String processingCycleId, int topK) {
-        return graphStore.streamEdges(domainId, groupId);
+        return graphStore.streamEdges(domainId, groupId, processingCycleId);
     }
 
 
     @Override
     public long getFinalMatchCount(UUID groupId, UUID domainId, String processingCycleId) {
-        try (AutoCloseableStream<EdgeDTO> stream = graphStore.streamEdges(domainId, groupId)) {
+        try (AutoCloseableStream<EdgeDTO> stream = graphStore.streamEdges(domainId, groupId, processingCycleId)) {
             return stream.getStream().count();
         } catch (Exception e) {
             log.error("Failed to count matches for groupId={}", groupId, e);
@@ -222,7 +222,7 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
         List<PotentialMatchEntity> buffer = new ArrayList<>(finalSaveBatchSize);
         long totalProcessed = 0;
 
-        try (AutoCloseableStream<EdgeDTO> edgeStream = graphStore.streamEdges(domainId, groupId)) {
+        try (AutoCloseableStream<EdgeDTO> edgeStream = graphStore.streamEdges(domainId, groupId, processingCycleId)) {
             Iterator<EdgeDTO> iterator = edgeStream.getStream().iterator();
 
             while (iterator.hasNext()) {
@@ -245,7 +245,7 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
             }
 
             flushFinalBatch(buffer, groupId, domainId, processingCycleId);
-            //graphStore.cleanEdges(groupId);
+            graphStore.cleanEdges(groupId, processingCycleId);
             log.info("Final save completed. Total: {} | groupId={}", totalProcessed, groupId);
 
         } catch (Exception e) {

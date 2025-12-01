@@ -161,8 +161,8 @@ public class GraphPreProcessor {
 
 
     @Transactional(readOnly = true)
-    public MatchType determineMatchTypeFromExistingData(UUID groupId, UUID domainId) {
-        try (var edgeStream = edgePersistence.streamEdges(domainId, groupId)) {
+    public MatchType determineMatchTypeFromExistingData(UUID groupId, UUID domainId, String cycleId) {
+        try (var edgeStream = edgePersistence.streamEdges(domainId, groupId, cycleId)) {
             log.info("→ Opened LMDB edge stream successfully | groupId={} | domainId={}", groupId, domainId);
 
             AtomicInteger edgeCount = new AtomicInteger(0);
@@ -226,8 +226,6 @@ public class GraphPreProcessor {
             return MatchType.BIPARTITE;
         }
     }
-
-
 
     private CompletableFuture<GraphResult> acquireAndBuildAsync(
             UUID groupId,

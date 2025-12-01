@@ -12,8 +12,10 @@ import org.springframework.stereotype.Component;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.function.Predicate;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
@@ -31,11 +33,8 @@ public class EdgePersistenceImpl implements EdgePersistence {
             ByteBuffer.allocateDirect(512).order(ByteOrder.BIG_ENDIAN));
     private static final ThreadLocal<ByteBuffer> VAL_BUFFER = ThreadLocal.withInitial(() ->
             ByteBuffer.allocateDirect(1024).order(ByteOrder.BIG_ENDIAN));
-    private static final int KEY_REF_OFFSET = 20;
-
-    private static final int KEY_MAT_OFFSET = 36;
-
-    private final ThreadLocal<byte[]> tmp16Bytes = ThreadLocal.withInitial(() -> new byte[16]);
+    private static final ThreadLocal<ByteBuffer> TEMP_PREFIX = ThreadLocal.withInitial(() ->
+            ByteBuffer.allocateDirect(64).order(ByteOrder.BIG_ENDIAN));
 
     public EdgePersistenceImpl(LmdbEnvironment lmdb,
                                @Qualifier("persistenceExecutor") ExecutorService writeExecutor,
@@ -47,71 +46,25 @@ public class EdgePersistenceImpl implements EdgePersistence {
 
 
     @Override
-    public void cleanEdges(UUID groupId) {
-        Env<ByteBuffer> env = lmdb.env();
-        Dbi<ByteBuffer> edgeDbi = lmdb.edgeDbi();
-        Txn<ByteBuffer> txn = null;
-        Cursor<ByteBuffer> cur = null;
-
-        try {
-            txn = env.txnWrite();
-            cur = edgeDbi.openCursor(txn);
-
-            ByteBuffer prefix = keyBuf().clear();
-            putUUID(prefix, groupId);
-            prefix.flip();
-
-            boolean found = cur.get(prefix, GetOp.MDB_SET_RANGE);
-            if (!found) {
-                cur.close();
-                txn.commit();
-                return;
-            }
-
-            int deleted = 0;
-
-            do {
-                ByteBuffer k = cur.key();
-
-                if (!matchesGroupPrefix(k, groupId)) break;
-
-                cur.delete();
-                deleted++;
-
-            } while (cur.next());
-
-            cur.close();
-            txn.commit();
-
-            meters.counter("edges_cleaned").increment(deleted);
-
-        } catch (Exception e) {
-            log.warn("Clean fail", e);
-            if (txn != null) {
-                try { txn.abort(); } catch (Exception ignore) {}
-            }
-        } finally {
-            if (cur != null) {
-                try {
-                    cur.close();
-                } catch (Exception ignore) {}
-            }
-            if (txn != null) {
-                try {
-                    txn.close();
-                } catch (Exception ignore) {}
-            }
-        }
-    }
-
-    public CompletableFuture<Void> persistEdgesAsyncFallback(List<GraphRecords.PotentialMatch> matches,
-                                                             String groupId, int chunkIndex, Throwable t) {
-        log.warn("Persist failed: {}", t.getMessage());
-        return CompletableFuture.completedFuture(null);
+    public AutoCloseableStream<EdgeDTO> streamEdges(UUID domainId, UUID groupId, String cycleId) {
+        ByteBuffer prefix = makePrefix(groupId, cycleId);
+        return streamEdgesInternal(domainId, prefix, key -> matchesPrefix(key, groupId, cycleId));
     }
 
     @Override
-    public CompletableFuture<Void> persistAsync(List<GraphRecords.PotentialMatch> matches, UUID groupId, int chunkIndex) {
+    public AutoCloseableStream<EdgeDTO> streamEdges(UUID domainId, UUID groupId) {
+        ByteBuffer prefix = makePrefix(groupId);
+        return streamEdgesInternal(domainId, prefix, key -> matchesPrefix(key, groupId));
+    }
+
+    @Override
+    public void cleanEdges(UUID groupId, String cycleId) {
+        deleteByPrefix(makePrefix(groupId, cycleId), key -> matchesPrefix(key, groupId, cycleId));
+    }
+
+    @Override
+    public CompletableFuture<Void> persistAsync(List<GraphRecords.PotentialMatch> matches,
+                                                UUID groupId, int chunkIndex, String cycleId) {
         if (matches.isEmpty()) return CompletableFuture.completedFuture(null);
 
         return CompletableFuture.runAsync(() -> {
@@ -120,23 +73,27 @@ public class EdgePersistenceImpl implements EdgePersistence {
                     throw new TimeoutException("LMDB Write Semaphore Timeout");
                 }
 
-                Env<ByteBuffer> env = lmdb.env();
-                try (Txn<ByteBuffer> txn = env.txnWrite()) {
+                try (Txn<ByteBuffer> txn = lmdb.env().txnWrite()) {
                     Dbi<ByteBuffer> dbi = lmdb.edgeDbi();
                     ByteBuffer kb = KEY_BUFFER.get();
                     ByteBuffer vb = VAL_BUFFER.get();
 
                     for (GraphRecords.PotentialMatch m : matches) {
                         kb.clear();
-                        putUUID(kb, groupId); // 16 bytes
-                        kb.putInt(chunkIndex); // 4 bytes
-                        Murmur3.hash128To(kb, m.getReferenceId()); // 16 bytes
-                        Murmur3.hash128To(kb, m.getMatchedReferenceId()); // 16 bytes
+                        putUUID(kb, groupId);
+                        Murmur3.hash128To(kb, cycleId);
+                        kb.putInt(chunkIndex);
+                        Murmur3.hash128To(kb, m.getReferenceId());
+                        Murmur3.hash128To(kb, m.getMatchedReferenceId());
                         kb.flip();
 
                         vb.clear();
                         vb.putFloat((float) m.getCompatibilityScore());
+
                         putUUID(vb, m.getDomainId());
+                        putString(vb, m.getReferenceId());
+                        putString(vb, m.getMatchedReferenceId());
+
                         vb.flip();
 
                         dbi.put(txn, kb, vb);
@@ -153,37 +110,31 @@ public class EdgePersistenceImpl implements EdgePersistence {
         }, writeExecutor);
     }
 
-    @Override
-    public AutoCloseableStream<EdgeDTO> streamEdges(UUID domainId, UUID groupId) {
+
+    private AutoCloseableStream<EdgeDTO> streamEdgesInternal(UUID domainId, ByteBuffer prefix,
+                                                             java.util.function.Predicate<ByteBuffer> prefixMatcher) {
         Env<ByteBuffer> env = lmdb.env();
         Txn<ByteBuffer> txn = env.txnRead();
         Dbi<ByteBuffer> dbi = lmdb.edgeDbi();
 
         try {
-            var cursorIterable = dbi.iterate(txn, KeyRange.atLeast(makePrefix(groupId)));
+            var cursorIterable = dbi.iterate(txn, KeyRange.atLeast(prefix));
             Iterator<CursorIterable.KeyVal<ByteBuffer>> kvIter = cursorIterable.iterator();
 
             Iterator<EdgeDTO> edgeIter = new Iterator<>() {
                 EdgeDTO nextItem = null;
                 boolean done = false;
 
-                @Override
-                public boolean hasNext() {
+                @Override public boolean hasNext() {
                     if (nextItem != null) return true;
                     if (done) return false;
-
                     nextItem = advance();
-                    if (nextItem == null) {
-                        done = true;
-                        return false;
-                    }
-                    return true;
+                    if (nextItem == null) done = true;
+                    return nextItem != null;
                 }
 
-                @Override
-                public EdgeDTO next() {
-                    if (!hasNext())
-                        throw new NoSuchElementException();
+                @Override public EdgeDTO next() {
+                    if (!hasNext()) throw new NoSuchElementException();
                     EdgeDTO result = nextItem;
                     nextItem = null;
                     return result;
@@ -193,39 +144,24 @@ public class EdgePersistenceImpl implements EdgePersistence {
                     while (kvIter.hasNext()) {
                         var kv = kvIter.next();
                         ByteBuffer key = kv.key();
-
-                        if (!matchesPrefix(key, groupId))
-                            return null;
+                        if (!prefixMatcher.test(key)) return null;
 
                         ByteBuffer val = kv.val();
+                        if (!domainMatches(val, domainId)) continue;
 
-                        long msb = val.getLong(4);
-                        long lsb = val.getLong(12);
-                        if (msb == domainId.getMostSignificantBits() &&
-                                lsb == domainId.getLeastSignificantBits()) {
-
-                            return decodeEdge(key, val, groupId, domainId);
-                        }
+                        return decodeEdge(key, val, domainId);
                     }
                     return null;
                 }
             };
 
-
-
             Stream<EdgeDTO> stream = StreamSupport.stream(
-                    Spliterators.spliteratorUnknownSize(edgeIter,
-                            Spliterator.ORDERED | Spliterator.NONNULL),
-                    false
-            );
-
+                    Spliterators.spliteratorUnknownSize(edgeIter, Spliterator.ORDERED | Spliterator.NONNULL),
+                    false);
 
             return new AutoCloseableStream<>(stream, () -> {
-                try {
-                    cursorIterable.close();
-                } finally {
-                    txn.close();
-                }
+                try { cursorIterable.close(); }
+                finally { txn.close(); }
             });
 
         } catch (Exception e) {
@@ -234,43 +170,156 @@ public class EdgePersistenceImpl implements EdgePersistence {
         }
     }
 
+    private void deleteByPrefix(ByteBuffer prefix, Predicate<ByteBuffer> matcher) {
+        Env<ByteBuffer> env = lmdb.env();
+        Dbi<ByteBuffer> dbi = lmdb.edgeDbi();
 
-    private ByteBuffer makePrefix(UUID uuid) {
-        ByteBuffer bb = ByteBuffer.allocateDirect(16).order(ByteOrder.BIG_ENDIAN);
-        putUUID(bb, uuid);
+        ByteBuffer scratchKey = KEY_BUFFER.get();
+        ByteBuffer scratchVal = VAL_BUFFER.get();
+
+        try (Txn<ByteBuffer> txn = env.txnWrite()) {
+
+            try (Cursor<ByteBuffer> cur = dbi.openCursor(txn)) {
+
+                boolean found = cur.get(prefix, GetOp.MDB_SET_RANGE);
+                int deleted = 0;
+
+                while (found) {
+                    ByteBuffer curKey = cur.key();
+                    if (curKey == null) break;
+
+                    if (curKey.remaining() > prefix.remaining() &&
+                            !curKey.duplicate().limit(prefix.remaining()).equals(prefix)) {
+                        break;
+                    }
+
+                    int cmp = comparePrefixOrder(prefix, curKey);
+                    if (cmp > 0) {
+                        break;
+                    }
+
+                    scratchKey.clear();
+                    scratchKey.put(curKey.duplicate());
+                    scratchKey.flip();
+
+                    if (matcher.test(scratchKey)) {
+                        cur.delete();
+                        deleted++;
+                    }
+                    found = cur.next();
+                }
+
+                meters.counter("edges_cleaned").increment(deleted);
+
+            }
+
+            txn.commit();
+
+        } catch (Exception e) {
+            log.warn("Clean fail", e);
+        }
+    }
+
+    private int comparePrefixOrder(ByteBuffer prefix, ByteBuffer key) {
+        int pLen = prefix.remaining();
+        int kLen = key.remaining();
+        int min = Math.min(pLen, kLen);
+
+        ByteBuffer p = prefix.duplicate();
+        ByteBuffer k = key.duplicate();
+
+        for (int i = 0; i < min; i++) {
+            int pb = p.get() & 0xFF;
+            int kb = k.get() & 0xFF;
+            if (pb != kb) {
+                return Integer.compare(kb, pb);
+            }
+        }
+
+        if (kLen < pLen) return -1;
+        if (kLen > pLen) return 0;
+        return 0;
+    }
+
+
+
+    private boolean domainMatches(ByteBuffer val, UUID domainId) {
+        long msb = val.getLong(4);
+        long lsb = val.getLong(12);
+        return msb == domainId.getMostSignificantBits() && lsb == domainId.getLeastSignificantBits();
+    }
+
+    private EdgeDTO decodeEdge(ByteBuffer key, ByteBuffer val, UUID domainId) {
+        val.position(0);
+
+        float score = val.getFloat();
+        UUID domain = getUUID(val);
+
+        String fromRef = readString(val);
+        String toRef = readString(val);
+
+        return EdgeDTO.builder()
+                .fromNodeHash(fromRef)
+                .toNodeHash(toRef)
+                .score(score)
+                .domainId(domain)
+                .groupId(extractGroupId(key))
+                .build();
+    }
+
+
+    private UUID extractGroupId(ByteBuffer key) {
+        long msb = key.getLong(0);
+        long lsb = key.getLong(8);
+        return new UUID(msb, lsb);
+    }
+
+    // ==================== VARARGS PREFIX ====================
+
+    private ByteBuffer makePrefix(Object... parts) {
+        ByteBuffer bb = TEMP_PREFIX.get().clear();
+        for (Object part : parts) {
+            if (part instanceof UUID uuid) {
+                putUUID(bb, uuid);
+            } else if (part instanceof String str) {
+                Murmur3.hash128To(bb, str);
+            } else {
+                throw new IllegalArgumentException("Unsupported prefix part: " + part);
+            }
+        }
         bb.flip();
         return bb;
     }
 
-    private EdgeDTO decodeEdge(ByteBuffer k, ByteBuffer v, UUID groupId, UUID domainId) {
-        byte[] refBytes = new byte[16];
-        byte[] matBytes = new byte[16];
+    private boolean matchesPrefix(ByteBuffer key, Object... expectedParts) {
+        if (key.remaining() < expectedParts.length * 16) return false;
 
-        k.position(20); // Skip Group(16) + Chunk(4)
-        k.get(refBytes);
-        k.get(matBytes);
-
-        String refId = Murmur3.toHex(refBytes);
-        String matId = Murmur3.toHex(matBytes);
-        float score = v.getFloat(0);
-
-        return EdgeDTO.builder()
-                .fromNodeHash(refId)
-                .toNodeHash(matId)
-                .score(score)
-                .domainId(domainId)
-                .groupId(groupId)
-                .build();
-    }
-
-    private boolean matchesPrefix(ByteBuffer k, UUID groupId) {
-        if (k.remaining() < 16) return false;
-        return k.getLong(0) == groupId.getMostSignificantBits() &&
-                k.getLong(8) == groupId.getLeastSignificantBits();
+        int pos = 0;
+        for (Object part : expectedParts) {
+            if (part instanceof UUID uuid) {
+                if (key.getLong(pos) != uuid.getMostSignificantBits() ||
+                        key.getLong(pos + 8) != uuid.getLeastSignificantBits()) {
+                    return false;
+                }
+                pos += 16;
+            } else if (part instanceof String str) {
+                byte[] expectedHash = Murmur3.hash128(str);
+                for (int i = 0; i < 16; i++) {
+                    if (key.get(pos + i) != expectedHash[i]) return false;
+                }
+                pos += 16;
+            }
+        }
+        return true;
     }
 
     @Override
-    public void close() throws Exception {
+    public void close() throws Exception { }
 
+    public static String readString(ByteBuffer bb) {
+        int len = bb.getInt();
+        byte[] arr = new byte[len];
+        bb.get(arr);
+        return new String(arr, StandardCharsets.UTF_8);
     }
 }

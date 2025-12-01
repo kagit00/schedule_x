@@ -32,4 +32,15 @@ public interface PotentialMatchRepository extends JpaRepository<PotentialMatchEn
         return streamByGroupIdAndDomainId(groupId, domainId, PageRequest.of((int) (offset / limit), limit));
     }
 
+    @Query("""
+           SELECT DISTINCT p.processingCycleId
+           FROM PotentialMatchEntity p
+           WHERE p.groupId = :groupId
+             AND p.domainId = :domainId
+           """)
+    List<String> findProcessingCycleIdsByGroupAndDomain(
+            @Param("groupId") UUID groupId,
+            @Param("domainId") UUID domainId
+    );
+
 }

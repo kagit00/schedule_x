@@ -4,6 +4,7 @@ import com.shedule.x.cache.MatchCache;
 import com.shedule.x.dto.enums.JobStatus;
 import com.shedule.x.models.Domain;
 import com.shedule.x.models.LastRunPerfectMatches;
+import com.shedule.x.repo.PotentialMatchRepository;
 import com.shedule.x.service.PerfectMatchCreationService;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import io.github.resilience4j.retry.annotation.Retry;
@@ -25,18 +26,20 @@ public class PerfectMatchesCreationScheduler {
     private final MatchCache cache;
     private final MeterRegistry metrics;
     private final PerfectMatchCreationService perfectMatchCreationService;
+    private final PotentialMatchRepository potentialMatchRepository;
 
     public PerfectMatchesCreationScheduler(
             MatchCache cache,
             MeterRegistry metrics,
-            PerfectMatchCreationService perfectMatchCreationService
-    ) {
+            PerfectMatchCreationService perfectMatchCreationService,
+            PotentialMatchRepository potentialMatchRepository) {
         this.cache = cache;
         this.metrics = metrics;
         this.perfectMatchCreationService = perfectMatchCreationService;
+        this.potentialMatchRepository = potentialMatchRepository;
     }
 
-    @Scheduled(cron = "0 15 20 * * *", zone = "Asia/Kolkata")
+    @Scheduled(cron = "0 30 21 * * *", zone = "Asia/Kolkata")
     public void createPerfectMatches() {
         Timer.Sample sample = Timer.start(metrics);
         log.info("Starting Perfect Matches Creation at {}", Instant.now());
@@ -75,9 +78,9 @@ public class PerfectMatchesCreationScheduler {
 
         log.info("Processing groupId={}, domainId={}. Last run nodes: {}, Processed: {}",
                 groupId, domainId, lastRunNodeCount, processedNodes);
-        cache.clearMatches(groupId);
+        List<String> processingCycleIds = potentialMatchRepository.findProcessingCycleIdsByGroupAndDomain(groupId, domainId);
 
-        perfectMatchCreationService.processAllDomains();
+        for (String p : processingCycleIds) perfectMatchCreationService.process(p);
         metrics.counter("perfect_matches_creation", "domainId", domainId.toString(), "groupId", groupId.toString()).increment();
 
         lastRun.setStatus(JobStatus.COMPLETED.name());

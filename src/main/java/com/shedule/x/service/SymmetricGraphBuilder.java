@@ -88,8 +88,6 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
                     long count = processor.getFinalMatchCount(groupId, request.getDomainId(), request.getProcessingCycleId());
                     log.info("Build Complete | groupId={} | Final Count={}", groupId, count);
 
-                    // 3. Cleanup
-                    performCleanup(groupId);
                     resultFuture.complete(new GraphRecords.GraphResult(null, Collections.emptyList()));
                 });
     }
@@ -97,19 +95,7 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
     private void handleFailure(UUID groupId, Throwable ex, Timer.Sample timer, CompletableFuture<?> future) {
         log.error("Build Failed | groupId={}", groupId, ex);
         meterRegistry.counter("graph.build.error").increment();
-        performCleanup(groupId);
         if (!future.isDone()) future.completeExceptionally(ex);
-    }
-
-    private void performCleanup(UUID groupId) {
-        if (Boolean.TRUE.equals(cleanupGuards.asMap().putIfAbsent(groupId, true))) {
-            return;
-        }
-        try {
-            processor.cleanup(groupId);
-        } catch (Exception e) {
-            log.warn("Cleanup warning | groupId={}", groupId, e);
-        }
     }
 
     @PreDestroy

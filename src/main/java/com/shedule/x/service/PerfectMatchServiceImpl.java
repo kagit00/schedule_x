@@ -32,7 +32,6 @@ import lombok.RequiredArgsConstructor;
 @Service
 @RequiredArgsConstructor
 public class PerfectMatchServiceImpl implements PerfectMatchService {
-
     private final EdgePersistence edgePersistence;
     private final PerfectMatchSaver perfectMatchSaver;
     private final MatchingStrategySelector strategySelector;
@@ -43,7 +42,6 @@ public class PerfectMatchServiceImpl implements PerfectMatchService {
     @Value("${matching.topk.count:100}")
     private int topK;
 
-    // Parallelism tuned for your 2GB container
     private final ExecutorService cpuExecutor = Executors.newFixedThreadPool(
             Math.max(4, Runtime.getRuntime().availableProcessors())
     );
@@ -77,7 +75,7 @@ public class PerfectMatchServiceImpl implements PerfectMatchService {
                 .findByGroupIdAndDomainId(groupId, domainId)
                 .orElseThrow(() -> new IllegalStateException("Missing MatchingConfiguration"));
 
-        MatchType matchType = graphPreProcessor.determineMatchTypeFromExistingData(groupId, domainId);
+        MatchType matchType = graphPreProcessor.determineMatchTypeFromExistingData(groupId, domainId, request.getProcessingCycleId());
 
         return GraphRequestFactory.buildMatchingContext(
                 groupId, domainId, 0, matchType,
@@ -100,7 +98,7 @@ public class PerfectMatchServiceImpl implements PerfectMatchService {
         List<CompletableFuture<Void>> futures = new CopyOnWriteArrayList<>();
 
         return CompletableFuture.runAsync(() -> {
-            try (var edgeStream = edgePersistence.streamEdges(domainId, groupId)) {
+            try (var edgeStream = edgePersistence.streamEdges(domainId, groupId, cycleId)) {
                 log.info("Starting LMDB edge streaming for PerfectMatch | groupId={}", groupId);
 
                 edgeStream.forEach(edge -> {
@@ -147,7 +145,6 @@ public class PerfectMatchServiceImpl implements PerfectMatchService {
             UUID domainId,
             String cycleId) {
 
-        // Tiny in-memory adjacency map — only 25k edges → ~30-50MB max
         Map<String, PriorityQueue<GraphRecords.PotentialMatch>> adjacency = new HashMap<>();
 
         for (EdgeDTO e : edges) {

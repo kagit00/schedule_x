@@ -125,9 +125,8 @@ public class PerfectMatchCreationService {
         lastRunRepository.save(lastRun);
     }
 
-    public void processAllDomains() {
+    public void process(String cycleId) {
         Timer.Sample sample = Timer.start(meterRegistry);
-        String cycleId = DefaultValuesPopulator.getUid();
         log.info("Starting perfect-match batch at {}, cycleId={}", DefaultValuesPopulator.getCurrentTimestamp(), cycleId);
 
         List<Map.Entry<Domain, UUID>> tasks = getTasksToProcess();
