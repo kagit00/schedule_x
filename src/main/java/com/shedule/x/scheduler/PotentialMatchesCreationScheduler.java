@@ -87,7 +87,7 @@ public class PotentialMatchesCreationScheduler {
         groupLocks.entrySet().removeIf(entry -> entry.getValue().isDone());
     }
 
-    @Scheduled(cron = "0 55 0 * * *", zone = "Asia/Kolkata")
+    @Scheduled(cron = "0 45 16 * * *", zone = "Asia/Kolkata")
     public void processAllDomainsScheduled() {
         Timer.Sample sample = Timer.start(meterRegistry);
         String cycleId = DefaultValuesPopulator.getUid();

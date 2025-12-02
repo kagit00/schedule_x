@@ -255,7 +255,7 @@ public class TopKWeightedGreedyMatchingStrategy implements MatchingStrategy {
         if (!topMatches.isEmpty()) {
             resultMatches.compute(nodeId, (k, existing) -> {
                 if (existing != null) {
-                    log.warn("Node {} already processed, skipping update", nodeId);
+                    log.debug("Node {} already processed, skipping update", nodeId);
                     return existing;
                 }
                 return List.copyOf(topMatches);

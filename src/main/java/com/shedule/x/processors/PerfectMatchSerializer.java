@@ -4,69 +4,78 @@ import com.shedule.x.config.factory.CopyStreamSerializer;
 import com.shedule.x.models.PerfectMatchEntity;
 import com.shedule.x.utils.basic.BasicUtility;
 import com.shedule.x.utils.basic.DefaultValuesPopulator;
+import lombok.extern.slf4j.Slf4j;
 
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.sql.Timestamp;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 
+@Slf4j
 public class PerfectMatchSerializer implements CopyStreamSerializer<PerfectMatchEntity> {
-    private final List<PerfectMatchEntity> batch;
+
     private final UUID groupId;
     private final UUID domainId;
     private final String processingCycleId;
 
-    public PerfectMatchSerializer(List<PerfectMatchEntity> batch, UUID groupId, UUID domainId, String processingCycleId) {
-        this.batch = batch;
+    public PerfectMatchSerializer(List<PerfectMatchEntity> batch,
+                                  UUID groupId,
+                                  UUID domainId,
+                                  String processingCycleId) {
         this.groupId = groupId;
         this.domainId = domainId;
-        this.processingCycleId = processingCycleId != null ? processingCycleId : "";
+        this.processingCycleId = (processingCycleId != null) ? processingCycleId : "";
     }
 
     @Override
     public void serialize(PerfectMatchEntity match, DataOutputStream out) throws IOException {
-        out.writeShort(8); // number of columns
 
-        // UUID id
-        out.writeInt(16);
+        out.writeShort(8); // exactly 8 columns
+
+        // 1. id (UUID) → NOT NULL
         UUID id = match.getId() != null ? match.getId() : DefaultValuesPopulator.getUid2();
+        out.writeInt(16);
         out.writeLong(id.getMostSignificantBits());
         out.writeLong(id.getLeastSignificantBits());
 
-        // groupId
+        // 2. group_id (UUID)
         out.writeInt(16);
         out.writeLong(groupId.getMostSignificantBits());
         out.writeLong(groupId.getLeastSignificantBits());
 
-        // domainId
+        // 3. domain_id (UUID) ← WAS MISSING / IN WRONG PLACE
         out.writeInt(16);
         out.writeLong(domainId.getMostSignificantBits());
         out.writeLong(domainId.getLeastSignificantBits());
 
-        // processingCycleId
-        byte[] cycleIdBytes = processingCycleId.getBytes(StandardCharsets.UTF_8);
-        out.writeInt(cycleIdBytes.length);
-        out.write(cycleIdBytes);
+        // 4. processing_cycle_id (TEXT)
+        byte[] cycleBytes = processingCycleId.getBytes(StandardCharsets.UTF_8);
+        out.writeInt(cycleBytes.length);
+        out.write(cycleBytes);
 
-        // referenceId
-        byte[] refIdBytes = match.getReferenceId().getBytes(StandardCharsets.UTF_8);
-        out.writeInt(refIdBytes.length);
-        out.write(refIdBytes);
+        // 5. reference_id (VARCHAR(50))
+        String refId = match.getReferenceId();
+        byte[] refBytes = (refId != null ? refId : "").getBytes(StandardCharsets.UTF_8);
+        out.writeInt(refBytes.length);
+        out.write(refBytes);
 
-        // matchedReferenceId
-        byte[] matchedRefIdBytes = match.getMatchedReferenceId().getBytes(StandardCharsets.UTF_8);
-        out.writeInt(matchedRefIdBytes.length);
-        out.write(matchedRefIdBytes);
+        // 6. matched_reference_id (VARCHAR(50))
+        String matchedRefId = match.getMatchedReferenceId();
+        byte[] matchedRefBytes = (matchedRefId != null ? matchedRefId : "").getBytes(StandardCharsets.UTF_8);
+        out.writeInt(matchedRefBytes.length);
+        out.write(matchedRefBytes);
 
-        // compatibility score
+        // 7. compatibility_score (DOUBLE PRECISION)
         out.writeInt(8);
         out.writeDouble(match.getCompatibilityScore());
 
-        // matchedAt
-        BasicUtility.writeTimestamp(
-                match.getMatchedAt() != null ? match.getMatchedAt() : DefaultValuesPopulator.getCurrentTimestamp(),
-                out
-        );
+        // 8. matched_at (TIMESTAMP)
+        LocalDateTime matchedAt = match.getMatchedAt() != null
+                ? match.getMatchedAt()
+                : DefaultValuesPopulator.getCurrentTimestamp();
+        BasicUtility.writeTimestamp(matchedAt, out);
     }
 }
