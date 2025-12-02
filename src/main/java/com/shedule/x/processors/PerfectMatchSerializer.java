@@ -35,23 +35,19 @@ public class PerfectMatchSerializer implements CopyStreamSerializer<PerfectMatch
 
         out.writeShort(8); // exactly 8 columns
 
-        // 1. id (UUID) → NOT NULL
         UUID id = match.getId() != null ? match.getId() : DefaultValuesPopulator.getUid2();
         out.writeInt(16);
         out.writeLong(id.getMostSignificantBits());
         out.writeLong(id.getLeastSignificantBits());
 
-        // 2. group_id (UUID)
         out.writeInt(16);
         out.writeLong(groupId.getMostSignificantBits());
         out.writeLong(groupId.getLeastSignificantBits());
 
-        // 3. domain_id (UUID) ← WAS MISSING / IN WRONG PLACE
         out.writeInt(16);
         out.writeLong(domainId.getMostSignificantBits());
         out.writeLong(domainId.getLeastSignificantBits());
 
-        // 4. processing_cycle_id (TEXT)
         byte[] cycleBytes = processingCycleId.getBytes(StandardCharsets.UTF_8);
         out.writeInt(cycleBytes.length);
         out.write(cycleBytes);

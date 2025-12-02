@@ -62,8 +62,8 @@ public class GraphConfig {
     @Bean
     public LSHIndexImpl lshIndex(
             @Value("${lsh.num-hash-tables:120}") int numHashTables,
-            @Value("${lsh.num-bands:1}") int numBands,
-            @Value("${graph.builder.candidate.limit:6000}") int topK,
+            @Value("${lsh.num-bands:20}") int numBands,
+            @Value("${graph.builder.candidate.limit:5000}") int topK,
             MeterRegistry meterRegistry,
             @Qualifier("lshExecutor") ExecutorService lshExecutor,
             GraphStore graphStore,
@@ -92,7 +92,7 @@ public class GraphConfig {
             MetadataEncoder encoder,
             NodeDataService nodeDataService,
             @Qualifier("graphBuildExecutor") ExecutorService executor,
-            @Value("${graph.builder.candidate.limit:6000}") Integer candidateLimit,
+            @Value("${graph.builder.candidate.limit:5000}") Integer candidateLimit,
             @Value("${graph.builder.similarity.threshold:0.01}") Double similarityThreshold) {
         return new MetadataEdgeBuildingStrategy(
                 EdgeBuildingConfig.builder()
@@ -108,7 +108,7 @@ public class GraphConfig {
     }
 
     @Bean
-    public Integer candidateLimit(@Value("${graph.builder.candidate.limit:6000}") Integer limit) {
+    public Integer candidateLimit(@Value("${graph.builder.candidate.limit:5000}") Integer limit) {
         return limit;
     }
 

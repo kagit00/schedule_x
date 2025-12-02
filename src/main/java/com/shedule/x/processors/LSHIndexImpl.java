@@ -43,8 +43,6 @@ public class LSHIndexImpl implements LSHIndex {
     private final ExecutorService executor;
     private final ThreadLocal<Map<Integer, List<UUID>>> batchBuffer;
 
-
-
     public LSHIndexImpl(LSHConfig config,
                         MeterRegistry meterRegistry,
                         @Qualifier("indexExecutor") ExecutorService executor,
