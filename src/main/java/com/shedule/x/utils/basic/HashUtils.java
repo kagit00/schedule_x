@@ -1,22 +1,29 @@
 package com.shedule.x.utils.basic;
 
-import lombok.experimental.UtilityClass;
 
-import java.nio.ByteBuffer;
-import java.util.Arrays;
+import com.google.common.hash.HashFunction;
+import com.google.common.hash.Hashing;
+
+import javax.annotation.concurrent.ThreadSafe;
+import java.nio.charset.StandardCharsets;
 import java.util.Random;
 
 
-@UtilityClass
+@ThreadSafe
 public final class HashUtils {
-    private static final long M = 0xc6a4a7935bd1e995L;
-    private static final int R = 47;
 
-    private static final long[] SEEDS;
-    private static final int MAX_HASH = 0xFFFF;
+    private static final int MAX_SEEDS = 1000;
+    private static final short MAX_HASH = (short) 0xFFFF; // 65535
+
+    private static final HashFunction HASH_FUNCTION = Hashing.murmur3_32_fixed();
+
+    private static final long[] SEEDS = new long[MAX_SEEDS];
+
+    private static final ThreadLocal<int[]> ROW_HASHES = ThreadLocal.withInitial(
+            () -> new int[32]
+    );
 
     static {
-        SEEDS = new long[200];
         Random r = new Random(42);
         for (int i = 0; i < SEEDS.length; i++) {
             SEEDS[i] = r.nextLong();
@@ -24,54 +31,70 @@ public final class HashUtils {
     }
 
 
-    private static int computeHashForSlice(int[] metadata, int start, int length, int tableIndex) {
-        long seed = tableIndex * 0x9e3779b97f4a7c15L;
-        int hash = 0;
-
-        for (int j = 0; j < length; j++) {
-            int idx = (start + j) % metadata.length;
-            int element = metadata[idx];
-
-            hash ^= fastHash(element, seed);
-            seed = Long.rotateLeft(seed, 5);
+    public static short[] computeHashes(int[] features, int numHashTables, int numBands) {
+        if (numBands <= 0 || numHashTables <= 0) {
+            throw new IllegalArgumentException("numBands and numHashTables must be > 0");
+        }
+        if (numHashTables % numBands != 0) {
+            throw new IllegalArgumentException("numHashTables must be divisible by numBands");
         }
 
-        return hash & 0xFFFF;
+        final int rowsPerBand = numHashTables / numBands;
+        short[] bandHashes = new short[numBands];
+        int[] rowHashes = ROW_HASHES.get();
+
+        if (rowHashes.length < rowsPerBand) {
+            rowHashes = new int[rowsPerBand];
+        }
+
+        int tableIndex = 0;
+        for (int band = 0; band < numBands; band++) {
+            for (int r = 0; r < rowsPerBand; r++) {
+                rowHashes[r] = getMinHash(features, tableIndex++);
+            }
+
+            int combined = 0;
+            for (int i = 0; i < rowsPerBand; i++) {
+                combined ^= rowHashes[i];
+                combined *= 0x9e3779b9; // Golden ratio mix
+            }
+
+            bandHashes[band] = (short) (combined & MAX_HASH);
+        }
+
+        return bandHashes;
     }
 
-    private static int fastHash(int data, long seed) {
-        long h = seed ^ (data * M);
-        h ^= h >>> R;
-        h *= M;
-        h ^= h >>> R;
-        return (int) (h & 0x7FFFFFFF);
-    }
 
-    public static short[] computeHashes(int[] features, int numTables, int numBands) {
-        short[] minHashes = new short[numTables];
-        Arrays.fill(minHashes, (short)MAX_HASH);
+    private static int getMinHash(int[] features, int tableIndex) {
+        long seed = SEEDS[tableIndex % MAX_SEEDS];
+        int minHash = Integer.MAX_VALUE;
+
+        if (features == null || features.length == 0) {
+            return murmur3Int((int) seed) & 0x7FFFFFFF;
+        }
 
         for (int feature : features) {
-            for (int i = 0; i < numTables; i++) {
-                long seed = SEEDS[i];
-                int hash = murmur3_32(feature, seed);
-                int bucket = hash & MAX_HASH;
-                if (bucket < (minHashes[i] & 0xFFFF)) {
-                    minHashes[i] = (short) bucket;
-                }
+            int h = murmur3Int(feature ^ (int)(seed >>> 32), (int)seed);
+            if (h < minHash) {
+                minHash = h;
             }
         }
 
-        return minHashes;
+        return minHash & 0x7FFFFFFF;
     }
 
-    private static int murmur3_32(int key, long seed) {
-        long h = seed ^ Integer.BYTES;
-        h ^= key;
-        h *= 0x85ebca6bL;
-        h ^= h >>> 13;
-        h *= 0xc2b2ae35L;
-        h ^= h >>> 16;
-        return (int) h;
+    private static int murmur3Int(int value) {
+        return HASH_FUNCTION.hashInt(value).asInt();
     }
+
+    private static int murmur3Int(int value, int seed) {
+        return HASH_FUNCTION.newHasher().putInt(value).putInt(seed).hash().asInt();
+    }
+
+    public static int hashString(String str) {
+        return HASH_FUNCTION.hashString(str, StandardCharsets.UTF_8).asInt();
+    }
+
+    private HashUtils() {}
 }

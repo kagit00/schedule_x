@@ -115,31 +115,55 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
             UUID groupId, UUID domainId, String processingCycleId, int chunkIndex) {
 
         Instant start = Instant.now();
+        int batchSize = matches.size();
+        long timeoutSeconds = Math.min(300 + (batchSize / 100), 1800); // Adaptive: 5min + overhead, max 30min
+
+        log.debug("Saving batch of {} matches with timeout {}s for groupId={}",
+                batchSize, timeoutSeconds, groupId);
 
         List<PotentialMatchEntity> entities = matches.parallelStream()
                 .map(GraphRequestFactory::convertToPotentialMatch)
                 .filter(Objects::nonNull)
                 .toList();
 
-        CompletableFuture<Void> dbFuture = potentialMatchSaver.saveMatchesAsync(entities, groupId, domainId, processingCycleId, false)
-                .orTimeout(matchSaveTimeoutSeconds, TimeUnit.SECONDS)
+        CompletableFuture<Void> dbFuture = potentialMatchSaver
+                .saveMatchesAsync(entities, groupId, domainId, processingCycleId, false)
+                .orTimeout(timeoutSeconds, TimeUnit.SECONDS)
                 .exceptionally(t -> {
-                    log.error("DB Save failed (non-fatal) for groupId={}: {}", groupId, t.getMessage());
+                    Throwable rootCause = unwrapCompletionException(t);
+                    String errorType = rootCause instanceof TimeoutException ? "timeout" : "error";
+
+                    log.error("DB save {} for groupId={}: {}", errorType, groupId, rootCause.getMessage());
+                    meterRegistry.counter("match.batch.db_save.failure",
+                            "error_type", errorType).increment();
                     return null;
                 });
 
-        CompletableFuture<Void> graphFuture = graphStore.persistEdgesAsync(matches, groupId, chunkIndex, processingCycleId)
-                .orTimeout(matchSaveTimeoutSeconds, TimeUnit.SECONDS)
-                .exceptionally(t -> {
-                    throw new CompletionException("LMDB persist failed", t);
-                });
+        CompletableFuture<Void> graphFuture = persistEdgesWithRetry(
+                matches, groupId, chunkIndex, processingCycleId,
+                5, 2000, timeoutSeconds);
 
         return CompletableFuture.allOf(dbFuture, graphFuture)
-                .thenRun(() -> {
-                    Timer.builder("match.batch.save.time")
-                            .tag("groupId", groupId.toString())
-                            .register(meterRegistry)
-                            .record(Duration.between(start, Instant.now()));
+                .whenComplete((result, error) -> {
+                    long durationMs = Duration.between(start, Instant.now()).toMillis();
+
+                    if (error != null) {
+                        Throwable rootCause = unwrapCompletionException(error);
+                        String errorType = rootCause instanceof TimeoutException ? "timeout" : "error";
+
+                        log.error("Batch save {} | groupId={} | {} matches | {}ms | {}",
+                                errorType, groupId, batchSize, durationMs, rootCause.getMessage());
+
+                        meterRegistry.timer("match.batch.save.time",
+                                        "status", "failed", "error_type", errorType)
+                                .record(durationMs, TimeUnit.MILLISECONDS);
+                    } else {
+                        log.debug("Batch saved successfully | groupId={} | {} matches | {}ms",
+                                groupId, batchSize, durationMs);
+
+                        meterRegistry.timer("match.batch.save.time", "status", "success")
+                                .record(durationMs, TimeUnit.MILLISECONDS);
+                    }
                 });
     }
 
@@ -159,6 +183,78 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
         });
     }
 
+    private CompletableFuture<Void> persistEdgesWithRetry(
+            List<GraphRecords.PotentialMatch> matches,
+            UUID groupId, int chunkIndex, String processingCycleId,
+            int maxRetries, long initialDelayMs, long timeoutSeconds) {
+
+        return persistEdgesWithRetryInternal(matches, groupId, chunkIndex, processingCycleId,
+                maxRetries, initialDelayMs, timeoutSeconds, 1);
+    }
+
+    private CompletableFuture<Void> persistEdgesWithRetryInternal(
+            List<GraphRecords.PotentialMatch> matches,
+            UUID groupId, int chunkIndex, String processingCycleId,
+            int maxRetries, long baseDelayMs, long timeoutSeconds, int attempt) {
+
+        return graphStore.persistEdgesAsync(matches, groupId, chunkIndex, processingCycleId)
+                .orTimeout(timeoutSeconds, TimeUnit.SECONDS)
+                .exceptionallyCompose(error -> {
+                    Throwable rootCause = unwrapCompletionException(error);
+
+                    if (attempt < maxRetries && isRetriableError(rootCause)) {
+                        long delayMs = baseDelayMs * (1L << (attempt - 1));
+
+                        log.warn("LMDB persist failed (attempt {}/{}), retrying in {}ms for groupId={}: {}",
+                                attempt, maxRetries, delayMs, groupId, rootCause.getMessage());
+
+                        meterRegistry.counter("match.batch.lmdb_save.retry",
+                                "attempt", String.valueOf(attempt),
+                                "groupId", groupId.toString()).increment();
+
+                        return CompletableFuture
+                                .runAsync(() -> {
+                                    try {
+                                        Thread.sleep(delayMs);
+                                    } catch (InterruptedException ie) {
+                                        Thread.currentThread().interrupt();
+                                        throw new CompletionException(ie);
+                                    }
+                                }, mappingExecutor)
+                                .thenCompose(v -> persistEdgesWithRetryInternal(
+                                        matches, groupId, chunkIndex, processingCycleId,
+                                        maxRetries, baseDelayMs, timeoutSeconds, attempt + 1
+                                ));
+                    } else {
+                        String errorType = rootCause instanceof TimeoutException ? "timeout" : "error";
+
+                        log.error("LMDB persist {} permanently after {} attempts for groupId={}: {}",
+                                errorType, attempt, groupId, rootCause.getMessage());
+
+                        meterRegistry.counter("match.batch.lmdb_save.failure",
+                                "groupId", groupId.toString(),
+                                "error_type", errorType).increment();
+
+                        return CompletableFuture.failedFuture(
+                                new CompletionException("LMDB persist failed after retries", rootCause)
+                        );
+                    }
+                });
+    }
+
+    private boolean isRetriableError(Throwable t) {
+        if (t instanceof TimeoutException) {
+            return true;
+        }
+
+        String msg = t.getMessage();
+        return msg != null && (
+                msg.contains("Write queue is full") ||
+                        msg.contains("temporarily unavailable") ||
+                        msg.contains("lock")
+        );
+    }
+
     private QueueManagerImpl getOrCreateQueueManager(UUID groupId, UUID domainId, String processingCycleId) {
         QueueConfig requestConfig = new QueueConfig(
                 groupId, domainId, processingCycleId,
@@ -173,32 +269,9 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
         return queueManagerFactory.create(requestConfig);
     }
 
-    private CompletableFuture<Void> acquireSemaphore(UUID groupId) {
-        return CompletableFuture.runAsync(() -> {
-            try {
-                if (!saveSemaphore.tryAcquire(30, TimeUnit.SECONDS)) {
-                    throw new TimeoutException("Could not acquire save semaphore for groupId=" + groupId);
-                }
-            } catch (Exception e) {
-                throw new CompletionException(e);
-            }
-        }, mappingExecutor);
-    }
-
     @Override
     public void cleanup(UUID groupId) {
         QueueManagerImpl.remove(groupId);
-    }
-
-    @PreDestroy
-    public void shutdown() {
-        shutdownInitiated = true;
-        log.info("Shutting down Processor...");
-
-        QueueManagerImpl.flushAllQueuesAsync(this::savePendingMatchesAsync).join();
-
-        mappingExecutor.shutdown();
-        storageExecutor.shutdown();
     }
 
     @Override
@@ -219,6 +292,9 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
 
 
     private void performStreamingFinalSave(UUID groupId, UUID domainId, String processingCycleId) {
+        log.info("Starting final save for groupId={}", groupId);
+
+        List<CompletableFuture<Void>> saveFutures = new ArrayList<>();
         List<PotentialMatchEntity> buffer = new ArrayList<>(finalSaveBatchSize);
         long totalProcessed = 0;
 
@@ -235,23 +311,58 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
                 }
 
                 if (buffer.size() >= finalSaveBatchSize) {
-                    flushFinalBatch(buffer, groupId, domainId, processingCycleId);
+                    // ✅ Async flush instead of blocking
+                    List<PotentialMatchEntity> batchToSave = new ArrayList<>(buffer);
+                    CompletableFuture<Void> saveFuture = flushFinalBatchAsync(
+                            batchToSave, groupId, domainId, processingCycleId);
+                    saveFutures.add(saveFuture);
+
+                    buffer.clear();
+
+                    // ✅ Limit parallelism - wait if too many in-flight
+                    if (saveFutures.size() >= 10) {
+                        CompletableFuture.allOf(saveFutures.toArray(new CompletableFuture[0])).join();
+                        saveFutures.clear();
+                    }
                 }
 
                 totalProcessed++;
-                if (totalProcessed % 50_000 == 0) {
-                    log.info("Final save progress: {} items | groupId={}", totalProcessed, groupId);
+                if (totalProcessed % 1_000_000 == 0) { // Log every 1M for 50M
+                    log.info("Final save progress: {}M items | groupId={}", totalProcessed / 1_000_000, groupId);
                 }
             }
 
-            flushFinalBatch(buffer, groupId, domainId, processingCycleId);
+            // Flush remaining
+            if (!buffer.isEmpty()) {
+                saveFutures.add(flushFinalBatchAsync(buffer, groupId, domainId, processingCycleId));
+            }
+
+            // Wait for all saves to complete
+            if (!saveFutures.isEmpty()) {
+                CompletableFuture.allOf(saveFutures.toArray(new CompletableFuture[0])).join();
+            }
+
+            log.info("Cleaning up edges for groupId={}, cycle={}", groupId, processingCycleId);
             graphStore.cleanEdges(groupId, processingCycleId);
+
             log.info("Final save completed. Total: {} | groupId={}", totalProcessed, groupId);
 
         } catch (Exception e) {
             log.error("Critical error during final save for groupId={}", groupId, e);
+            meterRegistry.counter("final_save.critical_error", "groupId", groupId.toString()).increment();
             throw new CompletionException("Final save failed", e);
         }
+    }
+
+    private CompletableFuture<Void> flushFinalBatchAsync(
+            List<PotentialMatchEntity> batch, UUID groupId, UUID domainId, String cycleId) {
+
+        return potentialMatchSaver.saveMatchesAsync(batch, groupId, domainId, cycleId, true)
+                .orTimeout(matchSaveTimeoutSeconds, TimeUnit.SECONDS)
+                .exceptionally(t -> {
+                    log.error("Final batch save failed for groupId={}: {}", groupId, t.getMessage());
+                    throw new CompletionException("Final batch save failed", t);
+                });
     }
 
     private void flushFinalBatch(List<PotentialMatchEntity> buffer, UUID groupId, UUID domainId, String cycleId) {
@@ -289,26 +400,111 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
 
         if (batch.isEmpty()) {
             if (totalDrainedSoFar > 0) {
-                log.info("Finished draining pending matches | groupId={} | Total Drained={}", groupId, totalDrainedSoFar);
+                log.info("Finished draining | groupId={} | Total={}", groupId, totalDrainedSoFar);
             }
             return CompletableFuture.completedFuture(null);
         }
 
+        if (shouldApplyBackpressure(groupId)) {
+            log.warn("Applying backpressure for groupId={} (system overloaded, pausing 2s)", groupId);
+            meterRegistry.counter("drain.backpressure_applied", "groupId", groupId.toString()).increment();
+
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
         return saveMatchBatch(batch, groupId, domainId, processingCycleId, -1)
-                .thenComposeAsync(v ->
-                                drainAndSaveRecursively(
-                                        manager,
-                                        groupId,
-                                        domainId,
-                                        processingCycleId,
-                                        batchSize,
-                                        totalDrainedSoFar + batch.size()
-                                ),
-                        mappingExecutor
-                )
+                .thenComposeAsync(v -> {
+                    long newTotal = totalDrainedSoFar + batch.size();
+
+                    if (newTotal % 100_000 == 0) {
+                        log.info("Drain progress: {} | groupId={}", newTotal, groupId);
+                    }
+
+                    return drainAndSaveRecursively(
+                            manager, groupId, domainId, processingCycleId,
+                            batchSize, newTotal
+                    );
+                }, mappingExecutor)
                 .exceptionally(t -> {
-                    log.error("Error during recursive drain for groupId={}", groupId, t);
-                    throw new CompletionException(t);
+                    Throwable rootCause = unwrapCompletionException(t);
+                    log.error("Drain failed for groupId={}: {}",
+                            groupId, rootCause.getMessage(), rootCause);
+                    throw new CompletionException(rootCause);
                 });
+    }
+
+    private boolean shouldApplyBackpressure(UUID groupId) {
+        int availablePermits = saveSemaphore.availablePermits();
+
+        if (availablePermits < 4) {
+            log.debug("Semaphore pressure detected: only {} permits available", availablePermits);
+            return true;
+        }
+
+        // access EdgePersistence queue size, check that too
+
+        return false;
+    }
+
+    private Throwable unwrapCompletionException(Throwable t) {
+        Throwable current = t;
+        while (current instanceof CompletionException && current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current;
+    }
+
+
+    @PreDestroy
+    public void shutdown() {
+        shutdownInitiated = true;
+        log.info("Shutting down PotentialMatchComputationProcessor...");
+
+        try {
+            log.info("Flushing all pending queues...");
+            QueueManagerImpl.flushAllQueuesAsync(this::savePendingMatchesAsync)
+                    .get(5, TimeUnit.MINUTES);
+            log.info("All queues flushed successfully");
+
+        } catch (TimeoutException e) {
+            log.error("Queue flush timed out after 5 minutes");
+            meterRegistry.counter("shutdown.flush_timeout").increment();
+        } catch (Exception e) {
+            log.error("Error flushing queues during shutdown", e);
+            meterRegistry.counter("shutdown.flush_error").increment();
+        }
+
+        shutdownExecutor(mappingExecutor, "mappingExecutor", 30, TimeUnit.SECONDS);
+        shutdownExecutor(storageExecutor, "storageExecutor", 30, TimeUnit.SECONDS);
+        shutdownExecutor(watchdogExecutor, "watchdogExecutor", 10, TimeUnit.SECONDS);
+
+        log.info("PotentialMatchComputationProcessor shutdown complete");
+    }
+
+    private void shutdownExecutor(ExecutorService executor, String name, long timeout, TimeUnit unit) {
+        try {
+            log.info("Shutting down {}...", name);
+            executor.shutdown();
+
+            if (!executor.awaitTermination(timeout, unit)) {
+                log.warn("{} did not terminate gracefully, forcing shutdown", name);
+                executor.shutdownNow();
+
+                if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
+                    log.error("{} did not terminate after forced shutdown", name);
+                }
+            }
+
+            log.info("{} shutdown complete", name);
+
+        } catch (InterruptedException e) {
+            log.error("{} shutdown interrupted", name, e);
+            executor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
     }
 }

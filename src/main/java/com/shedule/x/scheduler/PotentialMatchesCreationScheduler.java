@@ -87,7 +87,7 @@ public class PotentialMatchesCreationScheduler {
         groupLocks.entrySet().removeIf(entry -> entry.getValue().isDone());
     }
 
-    @Scheduled(cron = "0 45 16 * * *", zone = "Asia/Kolkata")
+    @Scheduled(cron = "0 44 19 * * *", zone = "Asia/Kolkata")
     public void processAllDomainsScheduled() {
         Timer.Sample sample = Timer.start(meterRegistry);
         String cycleId = DefaultValuesPopulator.getUid();
@@ -117,7 +117,6 @@ public class PotentialMatchesCreationScheduler {
             allTasks.add(processGroupTask(task));
         }
 
-        // 3. Wait for global completion (with hard timeout) or proceed async
         CompletableFuture.allOf(allTasks.toArray(new CompletableFuture[0]))
                 .orTimeout(3, TimeUnit.HOURS)
                 .whenCompleteAsync((v, error) -> {
@@ -136,7 +135,6 @@ public class PotentialMatchesCreationScheduler {
             if (previousTask == null || previousTask.isDone()) {
                 return executeGroupTaskChain(request);
             } else {
-                // Chain onto the existing task for this group
                 log.info("Group {} is busy. Chaining task.", request.groupId());
                 return previousTask.thenCompose(v -> executeGroupTaskChain(request));
             }

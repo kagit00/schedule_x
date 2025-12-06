@@ -1,5 +1,6 @@
 package com.shedule.x.processors;
 
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.lmdbjava.Dbi;
@@ -17,6 +18,12 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import jakarta.annotation.PreDestroy;
 import java.nio.file.Paths;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+
 import org.lmdbjava.*;
 
 
@@ -35,28 +42,53 @@ public class LmdbEnvironment implements AutoCloseable {
     @Value("${graph.store.map-size:549755813888}")
     private long maxDbSize;
 
+    @Value("${graph.store.sync-interval-ms:1000}")
+    private long syncIntervalMs;
+
+    private final ScheduledExecutorService syncExecutor =
+            Executors.newSingleThreadScheduledExecutor(
+                    new ThreadFactoryBuilder()
+                            .setNameFormat("lmdb-sync-%d")
+                            .build()
+            );
+
     @PostConstruct
     public void init() throws IOException {
         Path path = Paths.get(dbPath);
         Files.createDirectories(path);
 
-        log.info("Initializing LMDB at {} (map size = {} GB)",
+        log.info("Initializing LMDB at {} ({} GiB)",
                 path.toAbsolutePath(),
                 maxDbSize / (1024L * 1024 * 1024));
 
         this.env = Env.create()
                 .setMapSize(maxDbSize)
-                .setMaxDbs(4)
-                .setMaxReaders(1024)
+                .setMaxDbs(8)
+                .setMaxReaders(2048)
                 .open(path.toFile(),
-                        EnvFlags.MDB_WRITEMAP,
-                        EnvFlags.MDB_MAPASYNC);
+                        EnvFlags.MDB_NOTLS
+                );
 
         this.nodeDbi = env.openDbi("nodes", DbiFlags.MDB_CREATE);
-        this.edgeDbi = env.openDbi("edges",  DbiFlags.MDB_CREATE);
-        this.lshDbi  = env.openDbi("lsh",    DbiFlags.MDB_CREATE);
+        this.edgeDbi = env.openDbi("edges", DbiFlags.MDB_CREATE);
+        this.lshDbi  = env.openDbi("lsh",   DbiFlags.MDB_CREATE);
 
-        log.info("LMDB successfully initialized — ready for edges, LSH and nodes");
+        startPeriodicSync();
+
+        log.info("LMDB initialized successfully. Database path: {}", path);
+    }
+
+    private void startPeriodicSync() {
+        syncExecutor.scheduleAtFixedRate(() -> {
+            try {
+                env.sync(false);
+                log.debug("LMDB synced to disk");
+            } catch (Exception e) {
+                log.error("Failed to sync LMDB", e);
+            }
+        }, syncIntervalMs, syncIntervalMs, TimeUnit.MILLISECONDS);
+
+        log.info("Periodic sync enabled (interval = {} ms)", syncIntervalMs);
     }
 
     @PreDestroy
@@ -66,16 +98,26 @@ public class LmdbEnvironment implements AutoCloseable {
 
         try {
             log.warn("Graceful shutdown: syncing LMDB to disk...");
-            env.sync(true);
-            Thread.sleep(300);
+
+            // Stop periodic sync
+            syncExecutor.shutdown();
+            syncExecutor.awaitTermination(5, TimeUnit.SECONDS);
+
+            // Final sync
+            env.sync(true); // Full sync
+
+            log.info("LMDB synced and closed cleanly");
         } catch (Exception e) {
-            log.error("Error during LMDB sync on shutdown", e);
+            log.error("Error during LMDB shutdown", e);
         } finally {
-            if (edgeDbi != null) edgeDbi.close();
-            if (lshDbi  != null) lshDbi.close();
-            if (nodeDbi != null) nodeDbi.close();
-            env.close();
-            log.info("LMDB closed cleanly");
+            try {
+                if (edgeDbi != null) edgeDbi.close();
+                if (lshDbi  != null) lshDbi.close();
+                if (nodeDbi != null) nodeDbi.close();
+                env.close();
+            } catch (Exception e) {
+                log.error("Error closing LMDB resources", e);
+            }
         }
     }
 
@@ -102,10 +144,21 @@ public class LmdbEnvironment implements AutoCloseable {
 
         public long totalSizeGb() {
             try {
-                return Files.size(Paths.get(dbPath, "data.mdb")) / (1024L * 1024 * 1024);
+                Path dataFile = Paths.get(dbPath, "data.mdb");
+                if (!Files.exists(dataFile)) return 0;
+                return Files.size(dataFile) / (1024L * 1024 * 1024);
             } catch (Exception e) {
+                log.warn("Failed to read LMDB size", e);
                 return -1;
             }
+        }
+
+        public Map<String, Object> getStats() {
+            Map<String, Object> stats = new HashMap<>();
+            stats.put("edgeCount", edgeCount());
+            stats.put("totalSizeGb", totalSizeGb());
+            stats.put("path", dbPath);
+            return stats;
         }
     }
 }

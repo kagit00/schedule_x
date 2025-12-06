@@ -8,5 +8,4 @@ import lombok.Getter;
 public class LSHConfig {
     private final int numHashTables;
     private final int numBands;
-    private final int topK;
 }

@@ -6,6 +6,8 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.io.Serial;
+import java.io.Serializable;
 import java.time.Instant;
 import java.util.List;
 import java.util.Set;
@@ -16,7 +18,9 @@ public interface GraphRecords {
     @AllArgsConstructor
     @NoArgsConstructor
     @Data
-    class PotentialMatch {
+    class PotentialMatch implements Serializable {
+        @Serial
+        private static final long serialVersionUID = 1L;
         private String referenceId;
         private String matchedReferenceId;
         private double compatibilityScore;

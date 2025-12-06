@@ -107,7 +107,6 @@ public class LshBucketManagerImpl implements LshBucketManager {
             Env<ByteBuffer> env = lmdb.env();
             Dbi<ByteBuffer> lshDbi = lmdb.lshDbi();
 
-            // 2. Prepare Key
             ByteBuffer keyBuf = StoreUtility.keyBuf();
             keyBuf.putInt(0x4C534800).putInt(tableIdx).putInt(band);
             keyBuf.flip();
@@ -115,32 +114,25 @@ public class LshBucketManagerImpl implements LshBucketManager {
             try (Txn<ByteBuffer> txn = env.txnWrite()) {
                 ByteBuffer existingVal = lshDbi.get(txn, keyBuf);
 
-                // 3. Decode Existing
                 long[] existing = (existingVal == null) ? new long[0] : decodeBucket(existingVal);
 
-                // 4. Prepare Incoming: Convert -> Sort
                 long[] incoming = StoreUtility.toLongArray(nodeIds);
                 StoreUtility.sortByPairs(incoming);
 
-                // 5. Fast Primitive Merge
                 long[] merged = StoreUtility.mergeAndDedupPairs(existing, incoming);
                 int finalSize = merged.length / 2;
 
-                // 6. Trim if needed
                 if (finalSize > LSH_BUCKET_TARGET_SIZE) {
                     merged = trimByPriority(merged);
                     finalSize = merged.length / 2;
                 }
 
-                // 7. Encode using Utility
                 ByteBuffer valDirect = StoreUtility.encodeBucket(merged);
 
-                // 8. Write
                 keyBuf.rewind();
                 lshDbi.put(txn, keyBuf, valDirect);
                 txn.commit();
 
-                // Metrics
                 long added = finalSize - (existing.length / 2);
                 if (added != 0) {
                     totalBucketEntries.addAndGet(added);
@@ -175,11 +167,9 @@ public class LshBucketManagerImpl implements LshBucketManager {
                 long[] existing = decodeBucket(existingVal);
                 if (existing.length == 0) return;
 
-                // Filter logic
                 long targetMsb = nodeId.getMostSignificantBits();
                 long targetLsb = nodeId.getLeastSignificantBits();
 
-                // Check if removal is needed (linear scan is fine for bucket sizes)
                 boolean found = false;
                 int count = existing.length / 2;
                 for (int i=0; i<count; i++) {
@@ -191,7 +181,6 @@ public class LshBucketManagerImpl implements LshBucketManager {
 
                 if (!found) return;
 
-                // Rebuild array without the target
                 long[] filtered = new long[existing.length - 2];
                 int pos = 0;
                 for (int i = 0; i < existing.length; i += 2) {
@@ -287,28 +276,22 @@ public class LshBucketManagerImpl implements LshBucketManager {
         final int MAX_BUCKET_SIZE_HARD = 5_000;
         Dbi<ByteBuffer> lshDbi = lmdb.lshDbi();
 
-        // 1. Prepare Key
         ByteBuffer keyBuf = StoreUtility.keyBuf();
         keyBuf.putInt(0x4C534800).putInt(tableIdx).putInt(band).flip();
 
-        // 2. Read Existing (using the shared TXN)
         ByteBuffer existingVal = lshDbi.get(txn, keyBuf);
         long[] existing = (existingVal == null) ? new long[0] : decodeBucket(existingVal);
 
-        // 3. Prepare Incoming
         long[] incoming = StoreUtility.toLongArray(newIds);
         StoreUtility.sortByPairs(incoming);
 
-        // 4. Merge & Dedup (CPU intensive but unavoidable for packed storage)
         long[] merged = StoreUtility.mergeAndDedupPairs(existing, incoming);
 
-        // 5. Fast Trim (Size only - NO slow priority provider calls)
         if (merged.length / 2 > MAX_BUCKET_SIZE_HARD) {
             merged = Arrays.copyOf(merged, MAX_BUCKET_SIZE_HARD * 2);
         }
 
-        // 6. Write Back (using the shared TXN)
-        ByteBuffer valDirect = StoreUtility.encodeBucket(merged); // Existing utility
+        ByteBuffer valDirect = StoreUtility.encodeBucket(merged);
         keyBuf.rewind();
         lshDbi.put(txn, keyBuf, valDirect);
     }

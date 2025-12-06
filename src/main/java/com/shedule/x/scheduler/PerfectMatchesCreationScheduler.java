@@ -39,7 +39,7 @@ public class PerfectMatchesCreationScheduler {
         this.potentialMatchRepository = potentialMatchRepository;
     }
 
-    @Scheduled(cron = "0 30 1 * * *", zone = "Asia/Kolkata")
+    @Scheduled(cron = "0 3 16 * * *", zone = "Asia/Kolkata")
     public void createPerfectMatches() {
         Timer.Sample sample = Timer.start(metrics);
         log.info("Starting Perfect Matches Creation at {}", Instant.now());

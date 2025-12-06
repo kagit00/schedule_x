@@ -61,19 +61,17 @@ public class GraphConfig {
 
     @Bean
     public LSHIndexImpl lshIndex(
-            @Value("${lsh.num-hash-tables:120}") int numHashTables,
+            @Value("${lsh.num-hash-tables:240}") int numHashTables,
             @Value("${lsh.num-bands:20}") int numBands,
-            @Value("${graph.builder.candidate.limit:5000}") int topK,
             MeterRegistry meterRegistry,
             @Qualifier("lshExecutor") ExecutorService lshExecutor,
             GraphStore graphStore,
             ThreadLocal<Map<Integer, List<UUID>>> lshBatchBuffer) {
         return new LSHIndexImpl(
-                LSHConfig.builder().numBands(numBands).numHashTables(numHashTables).topK(topK).build(),
+                LSHConfig.builder().numBands(numBands).numHashTables(numHashTables).build(),
                 meterRegistry,
                 lshExecutor,
-                graphStore,
-                lshBatchBuffer
+                graphStore
         );
     }
 
