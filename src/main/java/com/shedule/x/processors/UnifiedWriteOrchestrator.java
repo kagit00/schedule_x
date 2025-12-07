@@ -1,7 +1,12 @@
 package com.shedule.x.processors;
 
+import com.shedule.x.dto.EdgeWriteRequest;
+import com.shedule.x.dto.EdgeWriteTask;
+import com.shedule.x.dto.LshWriteRequest;
+import com.shedule.x.dto.WriteRequest;
 import com.shedule.x.service.GraphRecords;
 import com.shedule.x.utils.basic.Murmur3;
+import com.shedule.x.utils.graph.EdgeKeyBuilder;
 import com.shedule.x.utils.graph.StoreUtility;
 import io.micrometer.core.instrument.MeterRegistry;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
@@ -58,9 +63,7 @@ public class UnifiedWriteOrchestrator {
         log.info("UnifiedWriteOrchestrator started – handles Edge + LSH writes");
     }
 
-    // ===================================================================
-    // Public enqueue API
-    // ===================================================================
+
     public CompletableFuture<Void> enqueueEdgeWrite(List<GraphRecords.PotentialMatch> matches,
                                                     UUID groupId,
                                                     String cycleId) {
@@ -84,9 +87,7 @@ public class UnifiedWriteOrchestrator {
         return req.future();
     }
 
-    // ===================================================================
-    // Writer thread loop
-    // ===================================================================
+
     private void run() {
         log.info("Unified writer thread started");
         List<WriteRequest> batch = new ArrayList<>();
@@ -119,9 +120,7 @@ public class UnifiedWriteOrchestrator {
         log.info("Unified writer thread stopped");
     }
 
-    // ===================================================================
-    // Batch processing
-    // ===================================================================
+
     private void processBatch(List<WriteRequest> batch) {
         List<EdgeWriteRequest> edgeRequests = new ArrayList<>();
         List<LshWriteRequest> lshRequests = new ArrayList<>();
@@ -216,26 +215,16 @@ public class UnifiedWriteOrchestrator {
         long start = System.nanoTime();
         try (Txn<ByteBuffer> txn = lmdb.env().txnWrite()) {
             Dbi<ByteBuffer> dbi = lmdb.edgeDbi();
-
-            ByteBuffer keyBuf = W_KEY.get();
             ByteBuffer valBuf = W_VAL.get();
-            ByteBuffer prefixBuf = W_PREFIX.get();
 
-            prefixBuf.clear();
-            StoreUtility.putUUID(prefixBuf, task.groupId);
-            Murmur3.hash128To(prefixBuf, task.cycleId);
-            prefixBuf.flip();
-            ByteBuffer prefixRO = prefixBuf.asReadOnlyBuffer();
+            for (GraphRecords.PotentialMatch m : task.matches()) {
 
-            for (GraphRecords.PotentialMatch m : task.matches) {
-                keyBuf.clear();
-                keyBuf.put(prefixRO.duplicate());
-
-                String a = m.getReferenceId(), b = m.getMatchedReferenceId();
-                if (a.compareTo(b) > 0) { String tmp = a; a = b; b = tmp; }
-
-                Murmur3.hash128To(keyBuf, a + "\0" + b);
-                keyBuf.flip();
+                ByteBuffer keyBuf = EdgeKeyBuilder.build(
+                        task.groupId(),
+                        task.cycleId(),
+                        m.getReferenceId(),
+                        m.getMatchedReferenceId()
+                );
 
                 valBuf.clear();
                 valBuf.putFloat((float) m.getCompatibilityScore());
@@ -248,10 +237,11 @@ public class UnifiedWriteOrchestrator {
             }
 
             txn.commit();
-            meters.counter("edges_written_total").increment(task.matches.size());
+            meters.counter("edges_written_total").increment(task.matches().size());
             meters.timer("edge.txn.duration").record(System.nanoTime() - start, TimeUnit.NANOSECONDS);
         }
     }
+
 
     private void sleep(long ms) {
         try { Thread.sleep(ms); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
@@ -283,50 +273,4 @@ public class UnifiedWriteOrchestrator {
 
         log.info("UnifiedWriteOrchestrator shutdown complete");
     }
-
-
-    sealed interface WriteRequest permits EdgeWriteRequest, LshWriteRequest {
-        CompletableFuture<Void> future();
-        WriteType type();
-        long enqueuedTime();
-    }
-
-    enum WriteType { EDGE, LSH }
-
-    record EdgeWriteRequest(
-            List<GraphRecords.PotentialMatch> matches,
-            UUID groupId,
-            String cycleId,
-            CompletableFuture<Void> future,
-            long enqueuedTime) implements WriteRequest {
-
-        public EdgeWriteRequest(List<GraphRecords.PotentialMatch> matches, UUID groupId, String cycleId) {
-            this(matches, groupId, cycleId, new CompletableFuture<>(), System.currentTimeMillis());
-        }
-
-        @Override public CompletableFuture<Void> future() { return future; }
-        @Override public WriteType type() { return WriteType.EDGE; }
-        @Override public long enqueuedTime() { return enqueuedTime; }
-    }
-
-    record LshWriteRequest(
-            Long2ObjectMap<List<UUID>> chunk,
-            CompletableFuture<Void> future,
-            long enqueuedTime) implements WriteRequest {
-
-        public LshWriteRequest(Long2ObjectMap<List<UUID>> chunk) {
-            this(chunk, new CompletableFuture<>(), System.currentTimeMillis());
-        }
-
-        @Override public CompletableFuture<Void> future() { return future; }
-        @Override public WriteType type() { return WriteType.LSH; }
-        @Override public long enqueuedTime() { return enqueuedTime; }
-    }
-
-    // Helper for edge batching
-    private record EdgeWriteTask(
-            List<GraphRecords.PotentialMatch> matches,
-            UUID groupId,
-            String cycleId,
-            EdgeWriteRequest originalRequest) {}
 }

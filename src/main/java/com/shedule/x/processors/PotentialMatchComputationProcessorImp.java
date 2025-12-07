@@ -311,7 +311,6 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
                 }
 
                 if (buffer.size() >= finalSaveBatchSize) {
-                    // ✅ Async flush instead of blocking
                     List<PotentialMatchEntity> batchToSave = new ArrayList<>(buffer);
                     CompletableFuture<Void> saveFuture = flushFinalBatchAsync(
                             batchToSave, groupId, domainId, processingCycleId);
@@ -319,7 +318,6 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
 
                     buffer.clear();
 
-                    // ✅ Limit parallelism - wait if too many in-flight
                     if (saveFutures.size() >= 10) {
                         CompletableFuture.allOf(saveFutures.toArray(new CompletableFuture[0])).join();
                         saveFutures.clear();
@@ -343,7 +341,7 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
             }
 
             log.info("Cleaning up edges for groupId={}, cycle={}", groupId, processingCycleId);
-            graphStore.cleanEdges(groupId, processingCycleId);
+            //graphStore.cleanEdges(groupId, processingCycleId);
 
             log.info("Final save completed. Total: {} | groupId={}", totalProcessed, groupId);
 
