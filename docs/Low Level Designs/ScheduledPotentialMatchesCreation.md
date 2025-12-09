@@ -1,9 +1,4 @@
-# 📚 **Low-Level Design (LLD) Document: Potential Matches Creation Module**
-
-> **Version:** 1.0  
-> **Author:** [Your Name]  
-> **Team:** Matching Engine Team  
-> **Date:** May 2025
+# **Low-Level Design (LLD) Document: Potential Matches Creation Module**
 
 ---
 
@@ -662,7 +657,7 @@ curl -X POST http://localhost/admin/cleanup
 
 | Question | Status |
 |--------|--------|
-| Can we support real-time ingestion alongside batch? | ✅ Planned Q3 |
+| Can we support real-time ingestion alongside batch? | Planned Q3 |
 | Should we shard further by `tenantId`? | Under review |
 | Can we replace manual advisory locks with distributed coordination (e.g., Redis)? | Exploring |
 | Is there value in caching frequently used metadata? | Yes – POC in progress |
