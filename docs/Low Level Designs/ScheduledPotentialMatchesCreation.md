@@ -487,7 +487,6 @@ classDiagram
         +flushAllQueuesAsync()
     }
 
-    ' Relationships
     PotentialMatchesCreationScheduler --> PotentialMatchesCreationJobExecutor : uses
     PotentialMatchesCreationScheduler --> PotentialMatchComputationProcessorImp : finalizes
     PotentialMatchesCreationJobExecutor --> NodeFetchService : reads
@@ -501,9 +500,10 @@ classDiagram
     GraphStore --> EdgePersistenceFacade : delegates
     EdgePersistenceFacade --> UnifiedWriteOrchestrator : enqueues
     UnifiedWriteOrchestrator --> LmdbEnvironment : writes
-    PotentialMatchComputationProcessorImp --> PotentialMatchSaver : saves final
+    PotentialMatchComputationProcessorImp --> PotentialMatchSaver : saves_final
     PotentialMatchSaver --> PotentialMatchStorageProcessor : executes
     PotentialMatchStorageProcessor --> HikariDataSource : connects
+
 ```
 
 ---
