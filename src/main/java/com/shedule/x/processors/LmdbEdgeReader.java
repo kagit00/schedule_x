@@ -87,7 +87,7 @@ public class LmdbEdgeReader implements EdgeReader {
     }
 
     private boolean domainMatches(ByteBuffer val, UUID domainId) {
-        val.position(4); // skip float score
+        val.position(4);
         long msb = val.getLong();
         long lsb = val.getLong();
         return msb == domainId.getMostSignificantBits() && lsb == domainId.getLeastSignificantBits();

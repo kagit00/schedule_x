@@ -115,7 +115,6 @@ public class UnifiedWriteOrchestrator {
             }
         }
 
-        // Drain any remaining work
         if (!batch.isEmpty()) processBatch(batch);
         log.info("Unified writer thread stopped");
     }
@@ -134,15 +133,12 @@ public class UnifiedWriteOrchestrator {
             else if (r instanceof LshWriteRequest l) lshRequests.add(l);
         }
 
-        // Process LSH first (usually bigger transactions)
         lshRequests.forEach(this::writeLshWithRetry);
 
-        // Then edges
         if (!edgeRequests.isEmpty()) {
             writeEdgesBatch(edgeRequests);
         }
 
-        // Complete futures for successful requests
         batch.forEach(r -> {
             if (!r.future().isDone()) {
                 r.future().complete(null);

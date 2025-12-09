@@ -21,10 +21,6 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
 
-import io.micrometer.core.instrument.Timer;
-import java.util.*;
-import java.util.concurrent.*;
-
 
 @Slf4j
 @Component
@@ -112,11 +108,11 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
 
     private CompletableFuture<Void> saveMatchBatch(
             List<GraphRecords.PotentialMatch> matches,
-            UUID groupId, UUID domainId, String processingCycleId, int chunkIndex) {
+            UUID groupId, UUID domainId, String processingCycleId) {
 
         Instant start = Instant.now();
         int batchSize = matches.size();
-        long timeoutSeconds = Math.min(300 + (batchSize / 100), 1800); // Adaptive: 5min + overhead, max 30min
+        long timeoutSeconds = Math.min(300 + (batchSize / 100), 8800);
 
         log.debug("Saving batch of {} matches with timeout {}s for groupId={}",
                 batchSize, timeoutSeconds, groupId);
@@ -140,8 +136,8 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
                 });
 
         CompletableFuture<Void> graphFuture = persistEdgesWithRetry(
-                matches, groupId, chunkIndex, processingCycleId,
-                5, 2000, timeoutSeconds);
+                matches, groupId, processingCycleId,
+                timeoutSeconds);
 
         return CompletableFuture.allOf(dbFuture, graphFuture)
                 .whenComplete((result, error) -> {
@@ -185,11 +181,11 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
 
     private CompletableFuture<Void> persistEdgesWithRetry(
             List<GraphRecords.PotentialMatch> matches,
-            UUID groupId, int chunkIndex, String processingCycleId,
-            int maxRetries, long initialDelayMs, long timeoutSeconds) {
+            UUID groupId, String processingCycleId,
+            long timeoutSeconds) {
 
-        return persistEdgesWithRetryInternal(matches, groupId, chunkIndex, processingCycleId,
-                maxRetries, initialDelayMs, timeoutSeconds, 1);
+        return persistEdgesWithRetryInternal(matches, groupId, -1, processingCycleId,
+                5, 2000, timeoutSeconds, 1);
     }
 
     private CompletableFuture<Void> persistEdgesWithRetryInternal(
@@ -248,6 +244,7 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
         }
 
         String msg = t.getMessage();
+        log.error(msg);
         return msg != null && (
                 msg.contains("Write queue is full") ||
                         msg.contains("temporarily unavailable") ||
@@ -363,17 +360,6 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
                 });
     }
 
-    private void flushFinalBatch(List<PotentialMatchEntity> buffer, UUID groupId, UUID domainId, String cycleId) {
-        if (buffer.isEmpty()) return;
-        try {
-            potentialMatchSaver.saveMatchesAsync(new ArrayList<>(buffer), groupId, domainId, cycleId, true)
-                    .get(matchSaveTimeoutSeconds, TimeUnit.SECONDS);
-            buffer.clear();
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to flush final batch to DB", e);
-        }
-    }
-
     @Override
     public CompletableFuture<Void> savePendingMatchesAsync(UUID groupId, UUID domainId, String processingCycleId, int batchSize) {
         QueueManagerImpl manager = QueueManagerImpl.getExisting(groupId);
@@ -414,7 +400,7 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
             }
         }
 
-        return saveMatchBatch(batch, groupId, domainId, processingCycleId, -1)
+        return saveMatchBatch(batch, groupId, domainId, processingCycleId)
                 .thenComposeAsync(v -> {
                     long newTotal = totalDrainedSoFar + batch.size();
 
@@ -442,9 +428,6 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
             log.debug("Semaphore pressure detected: only {} permits available", availablePermits);
             return true;
         }
-
-        // access EdgePersistence queue size, check that too
-
         return false;
     }
 
