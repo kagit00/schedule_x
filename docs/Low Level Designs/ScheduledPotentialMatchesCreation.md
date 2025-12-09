@@ -245,27 +245,29 @@ classDiagram
 
 ### Use Case Diagram
 ```mermaid
-@startuml
-actor SystemAdmin as "System Admin"
-actor Scheduler as "Scheduled Trigger"
-actor ExternalSystem as "External System"
+flowchart TB
+    %% Actors
+    SystemAdmin(["<<actor>> System Admin"])
+    Scheduler(["<<actor>> Scheduled Trigger"])
+    ExternalSystem(["<<actor>> External System"])
 
-usecase "Daily Batch Match Run" as UC1
-usecase "Resumable Node Processing" as UC2
-usecase "Graph Match Computation" as UC3
-usecase "Match Persistence" as UC4
-usecase "Monitor System Metrics" as UC5
-usecase "Configure Batch Parameters" as UC6
-usecase "Receive Completion Notifications" as UC7
+    %% Use Cases
+    UC1([Daily Batch Match Run])
+    UC2([Resumable Node Processing])
+    UC3([Graph Match Computation])
+    UC4([Match Persistence])
+    UC5([Monitor System Metrics])
+    UC6([Configure Batch Parameters])
+    UC7([Receive Completion Notifications])
 
-Scheduler --> UC1
-Scheduler --> UC2
-SystemAdmin --> UC5
-SystemAdmin --> UC6
-ExternalSystem --> UC7
-UC1 --> UC3
-UC3 --> UC4
-@enduml
+    %% Relationships
+    Scheduler --> UC1
+    Scheduler --> UC2
+    SystemAdmin --> UC5
+    SystemAdmin --> UC6
+    ExternalSystem --> UC7
+    UC1 --> UC3
+    UC3 --> UC4
 ```
 
 ---
