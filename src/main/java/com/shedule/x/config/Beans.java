@@ -1,12 +1,15 @@
 package com.shedule.x.config;
 
+import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.shedule.x.config.factory.QueueManagerFactory;
 import com.shedule.x.dto.NodeResponse;
 import com.shedule.x.config.factory.NodeResponseFactory;
 import com.shedule.x.config.factory.ResponseFactory;
 import com.shedule.x.processors.QueueManagerImpl;
+import io.github.resilience4j.common.bulkhead.configuration.ThreadPoolBulkheadConfigCustomizer;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tags;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -136,22 +139,40 @@ public class Beans {
 
     @Bean("matchCreationExecutorService")
     public ExecutorService matchCreationExecutorService(MeterRegistry meterRegistry) {
-        ThreadFactory threadFactory = new ThreadFactoryBuilder().setNameFormat("match-create-%d").build();
+        int cpus = Runtime.getRuntime().availableProcessors();
+
+        int corePoolSize = Math.max(4, cpus);
+        int maxPoolSize = cpus * 4;
+
+        ThreadFactory threadFactory = new ThreadFactoryBuilder()
+                .setNameFormat("match-create-%d")
+                .setThreadFactory(Executors.defaultThreadFactory())
+                .setUncaughtExceptionHandler((t, e) ->
+                        System.err.printf("Thread %s threw exception: %s%n", t.getName(), e.getMessage()))
+                .build();
+
         ThreadPoolExecutor executor = new ThreadPoolExecutor(
-                4, 8, 0L, TimeUnit.MILLISECONDS,
-                new LinkedBlockingQueue<>(100),
+                corePoolSize,
+                maxPoolSize,
+                60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(),
                 threadFactory,
-                new ThreadPoolExecutor.CallerRunsPolicy() {
-                    @Override
-                    public void rejectedExecution(Runnable r, ThreadPoolExecutor e) {
-                        meterRegistry.counter("match_creation_executor_rejections").increment();
-                        super.rejectedExecution(r, e);
-                    }
-                }
+                new ThreadPoolExecutor.AbortPolicy()
         );
-        executor.allowCoreThreadTimeOut(false);
+
+        executor.allowCoreThreadTimeOut(true);
+        executor.prestartAllCoreThreads();
+
         return executor;
     }
+
+    @Bean("semaphoreExecutor")
+    public ExecutorService semaphoreExecutor() {
+        return Executors.newCachedThreadPool(
+                new ThreadFactoryBuilder().setNameFormat("semaphore-%d").build()
+        );
+    }
+
 
     @Bean("graphBuildExecutor")
     public ExecutorService graphBuildExecutor(MeterRegistry meterRegistry) {
@@ -301,4 +322,5 @@ public class Beans {
                 new ThreadFactoryBuilder().setNameFormat("match-pro-%d").build()
         );
     }
+
 }

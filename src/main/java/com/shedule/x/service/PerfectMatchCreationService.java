@@ -18,6 +18,7 @@ import io.micrometer.core.instrument.Timer;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.List;
@@ -31,10 +32,17 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import lombok.RequiredArgsConstructor;
+
+
+import java.time.Duration;
+import java.time.LocalDateTime;
+import java.util.*;
+import java.util.concurrent.*;
+
 
 @Slf4j
 @Service
-@Profile("!singleton")
 public class PerfectMatchCreationService {
     private final MatchingGroupRepository matchingGroupRepository;
     private final PerfectMatchCreationJobExecutor jobExecutor;
@@ -47,14 +55,23 @@ public class PerfectMatchCreationService {
     private final LastRunPerfectMatchesRepository lastRunRepository;
     private final DomainService domainService;
 
+    @Value("${match.max-concurrent-domains:2}")
+    private int maxConcurrentDomains;
+
+    @Value("${match.max-concurrent-groups:1}")
+    private int maxConcurrentGroups;
+
+    @Value("${perfectmatch.node-stability-minutes:10}")
+    private long nodeStabilityMinutes;
+
+    private final Map<String, NodeCountSnapshot> nodeCountHistory = new ConcurrentHashMap<>();
+
     public PerfectMatchCreationService(
             DomainService domainService,
             MatchingGroupRepository matchingGroupRepository,
             PerfectMatchCreationJobExecutor jobExecutor,
             MeterRegistry meterRegistry,
             @Qualifier("matchCreationExecutorService") ExecutorService batchExecutor,
-            @Value("${match.max-concurrent-domains:2}") int maxConcurrentDomains,
-            @Value("${match.max-concurrent-groups:1}") int maxConcurrentGroups,
             MatchesCreationFinalizer matchesCreationFinalizer,
             NodeRepository nodeRepository,
             LastRunPerfectMatchesRepository lastRunRepository
@@ -83,28 +100,55 @@ public class PerfectMatchCreationService {
     public List<Map.Entry<Domain, UUID>> getTasksToProcess() {
         List<Domain> domains = domainService.getActiveDomains();
         List<Map.Entry<Domain, UUID>> tasks = new ArrayList<>();
+
         for (Domain domain : domains) {
             List<UUID> groupIds = matchingGroupRepository.findGroupIdsByDomainId(domain.getId());
             for (UUID groupId : groupIds) {
                 LastRunPerfectMatches lastRun = getLastRun(domain.getId(), groupId);
-                long processedNodes = getProcessedNodeCount(domain.getId(), groupId);
+                long currentProcessedNodes = getProcessedNodeCount(domain.getId(), groupId);
                 long lastRunNodeCount = lastRun.getNodeCount();
                 String lastRunStatus = lastRun.getStatus();
 
-                boolean shouldProcess = (processedNodes > lastRunNodeCount) ||
-                        (lastRunStatus == null ||
-                                lastRunStatus.equals(JobStatus.PENDING.name()) ||
-                                lastRunStatus.equals(JobStatus.FAILED.name()));
+                boolean nodeCountIncreased = currentProcessedNodes > lastRunNodeCount;
+                boolean lastRunFailedOrPending = JobStatus.PENDING.name().equals(lastRunStatus)
+                        || JobStatus.FAILED.name().equals(lastRunStatus);
 
-                //if (shouldProcess) {
+                boolean isStable = isNodeCountStable(domain.getId(), groupId, currentProcessedNodes);
+
+                boolean shouldProcess = (nodeCountIncreased || lastRunFailedOrPending) && isStable;
+
+                if (shouldProcess) {
+                    log.info("Scheduling perfect match for groupId={}, domainId={}. Nodes: {} → {}, stable={}",
+                            groupId, domain.getId(), lastRunNodeCount, currentProcessedNodes, isStable);
                     tasks.add(new AbstractMap.SimpleEntry<>(domain, groupId));
-                //} else {
-               //     log.info("Skipping groupId={} for domainId={}: Last run nodes: {}, Processed: {}",
-                       //     groupId, domain.getId(), lastRunNodeCount, processedNodes);
-                //}
+                } else {
+                    log.debug("Skipping groupId={} domainId={}. Increased={}, Stable={}, Status={}",
+                            groupId, domain.getId(), nodeCountIncreased, isStable, lastRunStatus);
+                }
             }
         }
         return tasks;
+    }
+
+    private boolean isNodeCountStable(UUID domainId, UUID groupId, long currentCount) {
+        String key = domainId + ":" + groupId;
+        NodeCountSnapshot snapshot = nodeCountHistory.computeIfAbsent(key, k -> new NodeCountSnapshot());
+
+        LocalDateTime now = LocalDateTime.now();
+        if (snapshot.count == currentCount &&
+                snapshot.timestamp != null &&
+                Duration.between(snapshot.timestamp, now).toMinutes() >= nodeStabilityMinutes) {
+            return true;
+        }
+
+        snapshot.count = currentCount;
+        snapshot.timestamp = now;
+        return false;
+    }
+
+    private static class NodeCountSnapshot {
+        long count = -1;
+        LocalDateTime timestamp;
     }
 
     public LastRunPerfectMatches getLastRun(UUID domainId, UUID groupId) {
@@ -125,9 +169,9 @@ public class PerfectMatchCreationService {
         lastRunRepository.save(lastRun);
     }
 
-    public void process(String cycleId) {
+    public void process() {
         Timer.Sample sample = Timer.start(meterRegistry);
-        log.info("Starting perfect-match batch at {}, cycleId={}", DefaultValuesPopulator.getCurrentTimestamp(), cycleId);
+        log.info("Starting perfect-match batch at {}", LocalDateTime.now());
 
         List<Map.Entry<Domain, UUID>> tasks = getTasksToProcess();
         if (tasks.isEmpty()) {
@@ -140,19 +184,19 @@ public class PerfectMatchCreationService {
         for (Map.Entry<Domain, UUID> task : tasks) {
             Domain domain = task.getKey();
             UUID groupId = task.getValue();
-            batches.add(processGroupTask(groupId, domain.getId(), cycleId));
+            batches.add(processGroupTask(groupId, domain.getId()));
         }
 
         CompletableFuture<Void> resultFuture = new CompletableFuture<>();
         CompletableFuture.allOf(batches.toArray(new CompletableFuture[0]))
                 .thenAcceptAsync(v -> {
-                    log.info("Completed perfect-match batch at {}, cycleId={}",
-                            DefaultValuesPopulator.getCurrentTimestamp(), cycleId);
+                    log.info("Completed perfect-match batch at {}",
+                            LocalDateTime.now());
                     resultFuture.complete(null);
                 }, batchExecutor)
                 .whenComplete((v, t) -> matchesCreationFinalizer.finalize(true))
                 .exceptionally(t -> {
-                    log.error("Perfect-match batch processing failed, cycleId={}: {}", cycleId, t.getMessage(), t);
+                    log.error("Perfect-match batch processing failed: {}", t.getMessage(), t);
                     resultFuture.completeExceptionally(t);
                     return null;
                 });
@@ -160,23 +204,23 @@ public class PerfectMatchCreationService {
         try {
             resultFuture.get(60, TimeUnit.MINUTES);
         } catch (Exception e) {
-            log.error("Error waiting for perfect-match batch completion, cycleId={}: {}", cycleId, e.getMessage(), e);
+            log.error("Error waiting for perfect-match batch completion {}", e.getMessage(), e);
         }
 
         sample.stop(meterRegistry.timer("batch_perfect_matches_total_duration"));
     }
 
-    private CompletableFuture<Void> processGroupTask(UUID groupId, UUID domainId, String cycleId) {
+    private CompletableFuture<Void> processGroupTask(UUID groupId, UUID domainId) {
         Timer.Sample batchTimer = Timer.start(meterRegistry);
 
         LastRunPerfectMatches lastRun = getLastRun(domainId, groupId);
-        lastRun.setRunDate(DefaultValuesPopulator.getCurrentTimestamp());
+        lastRun.setRunDate(LocalDateTime.now());
         lastRun.setStatus(JobStatus.PENDING.name());
         saveLastRun(lastRun);
 
         return CompletableFuture.runAsync(() -> {
-            log.info("Attempting to acquire domainSemaphore for groupId={} domainId={} cycleId={}, queueLength={}",
-                    groupId, domainId, cycleId, domainSemaphore.getQueueLength());
+            log.info("Attempting to acquire domainSemaphore for groupId={} domainId={}, queueLength={}",
+                    groupId, domainId, domainSemaphore.getQueueLength());
             try {
                 boolean acquired = domainSemaphore.tryAcquire(3, TimeUnit.MINUTES);
                 if (!acquired) {
@@ -189,10 +233,10 @@ public class PerfectMatchCreationService {
                 throw new RuntimeException(e);
             }
         }, batchExecutor).thenCompose(v -> CompletableFuture.runAsync(() -> {
-            log.info("Attempting to acquire groupSemaphore for groupId={} domainId={} cycleId={}, queueLength={}",
-                    groupId, domainId, cycleId, groupSemaphore.getQueueLength());
+            log.info("Attempting to acquire groupSemaphore for groupId={} domainId={}, queueLength={}",
+                    groupId, domainId, groupSemaphore.getQueueLength());
             try {
-                boolean acquired = groupSemaphore.tryAcquire(3, TimeUnit.MINUTES);
+                boolean acquired = groupSemaphore.tryAcquire(240, TimeUnit.MINUTES);
                 if (!acquired) {
                     throw new TimeoutException("Timed out acquiring groupSemaphore for groupId=" + groupId);
                 }
@@ -203,39 +247,43 @@ public class PerfectMatchCreationService {
                 throw new RuntimeException(e);
             }
         }, batchExecutor)).thenCompose(v -> {
-            log.info("Acquired locks for perfect match: groupId={} domainId={} cycleId={}", groupId, domainId, cycleId);
+            log.info("Acquired locks for perfect match: groupId={} domainId={}", groupId, domainId);
             Timer.Sample taskTimer = Timer.start(meterRegistry);
-            return jobExecutor.processGroup(groupId, domainId, cycleId)
+            return jobExecutor.processGroup(groupId, domainId)
                     .thenRunAsync(() -> {
-                        doFlushLoop(groupId, domainId, cycleId);
+                        doFlushLoop(groupId, domainId);
                         long processedNodes = getProcessedNodeCount(domainId, groupId);
-                        lastRun.setStatus(JobStatus.COMPLETED.name());
                         lastRun.setNodeCount(processedNodes);
+                        lastRun.setStatus(JobStatus.COMPLETED.name());
                         saveLastRun(lastRun);
                         taskTimer.stop(meterRegistry.timer("task_processing_duration",
-                                "domainId", domainId.toString(), "groupId", groupId.toString(), "cycleId", cycleId));
+                                "domainId", domainId.toString(), "groupId", groupId.toString()));
                     }, batchExecutor);
         }).whenComplete((v, e) -> {
             groupSemaphore.release();
             domainSemaphore.release();
-            log.info("Released locks for perfect match: groupId={} domainId={} cycleId={}, permits: domain={} group={}",
-                    groupId, domainId, cycleId, domainSemaphore.availablePermits(), groupSemaphore.availablePermits());
+            log.info("Released locks for perfect match: groupId={} domainId={}, permits: domain={} group={}",
+                    groupId, domainId, domainSemaphore.availablePermits(), groupSemaphore.availablePermits());
 
             if (e != null) {
                 meterRegistry.counter("matches_creation_error", "mode", "perfect",
-                        "domainId", domainId.toString(), "groupId", groupId.toString(), "cycleId", cycleId).increment();
-                log.error("Error in perfect-match batch+flush for groupId={} domainId={} cycleId={}: {}",
-                        groupId, domainId, cycleId, e.getMessage(), e);
+                        "domainId", domainId.toString(), "groupId", groupId.toString()).increment();
+                log.error("Error in perfect-match batch+flush for groupId={} domainId={}: {}",
+                        groupId, domainId, e.getMessage(), e);
                 lastRun.setStatus(JobStatus.FAILED.name());
                 saveLastRun(lastRun);
             }
 
             batchTimer.stop(meterRegistry.timer("batch_perfect_matches_duration",
-                    "domainId", domainId.toString(), "groupId", groupId.toString(), "cycleId", cycleId));
+                    "domainId", domainId.toString(), "groupId", groupId.toString()));
         });
     }
 
-    private void doFlushLoop(UUID groupId, UUID domainId, String cycleId) {
+    private void doFlushLoop(UUID groupId, UUID domainId) {
         // Implement flush logic if needed
+    }
+
+    public void processGroup(UUID groupId, UUID domainId) {
+        processGroupTask(groupId, domainId).join();
     }
 }

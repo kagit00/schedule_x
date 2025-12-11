@@ -3,6 +3,7 @@ package com.shedule.x.processors;
 import com.shedule.x.config.factory.AutoCloseableStream;
 import com.shedule.x.dto.EdgeDTO;
 import com.shedule.x.service.GraphRecords;
+import com.shedule.x.utils.graph.EdgeKeyBuilder;
 import com.shedule.x.utils.graph.StoreUtility;
 import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import lombok.RequiredArgsConstructor;
@@ -39,17 +40,19 @@ public class EdgePersistenceFacade implements EdgePersistence {
 
     @Override
     public AutoCloseableStream<EdgeDTO> streamEdges(UUID domainId, UUID groupId, String cycleId) {
-        ByteBuffer prefix = prefixProvider.makePrefix(groupId, cycleId);
+        ByteBuffer prefix = EdgeKeyBuilder.buildGroupCyclePrefix(groupId, cycleId);
         return edgeReader.streamEdges(domainId, prefix,
-                k -> k.remaining() >= 32 && StoreUtility.keyStartsWith(k, prefix));
+                k -> k.remaining() >= prefix.remaining() && StoreUtility.keyStartsWith(k, prefix));
     }
+
 
     @Override
     public AutoCloseableStream<EdgeDTO> streamEdges(UUID domainId, UUID groupId) {
-        ByteBuffer prefix = prefixProvider.makePrefix(groupId);
+        ByteBuffer prefix = EdgeKeyBuilder.buildGroupPrefix(groupId);
         return edgeReader.streamEdges(domainId, prefix,
                 k -> StoreUtility.matchesGroupPrefix(k, groupId));
     }
+
 
     @Override
     public void cleanEdges(UUID groupId, String cycleId) {

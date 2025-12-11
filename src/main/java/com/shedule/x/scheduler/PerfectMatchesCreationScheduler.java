@@ -1,11 +1,11 @@
 package com.shedule.x.scheduler;
 
-import com.shedule.x.cache.MatchCache;
+
 import com.shedule.x.dto.enums.JobStatus;
 import com.shedule.x.models.Domain;
 import com.shedule.x.models.LastRunPerfectMatches;
-import com.shedule.x.repo.PotentialMatchRepository;
 import com.shedule.x.service.PerfectMatchCreationService;
+import io.github.resilience4j.bulkhead.annotation.Bulkhead;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import io.github.resilience4j.retry.annotation.Retry;
 import lombok.extern.slf4j.Slf4j;
@@ -19,82 +19,121 @@ import java.util.Map;
 import java.util.UUID;
 import java.time.LocalDateTime;
 
+import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
+
 
 @Slf4j
 @Component
 public class PerfectMatchesCreationScheduler {
-    private final MatchCache cache;
+
     private final MeterRegistry metrics;
     private final PerfectMatchCreationService perfectMatchCreationService;
-    private final PotentialMatchRepository potentialMatchRepository;
+
+    @Autowired
+    @Lazy
+    private PerfectMatchesCreationScheduler self;
+
+    private final AtomicBoolean running = new AtomicBoolean(false);
 
     public PerfectMatchesCreationScheduler(
-            MatchCache cache,
             MeterRegistry metrics,
-            PerfectMatchCreationService perfectMatchCreationService,
-            PotentialMatchRepository potentialMatchRepository) {
-        this.cache = cache;
+            PerfectMatchCreationService perfectMatchCreationService) {
         this.metrics = metrics;
         this.perfectMatchCreationService = perfectMatchCreationService;
-        this.potentialMatchRepository = potentialMatchRepository;
     }
 
-    @Scheduled(cron = "0 29 17 * * *", zone = "Asia/Kolkata")
+    @Scheduled(cron = "0 20 20 * * *", zone = "Asia/Kolkata")
     public void createPerfectMatches() {
-        Timer.Sample sample = Timer.start(metrics);
-        log.info("Starting Perfect Matches Creation at {}", Instant.now());
-
-        List<Map.Entry<Domain, UUID>> tasks = perfectMatchCreationService.getTasksToProcess();
-        if (tasks.isEmpty()) {
-            log.info("No groups to process for perfect matches creation");
-            sample.stop(metrics.timer("perfect_matches_creation"));
+        if (!isSafeToRunPerfectMatches()) {
+            log.warn("Skipping perfect matches creation - system not ready or already running");
             return;
         }
 
-        tasks.forEach(task -> {
-            try {
-                generatePerfectMatchesCreationGroup(task.getValue(), task.getKey().getId());
-            } catch (Exception e) {
-                log.error("Failed to create perfect matches for groupId={}: {}", task.getValue(), e.getMessage());
-                metrics.counter("perfect_matches_creation_errors_total", "groupId", task.getValue().toString()).increment();
-            }
-        });
-
-        sample.stop(metrics.timer("perfect_matches_creation"));
-        log.info("Completed Perfect Matches Creation at {}", Instant.now());
-    }
-
-    @Retry(name = "perfect_matches")
-    @CircuitBreaker(name = "perfect_matches", fallbackMethod = "generatePerfectMatchesCreationGroupFallback")
-    private void generatePerfectMatchesCreationGroup(UUID groupId, UUID domainId) {
         Timer.Sample sample = Timer.start(metrics);
-        LastRunPerfectMatches lastRun = perfectMatchCreationService.getLastRun(domainId, groupId);
-        lastRun.setRunDate(LocalDateTime.now());
-        lastRun.setStatus(JobStatus.PENDING.name());
-        perfectMatchCreationService.saveLastRun(lastRun);
+        log.info("Starting Perfect Matches Creation at {}", Instant.now());
 
-        long processedNodes = perfectMatchCreationService.getProcessedNodeCount(domainId, groupId);
-        long lastRunNodeCount = lastRun.getNodeCount();
+        try {
+            List<Map.Entry<Domain, UUID>> tasks = perfectMatchCreationService.getTasksToProcess();
+            if (tasks.isEmpty()) {
+                log.info("No groups eligible for perfect matches creation");
+                return;
+            }
 
-        log.info("Processing groupId={}, domainId={}. Last run nodes: {}, Processed: {}",
-                groupId, domainId, lastRunNodeCount, processedNodes);
-        List<String> processingCycleIds = potentialMatchRepository.findProcessingCycleIdsByGroupAndDomain(groupId, domainId);
+            for (Map.Entry<Domain, UUID> task : tasks) {
+                UUID groupId = task.getValue();
+                UUID domainId = task.getKey().getId();
+                try {
+                    self.processGroupWithResilience(groupId, domainId);
+                } catch (Exception e) {
+                    log.error("Failed to create perfect matches for groupId={}", groupId, e);
+                    metrics.counter("perfect_matches_creation_errors_total", "groupId", groupId.toString()).increment();
+                }
+            }
 
-        for (String p : processingCycleIds) perfectMatchCreationService.process(p);
-        metrics.counter("perfect_matches_creation", "domainId", domainId.toString(), "groupId", groupId.toString()).increment();
-
-        lastRun.setStatus(JobStatus.COMPLETED.name());
-        lastRun.setNodeCount(processedNodes);
-        perfectMatchCreationService.saveLastRun(lastRun);
-
-        log.info("Processed storage for groupId={}", groupId);
+            log.info("Completed Perfect Matches Creation successfully at {}", Instant.now());
+        } finally {
+            running.set(false);
+            sample.stop(metrics.timer("perfect_matches_creation"));
+        }
     }
 
-    private void generatePerfectMatchesCreationGroupFallback(UUID groupId, UUID domainId, Throwable t) {
-        metrics.counter("perfect_matches_creation_fallback", "groupId", groupId.toString()).increment();
-        LastRunPerfectMatches lastRun = perfectMatchCreationService.getLastRun(domainId, groupId);
-        lastRun.setRunDate(LocalDateTime.now());
-        lastRun.setStatus(JobStatus.FAILED.name());
-        perfectMatchCreationService.saveLastRun(lastRun);
+    private boolean isSafeToRunPerfectMatches() {
+        return running.compareAndSet(false, true);
+    }
+
+    @CircuitBreaker(name = "perfectMatchesGroup", fallbackMethod = "processGroupFallback")
+    @Retry(name = "perfectMatchesGroup", fallbackMethod = "processGroupFallback")
+    @Bulkhead(name = "perfectMatchesGroup", type = Bulkhead.Type.THREADPOOL)
+    public void processGroupWithResilience(UUID groupId, UUID domainId) {
+        Timer.Sample sample = Timer.start(metrics);
+
+        try {
+            LastRunPerfectMatches lastRun = perfectMatchCreationService.getLastRun(domainId, groupId);
+            lastRun.setRunDate(LocalDateTime.now());
+            lastRun.setStatus(JobStatus.PENDING.name());
+            perfectMatchCreationService.saveLastRun(lastRun);
+
+            long processedNodes = perfectMatchCreationService.getProcessedNodeCount(domainId, groupId);
+            long lastRunNodeCount = lastRun.getNodeCount();
+
+            log.info("Processing groupId={}, domainId={}. Last run nodes: {}, Current: {}",
+                    groupId, domainId, lastRunNodeCount, processedNodes);
+
+            perfectMatchCreationService.processGroup(groupId, domainId);
+
+            lastRun.setStatus(JobStatus.COMPLETED.name());
+            lastRun.setNodeCount(processedNodes);
+            perfectMatchCreationService.saveLastRun(lastRun);
+
+            metrics.counter("perfect_matches_creation_success_total",
+                    "domainId", domainId.toString(),
+                    "groupId", groupId.toString()).increment();
+
+        } finally {
+            sample.stop(metrics.timer("perfect_matches_group_duration_seconds",
+                    "groupId", groupId.toString(),
+                    "domainId", domainId.toString()));
+        }
+    }
+
+
+    private void processGroupFallback(UUID groupId, UUID domainId, Throwable t) {
+        log.error("CircuitBreaker/Retry fallback triggered for groupId={} domainId={}", groupId, domainId, t);
+
+        metrics.counter("perfect_matches_creation_fallback_total",
+                "groupId", groupId.toString(),
+                "reason", t.getClass().getSimpleName()).increment();
+
+        try {
+            LastRunPerfectMatches lastRun = perfectMatchCreationService.getLastRun(domainId, groupId);
+            lastRun.setRunDate(LocalDateTime.now());
+            lastRun.setStatus(JobStatus.FAILED.name());
+            perfectMatchCreationService.saveLastRun(lastRun);
+        } catch (Exception ex) {
+            log.error("Even fallback failed for groupId={}", groupId, ex);
+        }
     }
 }

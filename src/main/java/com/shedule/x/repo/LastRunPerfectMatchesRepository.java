@@ -9,8 +9,14 @@ import org.springframework.stereotype.Repository;
 import java.util.Optional;
 import java.util.UUID;
 
+
+
 @Repository
 public interface LastRunPerfectMatchesRepository extends JpaRepository<LastRunPerfectMatches, UUID> {
+
     @Query("SELECT l FROM LastRunPerfectMatches l WHERE l.domainId = :domainId AND l.groupId = :groupId")
-    Optional<LastRunPerfectMatches> findByDomainIdAndGroupId(@Param("domainId") UUID domainId, @Param("groupId") UUID groupId);
+    Optional<LastRunPerfectMatches> findByDomainIdAndGroupId(
+            @Param("domainId") UUID domainId,
+            @Param("groupId") UUID groupId
+    );
 }

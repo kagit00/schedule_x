@@ -18,7 +18,6 @@ import java.util.concurrent.CompletableFuture;
 @RequiredArgsConstructor
 public class ScheduleXPayloadProcessor {
     private final ImportJobService importJobService;
-    private final PerfectMatchCreationService perfectMatchCreationService;
 
     public CompletableFuture<Void> processImportedNodesPayload(String payload) {
         if (payload == null || payload.isBlank()) {

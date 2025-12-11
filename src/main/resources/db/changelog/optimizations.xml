@@ -176,5 +176,46 @@
         </createIndex>
     </changeSet>
 
+    <changeSet id="2025.12.11-02-add-timestamps-and-indexes" author="grok">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="last_run_perfect_matches"/>
+        </preConditions>
+
+        <addColumn tableName="last_run_perfect_matches">
+            <column name="created_at" type="timestamp with time zone" defaultValueComputed="now()">
+                <constraints nullable="false"/>
+            </column>
+        </addColumn>
+
+        <modifyDataType tableName="last_run_perfect_matches"
+                        columnName="run_date"
+                        newDataType="timestamp with time zone"/>
+
+        <createIndex tableName="last_run_perfect_matches"
+                     indexName="idx_last_run_domain_group"
+                     unique="true">
+            <column name="domain_id"/>
+            <column name="group_id"/>
+        </createIndex>
+
+        <createIndex tableName="last_run_perfect_matches"
+                     indexName="idx_last_run_status"
+                     unique="false">
+            <column name="status"/>
+        </createIndex>
+
+        <createIndex tableName="last_run_perfect_matches"
+                     indexName="idx_last_run_run_date"
+                     unique="false">
+            <column name="run_date" descending="true"/>
+        </createIndex>
+    </changeSet>
+
+    <changeSet id="2025.12.11-03-drop-duplicate-index-if-exists" author="grok">
+        <preConditions onFail="MARK_RAN">
+            <indexExists tableName="last_run_perfect_matches" indexName="idx_last_run_domain_group"/>
+        </preConditions>
+        <dropIndex tableName="last_run_perfect_matches" indexName="idx_last_run_domain_group"/>
+    </changeSet>
 
 </databaseChangeLog>

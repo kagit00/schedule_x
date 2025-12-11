@@ -161,8 +161,9 @@ public class GraphPreProcessor {
 
 
     @Transactional(readOnly = true)
-    public MatchType determineMatchTypeFromExistingData(UUID groupId, UUID domainId, String cycleId) {
-        try (var edgeStream = edgePersistence.streamEdges(domainId, groupId, cycleId)) {
+    public MatchType determineMatchTypeFromExistingData(UUID groupId, UUID domainId) {
+
+        try (var edgeStream = edgePersistence.streamEdges(domainId, groupId)) {
             log.info("→ Opened LMDB edge stream successfully | groupId={} | domainId={}", groupId, domainId);
 
             AtomicInteger edgeCount = new AtomicInteger(0);
@@ -171,6 +172,7 @@ public class GraphPreProcessor {
 
             edgeStream.forEach(edge -> {
                 int currentIndex = edgeCount.incrementAndGet();
+
                 if (currentIndex <= 5) {
                     log.info("→ Edge[{}]: from={} to={} | groupId={}",
                             currentIndex,
@@ -180,52 +182,38 @@ public class GraphPreProcessor {
                     );
                 }
 
-                if (foundAny.get()) {
-                    return;
-                }
+                if (foundAny.get()) return;
 
-                String fromHash = edge.getFromNodeHash();
-                String toHash = edge.getToNodeHash();
+                var fromNodeOpt = nodeRepository.findByReferenceIdAndGroupIdAndDomainId(
+                        edge.getFromNodeHash(), groupId, domainId);
 
-                var fromNodeOpt = nodeRepository.findByReferenceIdAndGroupIdAndDomainId(fromHash, groupId, domainId);
-                var toNodeOpt = nodeRepository.findByReferenceIdAndGroupIdAndDomainId(toHash, groupId, domainId);
-
-                if (fromNodeOpt.isEmpty()) {
-                    log.info("⚠ fromNodeHash '{}' not found in DB | groupId={} | domainId={}",
-                            fromHash, groupId, domainId);
-                }
-                if (toNodeOpt.isEmpty()) {
-                    log.info("⚠ toNodeHash '{}' not found in DB | groupId={} | domainId={}",
-                            toHash, groupId, domainId);
-                }
+                var toNodeOpt = nodeRepository.findByReferenceIdAndGroupIdAndDomainId(
+                        edge.getToNodeHash(), groupId, domainId);
 
                 if (fromNodeOpt.isPresent() && toNodeOpt.isPresent()) {
 
-                    String type1 = fromNodeOpt.get().getType();
-                    String type2 = toNodeOpt.get().getType();
+                    boolean sameType = Objects.equals(
+                            fromNodeOpt.get().getType(),
+                            toNodeOpt.get().getType()
+                    );
 
-                    log.info("→ Comparing node types: '{}' vs '{}' | groupId={}", type1, type2, groupId);
-                    boolean sameType = Objects.equals(type1, type2);
                     detected.set(sameType ? MatchType.SYMMETRIC : MatchType.BIPARTITE);
                     foundAny.set(true);
 
-                    log.info("✔ First conclusive edge found → Detected MatchType={} | groupId={}",
+                    log.info(" First conclusive edge found → Detected MatchType={} | groupId={}",
                             detected.get(), groupId);
-
-                    log.debug("Match type detected from first valid edge: {} | groupId={}", detected.get(), groupId);
                 }
             });
 
             log.info("Total edges scanned from LMDB: {} | groupId={}", edgeCount.get(), groupId);
-            MatchType result = foundAny.get() ? detected.get() : MatchType.BIPARTITE;
-            log.info("Final match type determined: {} | groupId={}", result, groupId);
-            return result;
+            return foundAny.get() ? detected.get() : MatchType.BIPARTITE;
 
         } catch (Exception e) {
             log.warn("Failed to determine match type from LMDB edges, falling back to BIPARTITE | groupId={}", groupId, e);
             return MatchType.BIPARTITE;
         }
     }
+
 
     private CompletableFuture<GraphResult> acquireAndBuildAsync(
             UUID groupId,

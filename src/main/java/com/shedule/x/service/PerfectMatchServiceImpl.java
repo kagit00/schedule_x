@@ -12,6 +12,7 @@ import com.shedule.x.processors.GraphPreProcessor;
 import com.shedule.x.processors.PerfectMatchSaver;
 import com.shedule.x.processors.matcher.strategies.MatchingStrategy;
 import com.shedule.x.processors.matcher.strategies.decider.MatchingStrategySelector;
+import com.shedule.x.repo.LastRunPerfectMatchesRepository;
 import com.shedule.x.repo.MatchingConfigurationRepository;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
@@ -27,6 +28,11 @@ import java.util.concurrent.*;
 
 
 import lombok.RequiredArgsConstructor;
+import java.util.*;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
+
 
 @Slf4j
 @Service
@@ -38,6 +44,7 @@ public class PerfectMatchServiceImpl implements PerfectMatchService {
     private final MatchingConfigurationRepository matchingConfigurationRepository;
     private final MeterRegistry meterRegistry;
     private final GraphPreProcessor graphPreProcessor;
+    private final LastRunPerfectMatchesRepository lastRunRepository;
 
     @Value("${matching.topk.count:100}")
     private int topK;
@@ -56,7 +63,16 @@ public class PerfectMatchServiceImpl implements PerfectMatchService {
 
         return CompletableFuture
                 .supplyAsync(() -> buildMatchingContext(groupId, domainId, request), cpuExecutor)
-                .thenCompose(context -> runPerfectMatchFromLmdb(context, groupId, domainId, cycleId))
+                .thenCompose(context -> {
+                    LastRunPerfectMatches lastRun = lastRunRepository.findByDomainIdAndGroupId(domainId, groupId)
+                            .orElse(new LastRunPerfectMatches());
+                    long lastSuccessfulNodeCount = lastRun.getNodeCount();
+                    if (context.getSizeOfNodes() == 0 || context.getSizeOfNodes() <= lastSuccessfulNodeCount) {
+                        log.info("No new nodes to process for perfect match, skipping groupId={}", groupId);
+                        return CompletableFuture.completedFuture(null);
+                    }
+                    return runPerfectMatchFromLmdb(context, groupId, domainId, cycleId);
+                })
                 .whenComplete((v, ex) -> {
                     timer.stop(meterRegistry.timer("perfect_match_duration_seconds",
                             "groupId", groupId.toString(),
@@ -75,7 +91,7 @@ public class PerfectMatchServiceImpl implements PerfectMatchService {
                 .findByGroupIdAndDomainId(groupId, domainId)
                 .orElseThrow(() -> new IllegalStateException("Missing MatchingConfiguration"));
 
-        MatchType matchType = graphPreProcessor.determineMatchTypeFromExistingData(groupId, domainId, request.getProcessingCycleId());
+        MatchType matchType = graphPreProcessor.determineMatchTypeFromExistingData(groupId, domainId);
 
         return GraphRequestFactory.buildMatchingContext(
                 groupId, domainId, 0, matchType,
@@ -98,7 +114,7 @@ public class PerfectMatchServiceImpl implements PerfectMatchService {
         List<CompletableFuture<Void>> futures = new CopyOnWriteArrayList<>();
 
         return CompletableFuture.runAsync(() -> {
-            try (var edgeStream = edgePersistence.streamEdges(domainId, groupId, cycleId)) {
+            try (var edgeStream = edgePersistence.streamEdges(domainId, groupId)) {
                 log.info("Starting LMDB edge streaming for PerfectMatch | groupId={}", groupId);
 
                 edgeStream.forEach(edge -> {

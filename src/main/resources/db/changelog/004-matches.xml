@@ -210,4 +210,23 @@
         </addColumn>
     </changeSet>
 
+    <changeSet id="2025.12.11-01-add-unique-constraint-and-defaults" author="grok">
+        <preConditions onFail="MARK_RAN">
+            <tableExists tableName="last_run_perfect_matches"/>
+            <not>
+                <uniqueConstraintExists tableName="last_run_perfect_matches" constraintName="uk_last_run_domain_group"/>
+            </not>
+        </preConditions>
+
+        <addDefaultValue tableName="last_run_perfect_matches" columnName="node_count" defaultValueNumeric="0"/>
+        <addNotNullConstraint tableName="last_run_perfect_matches" columnName="node_count" columnDataType="bigint"/>
+
+        <addDefaultValue tableName="last_run_perfect_matches" columnName="status" defaultValue="COMPLETED"/>
+        <addNotNullConstraint tableName="last_run_perfect_matches" columnName="status" columnDataType="varchar(50)"/>
+
+        <addUniqueConstraint tableName="last_run_perfect_matches"
+                             constraintName="uk_last_run_domain_group"
+                             columnNames="domain_id,group_id"/>
+    </changeSet>
+
 </databaseChangeLog>

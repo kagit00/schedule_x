@@ -45,4 +45,26 @@ public final class EdgeKeyBuilder {
         buf.flip();
         return buf;
     }
+
+    public static ByteBuffer buildGroupPrefix(UUID groupId) {
+        ByteBuffer buf = BUF.get();
+        buf.clear();
+        buf.putLong(groupId.getMostSignificantBits());
+        buf.putLong(groupId.getLeastSignificantBits());
+        buf.flip();
+        return buf;
+    }
+
+    public static ByteBuffer buildGroupCyclePrefix(UUID groupId, String cycleId) {
+        MessageDigest md = SHA256.get();
+        ByteBuffer buf = BUF.get();
+        buf.clear();
+        buf.putLong(groupId.getMostSignificantBits());
+        buf.putLong(groupId.getLeastSignificantBits());
+        md.reset();
+        buf.put(md.digest(cycleId.getBytes(StandardCharsets.UTF_8)));
+        buf.flip();
+        return buf;
+    }
+
 }

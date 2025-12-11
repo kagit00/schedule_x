@@ -13,7 +13,6 @@ import java.util.UUID;
 @Component
 @RequiredArgsConstructor
 public class MatchesCreationFinalizer {
-    private final LSHIndex lshIndex;
 
     public void finalize(boolean cycleCompleted) {
         clean(cycleCompleted);
@@ -53,7 +52,6 @@ public class MatchesCreationFinalizer {
         }
 
         QueueManagerImpl.removeAll();
-        lshIndex.clean();
         if (cycleCompleted) {
             SerializerContext.remove();
         }

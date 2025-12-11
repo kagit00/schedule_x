@@ -322,7 +322,7 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
                 }
 
                 totalProcessed++;
-                if (totalProcessed % 1_000_000 == 0) { // Log every 1M for 50M
+                if (totalProcessed % 1_000_000 == 0) {
                     log.info("Final save progress: {}M items | groupId={}", totalProcessed / 1_000_000, groupId);
                 }
             }
@@ -332,13 +332,9 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
                 saveFutures.add(flushFinalBatchAsync(buffer, groupId, domainId, processingCycleId));
             }
 
-            // Wait for all saves to complete
             if (!saveFutures.isEmpty()) {
                 CompletableFuture.allOf(saveFutures.toArray(new CompletableFuture[0])).join();
             }
-
-            log.info("Cleaning up edges for groupId={}, cycle={}", groupId, processingCycleId);
-            //graphStore.cleanEdges(groupId, processingCycleId);
 
             log.info("Final save completed. Total: {} | groupId={}", totalProcessed, groupId);
 
@@ -368,7 +364,6 @@ public class PotentialMatchComputationProcessorImp implements PotentialMatchComp
             return CompletableFuture.completedFuture(null);
         }
 
-        //log.info("Starting drain of pending matches for groupId={} | Queue Memory={} | Spill Size={}", groupId, manager.getQueueSize(), manager.getDiskSpillSize());
         return drainAndSaveRecursively(manager, groupId, domainId, processingCycleId, batchSize, 0);
     }
 
