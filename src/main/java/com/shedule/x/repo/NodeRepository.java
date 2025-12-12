@@ -66,4 +66,7 @@ public interface NodeRepository extends JpaRepository<Node, UUID> {
 
     @Query("SELECT COUNT(n) FROM Node n WHERE n.domainId = :domainId AND n.groupId = :groupId AND n.processed = true")
     long countByDomainIdAndGroupIdAndProcessedTrue(@Param("domainId") UUID domainId, @Param("groupId") UUID groupId);
+
+    @Query("SELECT COUNT(n) FROM Node n WHERE n.domainId = :domainId AND n.groupId = :groupId")
+    long countByDomainIdAndGroupId(@Param("domainId") UUID domainId, @Param("groupId") UUID groupId);
 }

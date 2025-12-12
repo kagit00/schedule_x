@@ -31,8 +31,7 @@ public class PerfectMatchSaver {
     }
 
 
-    public CompletableFuture<Void> saveMatchesAsync(
-            List<PerfectMatchEntity> matches, UUID groupId, UUID domainId, String processingCycleId) {
+    public CompletableFuture<Void> saveMatchesAsync(List<PerfectMatchEntity> matches, UUID groupId, UUID domainId, String processingCycleId) {
         if (shutdownInitiated) {
             log.warn("Save aborted for groupId={} due to shutdown", groupId);
             return CompletableFuture.failedFuture(new IllegalStateException("PerfectMatchSaver is shutting down"));

@@ -3,6 +3,7 @@ package com.shedule.x.processors;
 
 import com.shedule.x.dto.MatchingRequest;
 import com.shedule.x.service.PerfectMatchService;
+import com.shedule.x.utils.basic.DefaultValuesPopulator;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 
@@ -75,6 +76,7 @@ public class PerfectMatchCreationJobExecutor {
                 .groupId(groupId)
                 .domainId(domainId)
                 .limit(0)
+                .processingCycleId(DefaultValuesPopulator.getUid())
                 .isRealTime(false)
                 .page(0)
                 .build();

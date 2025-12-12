@@ -55,11 +55,9 @@ public class PerfectMatchCreationService {
     private final LastRunPerfectMatchesRepository lastRunRepository;
     private final DomainService domainService;
 
-    @Value("${match.max-concurrent-domains:2}")
-    private int maxConcurrentDomains;
+    private final int maxConcurrentDomains;
 
-    @Value("${match.max-concurrent-groups:1}")
-    private int maxConcurrentGroups;
+    private final int maxConcurrentGroups;
 
     @Value("${perfectmatch.node-stability-minutes:10}")
     private long nodeStabilityMinutes;
@@ -74,18 +72,24 @@ public class PerfectMatchCreationService {
             @Qualifier("matchCreationExecutorService") ExecutorService batchExecutor,
             MatchesCreationFinalizer matchesCreationFinalizer,
             NodeRepository nodeRepository,
-            LastRunPerfectMatchesRepository lastRunRepository
+            LastRunPerfectMatchesRepository lastRunRepository,
+            @Value("${match.max-concurrent-domains:2}") int maxConcurrentDomains,
+            @Value("${match.max-concurrent-groups:1}") int maxConcurrentGroups
     ) {
         this.domainService = domainService;
         this.matchingGroupRepository = matchingGroupRepository;
         this.jobExecutor = jobExecutor;
         this.meterRegistry = meterRegistry;
-        this.domainSemaphore = new Semaphore(maxConcurrentDomains, true);
-        this.groupSemaphore = new Semaphore(maxConcurrentGroups, true);
         this.batchExecutor = batchExecutor;
         this.matchesCreationFinalizer = matchesCreationFinalizer;
         this.nodeRepository = nodeRepository;
         this.lastRunRepository = lastRunRepository;
+
+        this.maxConcurrentDomains = maxConcurrentDomains;
+        this.maxConcurrentGroups = maxConcurrentGroups;
+
+        this.domainSemaphore = new Semaphore(maxConcurrentDomains, true);
+        this.groupSemaphore = new Semaphore(maxConcurrentGroups, true);
 
         if (batchExecutor instanceof ThreadPoolExecutor tpe) {
             int poolSize = tpe.getMaximumPoolSize();
@@ -105,45 +109,29 @@ public class PerfectMatchCreationService {
             List<UUID> groupIds = matchingGroupRepository.findGroupIdsByDomainId(domain.getId());
             for (UUID groupId : groupIds) {
                 LastRunPerfectMatches lastRun = getLastRun(domain.getId(), groupId);
-                long currentProcessedNodes = getProcessedNodeCount(domain.getId(), groupId);
-                long lastRunNodeCount = lastRun.getNodeCount();
+                long totalNodeCount = getTotalNodeCount(domain.getId(), groupId);
+
+                long lastRunProcessedCount = lastRun.getNodeCount();
                 String lastRunStatus = lastRun.getStatus();
 
-                boolean nodeCountIncreased = currentProcessedNodes > lastRunNodeCount;
+                boolean isFullyProcessed = (lastRunProcessedCount >= totalNodeCount) && (totalNodeCount > 0);
+
                 boolean lastRunFailedOrPending = JobStatus.PENDING.name().equals(lastRunStatus)
                         || JobStatus.FAILED.name().equals(lastRunStatus);
 
-                boolean isStable = isNodeCountStable(domain.getId(), groupId, currentProcessedNodes);
-
-                boolean shouldProcess = (nodeCountIncreased || lastRunFailedOrPending) && isStable;
+                boolean shouldProcess = (lastRunFailedOrPending || !isFullyProcessed);
 
                 if (shouldProcess) {
-                    log.info("Scheduling perfect match for groupId={}, domainId={}. Nodes: {} → {}, stable={}",
-                            groupId, domain.getId(), lastRunNodeCount, currentProcessedNodes, isStable);
+                    log.info("Scheduling perfect match for groupId={}, domainId={}. Total Nodes: {}, Last Processed: {}, fullyProcessed={}",
+                            groupId, domain.getId(), totalNodeCount, lastRunProcessedCount, isFullyProcessed);
                     tasks.add(new AbstractMap.SimpleEntry<>(domain, groupId));
                 } else {
-                    log.debug("Skipping groupId={} domainId={}. Increased={}, Stable={}, Status={}",
-                            groupId, domain.getId(), nodeCountIncreased, isStable, lastRunStatus);
+                    log.debug("Skipping groupId={} domainId={}. Total Nodes: {}, fullyProcessed={}, Status={}",
+                            groupId, domain.getId(), totalNodeCount, isFullyProcessed, lastRunStatus);
                 }
             }
         }
         return tasks;
-    }
-
-    private boolean isNodeCountStable(UUID domainId, UUID groupId, long currentCount) {
-        String key = domainId + ":" + groupId;
-        NodeCountSnapshot snapshot = nodeCountHistory.computeIfAbsent(key, k -> new NodeCountSnapshot());
-
-        LocalDateTime now = LocalDateTime.now();
-        if (snapshot.count == currentCount &&
-                snapshot.timestamp != null &&
-                Duration.between(snapshot.timestamp, now).toMinutes() >= nodeStabilityMinutes) {
-            return true;
-        }
-
-        snapshot.count = currentCount;
-        snapshot.timestamp = now;
-        return false;
     }
 
     private static class NodeCountSnapshot {
@@ -165,9 +153,14 @@ public class PerfectMatchCreationService {
         return nodeRepository.countByDomainIdAndGroupIdAndProcessedTrue(domainId, groupId);
     }
 
+    public long getTotalNodeCount(UUID domainId, UUID groupId) {
+        return nodeRepository.countByDomainIdAndGroupId(domainId, groupId);
+    }
+
     public void saveLastRun(LastRunPerfectMatches lastRun) {
         lastRunRepository.save(lastRun);
     }
+
 
     public void process() {
         Timer.Sample sample = Timer.start(meterRegistry);
@@ -219,71 +212,90 @@ public class PerfectMatchCreationService {
         saveLastRun(lastRun);
 
         return CompletableFuture.runAsync(() -> {
-            log.info("Attempting to acquire domainSemaphore for groupId={} domainId={}, queueLength={}",
-                    groupId, domainId, domainSemaphore.getQueueLength());
+            boolean domainAcquired = false;
+            boolean groupAcquired = false;
+
             try {
-                boolean acquired = domainSemaphore.tryAcquire(3, TimeUnit.MINUTES);
+                log.info("Attempting to acquire domainSemaphore for groupId={} domainId={}, queueLength={}",
+                        groupId, domainId, domainSemaphore.getQueueLength());
+
+                boolean acquired = domainSemaphore.tryAcquire(15, TimeUnit.MINUTES);
                 if (!acquired) {
-                    throw new TimeoutException("Timed out acquiring domainSemaphore for domainId=" + domainId);
+                    throw new TimeoutException(
+                            "Timed out acquiring domainSemaphore after 15 minutes for domainId=" + domainId
+                    );
                 }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new RuntimeException("Interrupted acquiring domainSemaphore", e);
-            } catch (TimeoutException e) {
-                throw new RuntimeException(e);
-            }
-        }, batchExecutor).thenCompose(v -> CompletableFuture.runAsync(() -> {
-            log.info("Attempting to acquire groupSemaphore for groupId={} domainId={}, queueLength={}",
-                    groupId, domainId, groupSemaphore.getQueueLength());
-            try {
-                boolean acquired = groupSemaphore.tryAcquire(240, TimeUnit.MINUTES);
+                domainAcquired = true;
+                log.info("Attempting to acquire groupSemaphore for groupId={} domainId={}, queueLength={}",
+                        groupId, domainId, groupSemaphore.getQueueLength());
+
+                acquired = groupSemaphore.tryAcquire(240, TimeUnit.MINUTES);
                 if (!acquired) {
                     throw new TimeoutException("Timed out acquiring groupSemaphore for groupId=" + groupId);
                 }
+                groupAcquired = true;
+
+                log.info("Acquired locks for perfect match: groupId={} domainId={}", groupId, domainId);
+
+                Timer.Sample taskTimer = Timer.start(meterRegistry);
+                jobExecutor.processGroup(groupId, domainId).join();
+
+                doFlushLoop(groupId, domainId);
+
+                long processedNodes = getProcessedNodeCount(domainId, groupId);
+                lastRun.setNodeCount(processedNodes);
+                lastRun.setStatus(JobStatus.COMPLETED.name());
+                saveLastRun(lastRun);
+
+                taskTimer.stop(meterRegistry.timer("task_processing_duration",
+                        "domainId", domainId.toString(),
+                        "groupId", groupId.toString()));
+
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                throw new RuntimeException("Interrupted acquiring groupSemaphore", e);
-            } catch (TimeoutException e) {
-                throw new RuntimeException(e);
-            }
-        }, batchExecutor)).thenCompose(v -> {
-            log.info("Acquired locks for perfect match: groupId={} domainId={}", groupId, domainId);
-            Timer.Sample taskTimer = Timer.start(meterRegistry);
-            return jobExecutor.processGroup(groupId, domainId)
-                    .thenRunAsync(() -> {
-                        doFlushLoop(groupId, domainId);
-                        long processedNodes = getProcessedNodeCount(domainId, groupId);
-                        lastRun.setNodeCount(processedNodes);
-                        lastRun.setStatus(JobStatus.COMPLETED.name());
-                        saveLastRun(lastRun);
-                        taskTimer.stop(meterRegistry.timer("task_processing_duration",
-                                "domainId", domainId.toString(), "groupId", groupId.toString()));
-                    }, batchExecutor);
-        }).whenComplete((v, e) -> {
-            groupSemaphore.release();
-            domainSemaphore.release();
-            log.info("Released locks for perfect match: groupId={} domainId={}, permits: domain={} group={}",
-                    groupId, domainId, domainSemaphore.availablePermits(), groupSemaphore.availablePermits());
+                throw new RuntimeException("Interrupted during lock acquisition", e);
 
-            if (e != null) {
-                meterRegistry.counter("matches_creation_error", "mode", "perfect",
-                        "domainId", domainId.toString(), "groupId", groupId.toString()).increment();
-                log.error("Error in perfect-match batch+flush for groupId={} domainId={}: {}",
-                        groupId, domainId, e.getMessage(), e);
+            } catch (Exception e) {
+                log.error(
+                        "Error in perfect-match batch+flush for groupId={} domainId={}: {}",
+                        groupId, domainId, e.getMessage(), e
+                );
+
                 lastRun.setStatus(JobStatus.FAILED.name());
                 saveLastRun(lastRun);
+
+                meterRegistry.counter("matches_creation_error", "mode", "perfect",
+                        "domainId", domainId.toString(),
+                        "groupId", groupId.toString()).increment();
+
+                throw new RuntimeException(e);
+
+            } finally {
+                if (groupAcquired) {
+                    groupSemaphore.release();
+                }
+                if (domainAcquired) {
+                    domainSemaphore.release();
+                }
+
+                log.info(
+                        "Released locks for perfect match: groupId={} domainId={}, permits: domain={} group={}",
+                        groupId, domainId, domainSemaphore.availablePermits(), groupSemaphore.availablePermits()
+                );
+
+                batchTimer.stop(meterRegistry.timer("batch_perfect_matches_duration",
+                        "domainId", domainId.toString(),
+                        "groupId", groupId.toString()));
             }
 
-            batchTimer.stop(meterRegistry.timer("batch_perfect_matches_duration",
-                    "domainId", domainId.toString(), "groupId", groupId.toString()));
-        });
+        }, batchExecutor);
     }
 
     private void doFlushLoop(UUID groupId, UUID domainId) {
         // Implement flush logic if needed
     }
 
-    public void processGroup(UUID groupId, UUID domainId) {
-        processGroupTask(groupId, domainId).join();
+    public CompletableFuture<Void> processGroup(UUID groupId, UUID domainId) {
+        return processGroupTask(groupId, domainId);
     }
 }

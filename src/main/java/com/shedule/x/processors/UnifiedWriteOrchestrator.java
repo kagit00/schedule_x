@@ -262,9 +262,8 @@ public class UnifiedWriteOrchestrator {
         List<WriteRequest> remaining = new ArrayList<>();
         queue.drainTo(remaining);
         if (!remaining.isEmpty()) {
-            log.warn("Discarding {} pending writes during shutdown", remaining.size());
-            remaining.forEach(r -> r.future()
-                    .completeExceptionally(new IllegalStateException("Service shutting down")));
+            log.info("Flushing {} pending writes before shutdown...", remaining.size());
+            processBatch(remaining);
         }
 
         log.info("UnifiedWriteOrchestrator shutdown complete");
