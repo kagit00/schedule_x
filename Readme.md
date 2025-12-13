@@ -1,4 +1,4 @@
-Matching Platform — Plain English Overview (with Design Doc Links)
+ScheduleX — Overview (with Design Doc Links)
 ===============================================================
 
 What this system does
@@ -40,7 +40,7 @@ flowchart LR
 
 ```
 
-Key terms in plain English
+Key terms 
 --------------------------
 - Node: A single entity you want to match (user/product/resource).
 - Potential Match: A candidate pairing between two nodes, usually many per node, with a compatibility score.
@@ -70,6 +70,66 @@ Why this stage matters:
 - All later stages depend on clean, consistent node data.
 - Idempotent writes let the system safely retry without creating duplicates.
 
+```mermaid
+graph TB
+    subgraph "Event Layer"
+        A1[Kafka Consumers<br/>Topic Pattern Matching]
+        A2[Message Routing<br/>DLQ Support]
+    end
+    
+    subgraph "Processing Layer"
+        B1[Payload Processor<br/>Message Parsing]
+        B2[Import Job Service<br/>Job Orchestration]
+        B3[File Processing Engine<br/>CSV Streaming]
+        B4[Batch Processing Engine<br/>Reference Lists]
+    end
+    
+    subgraph "Storage Layer"
+        C1[Nodes Import Processor<br/>Batch Handling]
+        C2[Nodes Storage Processor<br/>PostgreSQL COPY]
+        C3[Metadata Batch Writer<br/>Bulk Metadata Insert]
+    end
+    
+    subgraph "State Management"
+        D1[Status Updater<br/>Job Lifecycle]
+        D2[Status Publisher<br/>Kafka Producer]
+    end
+    
+    subgraph "Infrastructure"
+        E1[(PostgreSQL<br/>Nodes + Metadata)]
+        E2[(MinIO<br/>File Storage)]
+        E3[Kafka<br/>Topics]
+        E4[Metrics<br/>Prometheus]
+    end
+    
+    A1 --> B1
+    A2 --> B1
+    B1 --> B2
+    B2 --> B3
+    B2 --> B4
+    B3 --> C1
+    B4 --> C1
+    C1 --> C2
+    C2 --> C3
+    
+    B2 --> D1
+    C1 --> D1
+    D1 --> D2
+    
+    C2 --> E1
+    C3 --> E1
+    B3 --> E2
+    A1 --> E3
+    D2 --> E3
+    D1 --> E4
+    
+    style A1 fill:#4CAF50
+    style B2 fill:#2196F3
+    style C2 fill:#FF9800
+    style D1 fill:#9C27B0
+    style E1 fill:#607D8B
+```
+
 Stage 2 — Potential Matches Creation (creating candidates)
 ----------------------------------------------------------
 Goal: Generate “candidate match edges” between nodes in each domain/group.
@@ -89,6 +149,115 @@ Output:
 Why this stage matters:
 - It reduces an otherwise explosive “compare everything with everything” problem into a smaller candidate set.
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Sch as "Scheduler"
+    participant JobEx as "Job Executor"
+    participant NodeFetch as "Node Fetch Service"
+    participant DB as "PostgreSQL"
+    participant Svc as "Match Service"
+    participant GraphPre as "Graph Preprocessor"
+    participant Builder as "Graph Builder"
+    participant Queue as "QueueManager"
+    participant Proc as "Computation Processor"
+    participant LMDB as "LMDB Store"
+    participant Storage as "Storage Processor"
+
+    rect rgba(230, 255, 230, 0.25)
+        Note over Sch,JobEx: Phase 1: Initialization
+        Sch->>Sch: Trigger (11:05 IST)
+        Sch->>Sch: Acquire domainSemaphore
+        Sch->>JobEx: processGroup(groupId, domainId, cycleId)
+    end
+
+    rect rgba(230, 240, 255, 0.25)
+        Note over JobEx,DB: Phase 2: Node Fetching
+        loop Until emptyStreak >= 3
+            JobEx->>NodeFetch: fetchNodeIdsByCursor(groupId, limit=1000)
+            NodeFetch->>DB: SELECT id, createdAt WHERE processed=false LIMIT 1200
+            DB-->>NodeFetch: CursorPage(ids, hasMore, lastCreatedAt, lastId)
+
+            alt Page not empty
+                JobEx->>Svc: processNodeBatch(nodeIds, request)
+                Svc->>NodeFetch: fetchNodesInBatchesAsync(nodeIds)
+                NodeFetch->>DB: SELECT * WHERE id IN (...)
+                DB-->>NodeFetch: List<Node> with metadata
+                NodeFetch-->>Svc: List<NodeDTO>
+            end
+        end
+    end
+
+    rect rgba(255, 250, 230, 0.25)
+        Note over Svc,Builder: Phase 3: Graph Building
+        Svc->>GraphPre: buildGraph(nodes, request)
+        GraphPre->>GraphPre: Determine MatchType
+        GraphPre->>Builder: build(nodes, request)
+
+        Builder->>Builder: Index nodes (LSH/Metadata)
+        Builder->>Builder: Partition into chunks (500 nodes)
+
+        par Parallel Workers (8 concurrent)
+            Builder->>Builder: processBatch(chunk1)
+            Builder->>Builder: processBatch(chunk2)
+            Builder->>Builder: processBatch(chunkN)
+        end
+
+        Builder-->>GraphPre: ChunkResult(matches)
+    end
+
+    rect rgba(250, 240, 255, 0.25)
+        Note over GraphPre,Queue: Phase 4: Queue Management
+        loop For each ChunkResult
+            GraphPre->>Proc: processChunkMatches(chunkResult)
+            Proc->>Queue: enqueue(potentialMatch)
+
+            alt Queue size > threshold
+                Queue->>Queue: Auto-flush batch
+                Queue->>Proc: Return batch (500 matches)
+            end
+        end
+    end
+
+    rect rgba(255, 240, 240, 0.25)
+        Note over Proc,Storage: Phase 5: Dual Persistence
+        Proc->>LMDB: persistEdgesAsync(matches)
+        Proc->>Storage: savePotentialMatches(entities)
+
+        par Concurrent Writes
+            LMDB->>LMDB: UnifiedWriteOrchestrator
+            LMDB->>LMDB: Batch write (txn)
+
+            Storage->>DB: COPY temp_potential_matches FROM STDIN (BINARY)
+            Storage->>DB: INSERT INTO potential_matches ... ON CONFLICT
+        end
+    end
+
+    rect rgba(230, 255, 255, 0.25)
+        Note over Sch,Storage: Phase 6: Finalization
+        Sch->>Proc: savePendingMatchesAsync()
+        loop Drain queue
+            Proc->>Queue: drainBatch(2000)
+            Queue-->>Proc: List<PotentialMatch>
+            Proc->>Storage: saveMatchBatch()
+        end
+
+        Sch->>Proc: saveFinalMatches()
+        Proc->>LMDB: streamEdges(domainId, groupId, cycleId)
+        loop Stream edges
+            LMDB-->>Proc: EdgeDTO
+            Proc->>Proc: Buffer until 2000
+            Proc->>Storage: flushFinalBatchAsync()
+        end
+
+        Sch->>Proc: cleanup(groupId)
+        Proc->>Queue: remove(groupId)
+        Sch->>Sch: Release semaphore
+    end
+
+
+```
+
 Stage 3 — Perfect Match Creation (choosing final matches)
 ---------------------------------------------------------
 Goal: Turn candidate edges into final “best match” results that the business can act on.
@@ -106,6 +275,86 @@ Output:
 
 Why this stage matters:
 - It produces the final deliverable matching output used by client-facing features and reporting.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant SCH as Scheduler
+    participant SVC as CreationService
+    participant EXE as JobExecutor
+    participant IMPL as ServiceImpl
+    participant EDGE as EdgePersistence
+    participant LMDB as LMDB Store
+    participant STRAT as MatchingStrategy
+    participant SAVER as MatchSaver
+    participant STORE as StorageProcessor
+    participant PG as PostgreSQL
+
+    SCH->>SCH: @Scheduled Trigger (01:28 IST)
+    SCH->>SVC: getTasksToProcess()
+    SVC->>PG: Query LastRunPerfectMatches
+    SVC->>PG: Count Nodes
+    PG-->>SVC: Tasks List
+
+    loop For Each Group
+        SCH->>SVC: processGroup(groupId, domainId)
+        SVC->>SVC: tryAcquire domainSemaphore (15min)
+        SVC->>SVC: tryAcquire groupSemaphore (240min)
+
+        SVC->>EXE: processGroup(groupId, domainId)
+
+        loop Retry up to 3 times
+            EXE->>IMPL: processAndSaveMatches(request)
+            IMPL->>PG: Get LastRun & Node Count
+
+            alt Node Count > Last Processed
+                IMPL->>EDGE: streamEdges(domainId, groupId)
+                EDGE->>LMDB: Open Txn, Create Cursor
+
+                loop Stream Edges
+                    LMDB-->>EDGE: EdgeDTO
+                    EDGE-->>IMPL: EdgeDTO
+                    IMPL->>IMPL: Buffer until 25k
+
+                    alt Buffer Full
+                        IMPL->>IMPL: Submit Batch to cpuExecutor
+
+                        par Process Batch
+                            IMPL->>IMPL: Build Adjacency Map
+                            IMPL->>IMPL: Trim to Top-K
+                            IMPL->>STRAT: match(potentialMatches)
+                            STRAT-->>IMPL: Map<String, List<MatchResult>>
+                            IMPL->>IMPL: Convert to Entities
+                            IMPL->>SAVER: saveMatchesAsync()
+
+                            SAVER->>STORE: savePerfectMatches()
+                            STORE->>PG: Acquire Advisory Lock
+                            STORE->>PG: CREATE TEMP TABLE
+                            STORE->>PG: COPY Binary Data
+                            STORE->>PG: UPSERT from Temp
+                            STORE->>PG: COMMIT
+                            STORE->>PG: Release Advisory Lock
+                        end
+                    end
+                end
+
+                IMPL->>IMPL: Wait for all batches
+                IMPL-->>EXE: Success
+                EXE-->>SVC: Success
+            else
+                IMPL-->>EXE: Skip (no new nodes)
+            end
+        end
+
+        SVC->>PG: Update LastRun (status=COMPLETED)
+        SVC->>SVC: Release groupSemaphore
+        SVC->>SVC: Release domainSemaphore
+    end
+
+    SCH->>SCH: Job Complete
+
+
+```
 
 Stage 4 — Match Transfer to Client (export + notify)
 ----------------------------------------------------
@@ -126,6 +375,90 @@ Output:
 Why this stage matters:
 - It decouples internal storage schemas from client consumption needs.
 - It supports high-volume delivery without requiring clients to query large DB tables directly.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Sched as Scheduler
+    participant Proc as MatchTransferProcessor
+    participant PotentialSvc as PotentialStreamService
+    participant PerfectSvc as PerfectStreamService
+    participant Queue as BlockingQueue
+    participant DB as PostgreSQL
+    participant Export as ExportService
+    participant Kafka as ScheduleXProducer
+    
+    Sched->>Proc: processMatchTransfer(groupId, domain)
+    
+    Proc->>Proc: Create BlockingQueue (capacity 100)
+    Proc->>Proc: Setup atomic counters (recordCount, done)
+    
+    par Parallel Streaming
+        Proc->>PotentialSvc: streamAllMatches(groupId, domainId, consumer, 100K)
+        PotentialSvc->>DB: SELECT * FROM potential_matches
+        DB-->>PotentialSvc: ResultSet stream
+        
+        loop While ResultSet.next()
+            PotentialSvc->>PotentialSvc: Create PotentialMatchEntity
+            PotentialSvc->>PotentialSvc: Transform to MatchTransfer
+            PotentialSvc->>PotentialSvc: Accumulate to batch (100K)
+            
+            alt Batch full
+                PotentialSvc->>Queue: put(batch) - blocks if full
+                Queue-->>PotentialSvc: Accepted
+            end
+        end
+        
+        PotentialSvc->>Queue: put(final batch)
+    and
+        Proc->>PerfectSvc: streamAllMatches(groupId, domainId, consumer, 100K)
+        PerfectSvc->>DB: SELECT * FROM perfect_matches
+        DB-->>PerfectSvc: ResultSet stream
+        
+        loop While ResultSet.next()
+            PerfectSvc->>PerfectSvc: Create PerfectMatchEntity
+            PerfectSvc->>PerfectSvc: Transform to MatchTransfer
+            PerfectSvc->>PerfectSvc: Accumulate to batch (100K)
+            
+            alt Batch full
+                PerfectSvc->>Queue: put(batch) - blocks if full
+                Queue-->>PerfectSvc: Accepted
+            end
+        end
+        
+        PerfectSvc->>Queue: put(final batch)
+    end
+    
+    Note over PotentialSvc,PerfectSvc: Both complete, set done=true
+    
+    Proc->>Proc: Create matchStreamSupplier
+    Proc->>Export: exportMatches(streamSupplier, groupId, domainId)
+    
+    loop Stream not exhausted
+        Export->>Queue: poll(300ms)
+        alt Batch available
+            Queue-->>Export: List<MatchTransfer>
+            Export->>Export: Convert to Parquet records
+            Export->>Export: Write to file
+        else Timeout
+            Queue-->>Export: null
+            Export->>Export: Check if done
+        end
+    end
+    
+    Export->>Export: Close Parquet file
+    Export-->>Proc: ExportedFile
+    
+    Proc->>Kafka: sendMessage(topic, key, payload)
+    Kafka->>Kafka: KafkaTemplate.send
+    
+    alt Send success
+        Kafka-->>Proc: Success callback
+    else Send failure
+        Kafka->>Kafka: sendToDlq(key, payload)
+    end
+
+```
 
 How the pipeline fits together
 ------------------------------
