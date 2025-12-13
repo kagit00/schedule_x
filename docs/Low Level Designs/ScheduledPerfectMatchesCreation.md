@@ -652,43 +652,40 @@ sequenceDiagram
 
 ```mermaid
 graph TB
-    subgraph "Layer 1: Circuit Breaker"
-        CB[Resilience4j CircuitBreaker<br/>perfectMatchesGroup]
-        CB -->|Open| FB1[Fallback: Update Status FAILED]
-        CB -->|Half-Open| RETRY1[Allow Limited Requests]
+
+    subgraph Layer1_Circuit_Breaker
+        CB[Resilience4j CircuitBreaker<br>perfectMatchesGroup]
+        CB -->|Open| FB1[Fallback Update Status FAILED]
+        CB -->|Half Open| RETRY1[Allow Limited Requests]
         CB -->|Closed| PROCEED1[Normal Processing]
     end
-    
-    subgraph "Layer 2: Retry Mechanism"
-        RT[Exponential Backoff Retry<br/>maxAttempts=3]
+
+    subgraph Layer2_Retry
+        RT[Exponential Backoff Retry<br>maxAttempts 3]
         RT -->|Attempt 1| EXEC1[Execute]
-        RT -->|Attempt 2<br/>delay=1s| EXEC2[Execute]
-        RT -->|Attempt 3<br/>delay=2s| EXEC3[Execute]
-        EXEC3 -->|Still Fails| FB2[CompleteExceptionally]
+        RT -->|Attempt 2 delay 1s| EXEC2[Execute]
+        RT -->|Attempt 3 delay 2s| EXEC3[Execute]
+        EXEC3 -->|Still Fails| FB2[Complete Exceptionally]
     end
-    
-    subgraph "Layer 3: Timeout Protection"
-        TO[CompletableFuture Timeout]
-        TO -->|Semaphore: 15min| TO1[Domain Lock Timeout]
-        TO -->|Semaphore: 240min| TO2[Group Lock Timeout]
-        TO -->|Save: 30min| TO3[Storage Timeout]
+
+    subgraph Layer3_Timeouts
+        TO[CompletableFuture Timeout Guard]
+        TO -->|Domain Lock 15 min| TO1[Domain Semaphore Timeout]
+        TO -->|Group Lock 240 min| TO2[Group Semaphore Timeout]
+        TO -->|Save 30 min| TO3[Storage Timeout]
     end
-    
-    subgraph "Layer 4: Database Resilience"
+
+    subgraph Layer4_Database_Resilience
         DB[Database Layer]
-        DB -->|Deadlock| DBR[@Retryable with backoff]
-        DB -->|Advisory Lock| AL[PostgreSQL pg_try_advisory_lock]
-        DB -->|COPY Failure| CANCEL[CopyIn.cancelCopy]
+        DB -->|Deadlock| DBR[Retryable Backoff Handler]
+        DB -->|Advisory Lock| AL[pg_try_advisory_lock]
+        DB -->|COPY Failure| CANCEL[Cancel COPY Operation]
     end
-    
+
     PROCEED1 --> RT
     RT --> TO
     TO --> DB
-    
-    style CB fill:#FFCDD2
-    style RT fill:#F8BBD0
-    style TO fill:#E1BEE7
-    style DB fill:#C5CAE9
+
 ```
 
 ### 6.2 Error Handling Flow

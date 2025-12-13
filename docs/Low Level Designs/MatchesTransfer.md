@@ -28,32 +28,39 @@ The **Match Transfer System** is a scheduled batch export platform that streams 
 ### 1.2 Key Capabilities
 
 ```mermaid
-mindmap
-  root((Match Transfer<br/>System))
-    Scheduling
-      Cron-based Execution
-      Multi-Domain Processing
-      Concurrent Group Handling
-    Streaming
-      Potential Matches
-      Perfect Matches
-      Memory-Efficient
-      Batch Processing
-    Export
-      Parquet Format
-      Compression
-      Schema Management
-      Semaphore Control
-    Publishing
-      Kafka Topics
-      File References
-      DLQ Support
-      Async Callbacks
-    Resilience
-      Circuit Breaker
-      Retry Mechanisms
-      Fallback Handling
-      Error Tracking
+graph TB
+    ROOT[Match Transfer System]
+
+    ROOT --> S[Scheduling]
+    ROOT --> ST[Streaming]
+    ROOT --> E[Export]
+    ROOT --> P[Publishing]
+    ROOT --> R[Resilience]
+
+    S --> S1[Cron Based Execution]
+    S --> S2[Multi Domain Processing]
+    S --> S3[Concurrent Group Handling]
+
+    ST --> ST1[Potential Matches Stream]
+    ST --> ST2[Perfect Matches Stream]
+    ST --> ST3[Memory Efficient Processing]
+    ST --> ST4[Batch Processing]
+
+    E --> E1[Parquet Format]
+    E --> E2[Compression]
+    E --> E3[Schema Management]
+    E --> E4[Semaphore Control]
+
+    P --> P1[Kafka Topics]
+    P --> P2[File References]
+    P --> P3[DLQ Support]
+    P --> P4[Async Callbacks]
+
+    R --> R1[Circuit Breaker]
+    R --> R2[Retry Mechanisms]
+    R --> R3[Fallback Handling]
+    R --> R4[Error Tracking]
+
 ```
 
 ### 1.3 System Metrics

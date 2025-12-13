@@ -1494,33 +1494,38 @@ graph TB
 
 ```mermaid
 graph TB
-    subgraph "Application Metrics"
-        A1[kafka_processing_time<br/>Timer by topic, groupId]
-        A2[kafka_processing_errors<br/>Counter by topic]
-        A3[node_import_batch_processed<br/>Counter by jobId]
-        A4[node_import_batch_timeout<br/>Counter by jobId]
-        A5[node_import_batch_duration<br/>Timer by ops]
+
+    subgraph Application_Metrics
+        A1[kafka_processing_time<br>Timer by topic and group]
+        A2[kafka_processing_errors<br>Counter by topic]
+        A3[node_import_batch_processed<br>Counter by job]
+        A4[node_import_batch_timeout<br>Counter by job]
+        A5[node_import_batch_duration<br>Timer by operation]
     end
-    
-    subgraph "Kafka Metrics"
-        K1[kafka_consumer_executor_active_threads<br/>Gauge]
-        K2[kafka_consumer_executor_queue_size<br/>Gauge]
-        K3[kafka_dlq_messages<br/>Counter by topic]
+
+    subgraph Kafka_Metrics
+        K1[kafka_consumer_active_threads<br>Gauge]
+        K2[kafka_consumer_queue_size<br>Gauge]
+        K3[kafka_dlq_messages<br>Counter by topic]
     end
-    
-    subgraph "Storage Metrics"
-        S1[node_import_total_duration<br/>Timer]
-        S2[node_import_metadata_duration<br/>Timer]
-        S3[node_import_conflict_updates<br/>Counter]
+
+    subgraph Storage_Metrics
+        S1[node_import_total_duration<br>Timer]
+        S2[node_import_metadata_duration<br>Timer]
+        S3[node_import_conflict_updates<br>Counter]
     end
-    
-    subgraph "Job Metrics"
-        J1[node_import_jobs_completed<br/>Counter by groupId]
-        J2[node_import_jobs_failed<br/>Counter by groupId]
-        J3[node_import_unexpected_errors<br/>Counter by groupId]
+
+    subgraph Job_Metrics
+        J1[node_import_jobs_completed<br>Counter by group]
+        J2[node_import_jobs_failed<br>Counter by group]
+        J3[node_import_unexpected_errors<br>Counter by group]
     end
-    
-    A1 --> REG[Micrometer Registry]
+
+    REG[Micrometer Registry]
+    PROM[Prometheus]
+    GRAF[Grafana Dashboards]
+
+    A1 --> REG
     A2 --> REG
     A3 --> REG
     A4 --> REG
@@ -1534,13 +1539,10 @@ graph TB
     J1 --> REG
     J2 --> REG
     J3 --> REG
-    
-    REG --> PROM[Prometheus]
-    PROM --> GRAF[Grafana Dashboards]
-    
-    style REG fill:#4CAF50
-    style PROM fill:#FF5722
-    style GRAF fill:#2196F3
+
+    REG --> PROM
+    PROM --> GRAF
+
 ```
 
 ### 10.2 Operational Dashboards

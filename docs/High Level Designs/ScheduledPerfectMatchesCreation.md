@@ -1618,42 +1618,8 @@ graph TB
 | Symmetric/Asymmetric strategies | Covers 90% of business use cases | ML-based scoring (future) | 2024-02-10 |
 | Scheduled batch vs real-time | Predictable resource usage, sufficient for SLA | Event-driven real-time (complexity) | 2024-01-20 |
 
----
 
-## Appendix D: Capacity Planning
 
-### Current Capacity
-
-| Metric | Current | Headroom | Bottleneck |
-|--------|---------|----------|------------|
-| Edges/day | 1.5M | 3x | CPU |
-| Concurrent Groups | 2 | 4x | Semaphore permits |
-| Database Connections | 20 | 2x | Connection pool |
-| Memory | 16GB | 2x | Heap size |
-| Storage (LMDB) | 50GB | 4x | Disk space |
-| Storage (PostgreSQL) | 200GB | 2.5x | Disk space |
-
-### Growth Projections
-
-```
-Year 1:
-  - Edges: 1.5M/day → 5M/day (3.3x)
-  - Nodes: 50K → 200K (4x)
-  - Groups: 20 → 50 (2.5x)
-  - Required Infrastructure: Current + 2x CPU, 1.5x Memory
-
-Year 2:
-  - Edges: 5M/day → 20M/day (4x)
-  - Nodes: 200K → 1M (5x)
-  - Groups: 50 → 150 (3x)
-  - Required Infrastructure: Distributed architecture (Kafka-based)
-
-Year 3:
-  - Edges: 20M/day → 100M/day (5x)
-  - Nodes: 1M → 10M (10x)
-  - Groups: 150 → 500 (3.3x)
-  - Required Infrastructure: Multi-region, auto-scaling
-```
 
 ---
 
