@@ -30,44 +30,36 @@ The **Potential Matches Creation System** is a high-throughput, distributed grap
 
 ```mermaid
 mindmap
-  root["Potential Matches<br/>System"]:::root
+  root(("Potential Matches<br/>System"))
 
-    Scheduling:::sched
+    Scheduling["Scheduling"]
       Cron-based Execution
       Cursor Pagination
       Incremental Processing
 
-    Graph_Building["Graph Building"]:::graph
+    Graph_Building["Graph Building"]
       Symmetric Graphs
       Bipartite Graphs
       LSH Indexing
       Metadata Weighting
 
-    Edge_Processing["Edge Processing"]:::edge
+    Edge_Processing["Edge Processing"]
       LMDB Streaming
       Batch Computation
       Queue Management
       Disk Spillover
 
-    Persistence:::persist
+    Persistence["Persistence"]
       PostgreSQL COPY
       Advisory Locks
       Final Merging
       Duplicate Handling
 
-    Resilience:::res
+    Resilience["Resilience"]
       Retry Logic
       Semaphore Control
       Backpressure
       Graceful Shutdown
-
-  classDef root fill:#263238,color:#ffffff
-  classDef sched fill:#E3F2FD
-  classDef graph fill:#E8F5E9
-  classDef edge fill:#FFFDE7
-  classDef persist fill:#FCE4EC
-  classDef res fill:#EDE7F6
-
 ```
 
 ### 1.3 System Metrics
@@ -1359,32 +1351,31 @@ stateDiagram-v2
 
 ```mermaid
 flowchart LR
-    A["Memory Queue Full<br/>1M items"] --> B{"Disk Spill Enabled?"}
-    B -->|No| C["Block / Drop Enqueue"]
-    B -->|Yes| D["Drain 100K to Disk"]
-
-    D --> E["Serialize to File<br/>/tmp/spill-(groupId)-(seq).bin"]
-    E --> F["Clear Memory<br/>Continue Accepting"]
-
-    F --> G["Track Spill Files<br/>List<Path>"]
-
+    A[Memory Queue Full<br/>1M items] --> B{Disk Spill Enabled?}
+    B -->|No| C[Block/Drop Enqueue]
+    B -->|Yes| D[Drain 100K to Disk]
+    
+    D --> E[Serialize to File<br/>/tmp/spill-{groupId}-{seq}.bin]
+    E --> F[Clear Memory<br/>Continue Accepting]
+    
+    F --> G[Track Spill Files<br/>List~Path~]
+    
     subgraph "Drain Phase"
-        H["drainBatch 2000"] --> I{"Memory Empty?"}
-        I -->|Yes| J["Read from Disk Files<br/>FIFO Order"]
-        I -->|No| K["Return Memory Batch"]
+        H[drainBatch 2000] --> I{Memory Empty?}
+        I -->|Yes| J[Read from Disk Files<br/>FIFO Order]
+        I -->|No| K[Return Memory Batch]
     end
-
+    
     G --> H
-
-    J --> L["Deserialize Batch"]
-    L --> M["Return to Processor"]
+    
+    J --> L[Deserialize Batch]
+    L --> M[Return to Processor]
     K --> M
-
+    
     style A fill:#FFCDD2
     style E fill:#F8BBD0
     style J fill:#E1BEE7
     style M fill:#C8E6C9
-
 ```
 
 **Spill File Format**:
@@ -1413,25 +1404,25 @@ Data Section (repeated):
 ```mermaid
 graph TB
     subgraph "Input Optimization"
-        A1[Cursor-Based Pagination<br/>Avoids OFFSET penalty]
-        A2[Batch Fetching<br/>1000 nodes at a time]
-        A3[DB Semaphore<br/>Prevents connection exhaustion]
+        A1["Cursor-Based Pagination<br/>Avoids OFFSET penalty"]
+        A2["Batch Fetching<br/>1000 nodes at a time"]
+        A3["DB Semaphore<br/>Prevents connection exhaustion"]
     end
-    
+
     subgraph "Processing Optimization"
-        B1[Chunking<br/>500 nodes per chunk]
-        B2[Parallel Workers<br/>8 concurrent tasks]
-        B3[LSH Indexing<br/>O log n candidate search]
-        B4[Memory Queue<br/>In-memory buffering]
+        B1["Chunking<br/>500 nodes per chunk"]
+        B2["Parallel Workers<br/>8 concurrent tasks"]
+        B3["LSH Indexing<br/>O(log n) candidate search"]
+        B4["Memory Queue<br/>In-memory buffering"]
     end
-    
+
     subgraph "Output Optimization"
-        C1[Batch Writes<br/>500 matches per batch]
-        C2[Binary COPY Protocol<br/>10x faster INSERT]
-        C3[LMDB Single Writer<br/>No write contention]
-        C4[Async Persistence<br/>Non-blocking saves]
+        C1["Batch Writes<br/>500 matches per batch"]
+        C2["Binary COPY Protocol<br/>10x faster INSERT"]
+        C3["LMDB Single Writer<br/>No write contention"]
+        C4["Async Persistence<br/>Non-blocking saves"]
     end
-    
+
     A1 --> B1
     A2 --> B2
     A3 --> B3
@@ -1439,7 +1430,7 @@ graph TB
     B2 --> C2
     B3 --> C3
     B4 --> C4
-    
+
     style A1 fill:#C8E6C9
     style B3 fill:#FFF9C4
     style C2 fill:#FFCCBC
@@ -1475,13 +1466,13 @@ gantt
     title Processing Timeline Optimization (2000 Nodes)
     dateFormat X
     axisFormat %s
-    
+
     section Sequential (Before)
     Fetch All Nodes    :a1, 0, 10s
     Build Full Graph   :a2, after a1, 30s
     Compute All Edges  :a3, after a2, 60s
     Save All Matches   :a4, after a3, 20s
-    
+
     section Parallel (After)
     Fetch Batch 1      :b1, 0, 2s
     Process Batch 1    :b2, after b1, 5s
