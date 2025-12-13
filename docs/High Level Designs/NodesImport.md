@@ -303,37 +303,37 @@ graph TB
 ```mermaid
 C4Container
     title Container Diagram - Node Import System
-    
+
     Container_Boundary(app, "Import Application") {
         Container(consumer, "Kafka Consumer", "Spring Kafka", "Listens to import topics")
-        Container(processor, "Payload Processor", "Java Service", "Parses & validates JSON")
+        Container(processor, "Payload Processor", "Java Service", "Parses and validates JSON")
         Container(jobsvc, "Import Job Service", "Java Service", "Orchestrates import lifecycle")
         Container(filesvc, "File Import Service", "Java Service", "Processes CSV files")
         Container(batchsvc, "Batch Import Service", "Java Service", "Processes reference lists")
         Container(storage, "Storage Processor", "Java Component", "PostgreSQL bulk operations")
         Container(status, "Status Updater", "Java Component", "Manages job state")
+        Container(metrics, "Metrics Exporter", "Java Component", "Exposes Prometheus metrics")
     }
-    
-    ContainerDb(postgres, "PostgreSQL", "Relational DB", "Nodes, Metadata, Jobs")
-    ContainerDb(minio, "MinIO", "Object Store", "CSV files (GZIP)")
-    Container(kafka, "Kafka", "Message Broker", "Import events + Status")
-    Container(monitoring, "Monitoring", "Prometheus/Grafana", "Metrics & Alerts")
-    
+
+    ContainerDb(postgres, "PostgreSQL", "Relational DB", "Nodes, metadata, jobs")
+    ContainerDb(minio, "MinIO", "Object Storage", "CSV files compressed")
+    Container(kafka, "Kafka", "Message Broker", "Import events and status")
+    Container(monitoring, "Monitoring", "Prometheus and Grafana", "Metrics and alerts")
+
     Rel(kafka, consumer, "Delivers messages", "Consumer API")
     Rel(consumer, processor, "Routes payloads", "Sync")
     Rel(processor, jobsvc, "Initiates import", "Async")
-    Rel(jobsvc, filesvc, "File-based path", "Async")
-    Rel(jobsvc, batchsvc, "Reference-based path", "Async")
+    Rel(jobsvc, filesvc, "File based import", "Async")
+    Rel(jobsvc, batchsvc, "Reference list import", "Async")
     Rel(filesvc, minio, "Downloads file", "S3 API")
     Rel(filesvc, storage, "Batches nodes", "Async")
     Rel(batchsvc, storage, "Batches nodes", "Async")
-    Rel(storage, postgres, "COPY + UPSERT", "JDBC")
-    Rel(jobsvc, status, "Update state", "Sync")
+    Rel(storage, postgres, "COPY and upsert", "JDBC")
+    Rel(jobsvc, status, "Update job state", "Sync")
     Rel(status, postgres, "Persist job", "JDBC")
-    Rel(status, kafka, "Publish status", "Producer")
-    Rel(app, monitoring, "Export metrics", "HTTP")
-    
-    UpdateLayoutConfig($c4ShapeInRow="3")
+    Rel(status, kafka, "Publish status", "Producer API")
+    Rel(metrics, monitoring, "Scraped metrics", "HTTP")
+
 ```
 
 ---
@@ -992,7 +992,7 @@ graph TB
   "status": "COMPLETED | FAILED",
   "processed": 98500,
   "total": 100000,
-  "successList": ["ref1", "ref2", "..."],  // Sample or full list
+  "successList": ["ref1", "ref2", "..."],  
   "failedList": ["ref99", "ref100"]
 }
 ```
