@@ -42,7 +42,7 @@ flowchart LR
 
 Key terms 
 --------------------------
-- Node: A single entity you want to match (user/product/resource).
+- Node: A single entity we want to match (user/product/resource).
 - Potential Match: A candidate pairing between two nodes, usually many per node, with a compatibility score.
 - Perfect Match: The best match(es) selected from the candidates based on configured rules.
 - Domain / Group: Logical partitions for multi-tenancy and business segmentation (matching runs per domain+group).
@@ -51,7 +51,7 @@ Key terms
 - Export Artifact: A file containing match outputs in a client-consumable format.
 - Notification Event: A message (Kafka-like) that tells downstream systems “your file is ready” and where to fetch it.
 
-Stage 1 — Nodes Import (getting data in)
+Stage 1 — Nodes Import 
 ----------------------------------------
 Goal: Bring large sets of nodes into PostgreSQL quickly and safely.
 
@@ -210,8 +210,7 @@ In practice:
     - LSH (Locality-Sensitive Hashing) for large-scale similarity detection
     - Metadata-weighted comparisons when metadata keys and weights matter
     - Flat strategy as a simple fallback for small sets or limited metadata
-- Applies pruning (often Top-K per node) to keep results manageable.
-- Stores candidate edges in LMDB (and optionally PostgreSQL depending on implementation).
+- Stores candidate edges in LMDB (and optionally PostgreSQL).
 
 Output:
 - Candidate edges (potential matches) stored where the next stage can read them efficiently (commonly LMDB).
@@ -314,6 +313,7 @@ In practice:
 - Applies the configured algorithm:
     - Symmetric: treat the match relationship as mutual (requires canonicalization to prevent duplicates)
     - Asymmetric: treat matches as directional (one-way preference/selection rules)
+    - pruning (often Top-K per node)
 - Writes final results into PostgreSQL using bulk persistence and deduplication rules.
 
 Output:
@@ -529,7 +529,7 @@ Operational model (how it runs safely)
 
 Links to Design Documents
 ------------------------
-Below are the documents this overview is based on. Replace placeholders with your internal wiki/repo URLs.
+Below are the documents this overview is based on. 
 
 High-Level Designs (HLD)
 - Nodes Import System — HLD  
@@ -551,23 +551,17 @@ Low-Level Designs (LLD)
 - Match Transfer to Client — LLD  
   Link: https://github.com/kagit00/schedule_x/blob/master/docs/Low%20Level%20Designs/MatchesTransfer.md
 
-Suggested reading order (for new engineers)
+Suggested reading order 
 -------------------------------------------
 1) End-to-end overview (this document)
 2) Nodes Import HLD + LLD
 3) Potential Matches HLD + LLD
 4) Perfect Match HLD + LLD
 5) Match Transfer HLD + LLD
-6) Runbooks and dashboards (operational readiness)
 
-Notes and assumptions
+
+Notes 
 ---------------------
-- PostgreSQL is the system of record for nodes and final match outputs.
+- PostgreSQL is the system of record for nodes and match outputs.
 - LMDB is used as a performance layer for edge streaming and may be treated as regenerable depending on implementation.
 - Export files and notifications are the public “delivery contract” for clients/downstream systems.
-
-Document ownership
-------------------
-- Primary owners: Matching Platform Engineering
-- Reviewers: Data Platform, SRE/Operations, Security
-- Update cadence: review after any algorithm change, schema change, or export contract change
