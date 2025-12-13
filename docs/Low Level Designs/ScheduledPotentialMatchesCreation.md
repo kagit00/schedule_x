@@ -608,108 +608,85 @@ flowchart TB
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Sch as "Scheduler"
-    participant JobEx as "Job Executor"
-    participant NodeFetch as "Node Fetch Service"
-    participant DB as "PostgreSQL"
-    participant Svc as "Match Service"
-    participant GraphPre as "Graph Preprocessor"
-    participant Builder as "Graph Builder"
-    participant Queue as "QueueManager"
-    participant Proc as "Computation Processor"
-    participant LMDB as "LMDB Store"
-    participant Storage as "Storage Processor"
+    participant SCH as Scheduler
+    participant EXE as JobExecutor
+    participant FETCH as NodeFetchService
+    participant PG as PostgreSQL
+    participant SVC as MatchService
+    participant PRE as GraphPreprocessor
+    participant BUILDER as GraphBuilder
+    participant QUEUE as QueueManager
+    participant PROC as ComputationProcessor
+    participant LMDB as LMDBStore
+    participant STORE as StorageProcessor
 
-    rect rgba(230, 255, 230, 0.25)
-        Note over Sch,JobEx: Phase 1: Initialization
-        Sch->>Sch: Trigger (11:05 IST)
-        Sch->>Sch: Acquire domainSemaphore
-        Sch->>JobEx: processGroup(groupId, domainId, cycleId)
-    end
+    SCH->>SCH: Scheduled trigger
+    SCH->>SCH: Acquire domain semaphore
+    SCH->>EXE: processGroup(groupId, domainId, cycleId)
 
-    rect rgba(230, 240, 255, 0.25)
-        Note over JobEx,DB: Phase 2: Node Fetching
-        loop Until emptyStreak >= 3
-            JobEx->>NodeFetch: fetchNodeIdsByCursor(groupId, limit=1000)
-            NodeFetch->>DB: SELECT id, createdAt WHERE processed=false LIMIT 1200
-            DB-->>NodeFetch: CursorPage(ids, hasMore, lastCreatedAt, lastId)
+    loop Until empty streak reached
+        EXE->>FETCH: fetchNodeIdsByCursor(groupId, limit)
+        FETCH->>PG: Select unprocessed node ids
+        PG-->>FETCH: Cursor page
+        FETCH-->>EXE: Node id batch
 
-            alt Page not empty
-                JobEx->>Svc: processNodeBatch(nodeIds, request)
-                Svc->>NodeFetch: fetchNodesInBatchesAsync(nodeIds)
-                NodeFetch->>DB: SELECT * WHERE id IN (...)
-                DB-->>NodeFetch: List<Node> with metadata
-                NodeFetch-->>Svc: List<NodeDTO>
-            end
+        alt Batch not empty
+            EXE->>SVC: processNodeBatch(nodeIds)
+            SVC->>FETCH: fetchNodesAsync(nodeIds)
+            FETCH->>PG: Select nodes with metadata
+            PG-->>FETCH: Node records
+            FETCH-->>SVC: Node DTOs
         end
     end
 
-    rect rgba(255, 250, 230, 0.25)
-        Note over Svc,Builder: Phase 3: Graph Building
-        Svc->>GraphPre: buildGraph(nodes, request)
-        GraphPre->>GraphPre: Determine MatchType
-        GraphPre->>Builder: build(nodes, request)
+    SVC->>PRE: buildGraph(nodes)
+    PRE->>PRE: determine match type
+    PRE->>BUILDER: build graph
 
-        Builder->>Builder: Index nodes (LSH/Metadata)
-        Builder->>Builder: Partition into chunks (500 nodes)
+    BUILDER->>BUILDER: index nodes
+    BUILDER->>BUILDER: partition into chunks
 
-        par Parallel Workers (8 concurrent)
-            Builder->>Builder: processBatch(chunk1)
-            Builder->>Builder: processBatch(chunk2)
-            Builder->>Builder: processBatch(chunkN)
-        end
-
-        Builder-->>GraphPre: ChunkResult(matches)
+    par Parallel workers
+        BUILDER->>BUILDER: process chunk
+        BUILDER->>BUILDER: process chunk
+        BUILDER->>BUILDER: process chunk
     end
 
-    rect rgba(250, 240, 255, 0.25)
-        Note over GraphPre,Queue: Phase 4: Queue Management
-        loop For each ChunkResult
-            GraphPre->>Proc: processChunkMatches(chunkResult)
-            Proc->>Queue: enqueue(potentialMatch)
+    BUILDER-->>PRE: chunk match results
 
-            alt Queue size > threshold
-                Queue->>Queue: Auto-flush batch
-                Queue->>Proc: Return batch (500 matches)
-            end
+    loop For each chunk result
+        PRE->>PROC: processChunkMatches
+        PROC->>QUEUE: enqueue match
+
+        alt Queue exceeds threshold
+            QUEUE->>QUEUE: flush batch
+            QUEUE-->>PROC: match batch
         end
     end
 
-    rect rgba(255, 240, 240, 0.25)
-        Note over Proc,Storage: Phase 5: Dual Persistence
-        Proc->>LMDB: persistEdgesAsync(matches)
-        Proc->>Storage: savePotentialMatches(entities)
+    PROC->>LMDB: persist edges async
+    PROC->>STORE: save potential matches
 
-        par Concurrent Writes
-            LMDB->>LMDB: UnifiedWriteOrchestrator
-            LMDB->>LMDB: Batch write (txn)
-
-            Storage->>DB: COPY temp_potential_matches FROM STDIN (BINARY)
-            Storage->>DB: INSERT INTO potential_matches ... ON CONFLICT
-        end
+    par Concurrent persistence
+        LMDB->>LMDB: batch write transaction
+        STORE->>PG: COPY and upsert
     end
 
-    rect rgba(230, 255, 255, 0.25)
-        Note over Sch,Storage: Phase 6: Finalization
-        Sch->>Proc: savePendingMatchesAsync()
-        loop Drain queue
-            Proc->>Queue: drainBatch(2000)
-            Queue-->>Proc: List<PotentialMatch>
-            Proc->>Storage: saveMatchBatch()
-        end
-
-        Sch->>Proc: saveFinalMatches()
-        Proc->>LMDB: streamEdges(domainId, groupId, cycleId)
-        loop Stream edges
-            LMDB-->>Proc: EdgeDTO
-            Proc->>Proc: Buffer until 2000
-            Proc->>Storage: flushFinalBatchAsync()
-        end
-
-        Sch->>Proc: cleanup(groupId)
-        Proc->>Queue: remove(groupId)
-        Sch->>Sch: Release semaphore
+    SCH->>PROC: finalize processing
+    loop Drain remaining queue
+        PROC->>QUEUE: drain batch
+        QUEUE-->>PROC: matches
+        PROC->>STORE: save batch
     end
+
+    PROC->>LMDB: stream final edges
+    loop Stream edges
+        LMDB-->>PROC: edge
+        PROC->>STORE: flush batch
+    end
+
+    PROC->>QUEUE: cleanup group
+    SCH->>SCH: Release semaphore
 
 ```
 
