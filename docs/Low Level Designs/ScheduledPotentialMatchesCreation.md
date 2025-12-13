@@ -1,666 +1,1910 @@
-# **Low-Level Design (LLD) Document: Potential Matches Creation Module**
+# Potential Matches Creation System - Low-Level Design Document
+
+
 
 ---
 
 ## Table of Contents
 
-1. [Overview](#1-overview)
-2. [Requirements](#2-requirements)
-3. [High-Level Architecture](#3-high-level-architecture)
-4. [Component-Level Design](#4-component-level-design)
-5. [Data Flow & Sequence Diagrams](#5-data-flow--sequence-diagrams)
-6. [Class Diagram](#6-class-diagram)
-7. [Concurrency Model](#7-concurrency-model)
-8. [Error Handling & Resilience](#8-error-handling--resilience)
-9. [Persistence Strategy](#9-persistence-strategy)
-10. [Observability & Monitoring](#10-observability--monitoring)
-11. [Performance Considerations](#11-performance-considerations)
-12. [Scalability & Extensibility](#12-scalability--extensibility)
-13. [Testing Strategy](#13-testing-strategy)
-14. [Deployment & Operations](#14-deployment--operations)
-15. [Open Questions & Future Work](#15-open-questions--future-work)
+1. [System Overview](#1-system-overview)
+2. [Architecture Design](#2-architecture-design)
+3. [Component Design](#3-component-design)
+4. [Data Flow Architecture](#4-data-flow-architecture)
+5. [Concurrency & Threading Model](#5-concurrency--threading-model)
+6. [Graph Processing Engine](#6-graph-processing-engine)
+7. [Storage Architecture](#7-storage-architecture)
+8. [Queue Management System](#8-queue-management-system)
+9. [Performance Optimization](#9-performance-optimization)
+10. [Error Handling & Resilience](#10-error-handling--resilience)
+11. [Monitoring & Observability](#11-monitoring--observability)
 
 ---
 
-## 1. Overview
+## 1. System Overview
 
-The **Potential Matches Creation Module** is a high-throughput, fault-tolerant batch processing system that computes similarity-based matches between large datasets using graph algorithms and metadata-driven weighting.
+### 1.1 Purpose
 
-It processes millions of nodes daily across multiple domains and matching groups, ensuring:
-- No data loss
-- Resume-on-failure capability
-- Controlled concurrency
-- Memory safety via spill-to-disk
-- Final persistence into PostgreSQL with deduplication
+The **Potential Matches Creation System** is a high-throughput, distributed graph processing platform designed to compute compatibility scores between entities (nodes) and persist match relationships. It processes millions of nodes daily using sophisticated edge-building strategies (LSH, metadata-based, flat) and dual storage (LMDB + PostgreSQL).
 
-This document provides a **comprehensive low-level design (LLD)** covering architecture, components, flow, error handling, threading model, and operational concerns.
-
----
-
-## 2. Requirements
-
-### 2.1 Functional Requirements
-
-| ID | Requirement |
-|----|-----------|
-| FR-01 | Run once daily at 11:05 AM IST (`Asia/Kolkata`) |
-| FR-02 | Process all active `Domain`s and their associated `MatchingGroup`s |
-| FR-03 | For each group, compute potential matches from unprocessed nodes only |
-| FR-04 | Use dynamic weight functions based on node metadata schema |
-| FR-05 | Support both symmetric (self-matching) and bipartite (cross-type) matching |
-| FR-06 | Persist intermediate results to disk (LMDB) to prevent OOM |
-| FR-07 | Finalize matches into relational database (PostgreSQL) |
-| FR-08 | Ensure exactly-once semantics per `(groupId, cycleId)` |
-
-### 2.2 Non-Functional Requirements
-
-| ID | Requirement |
-|----|-----------|
-| NFR-01 | Throughput: Handle up to **50M nodes/day** |
-| NFR-02 | Latency: Complete cycle within **<3 hours** |
-| NFR-03 | Reliability: Resume after restart/failure without reprocessing |
-| NFR-04 | Observability: Full metrics + structured logging |
-| NFR-05 | Concurrency: Limit parallel domain execution; serialize per-group |
-| NFR-06 | Fault Tolerance: Retry transient failures with exponential backoff |
-| NFR-07 | Scalability: Horizontally scalable via domain partitioning |
-| NFR-08 | Graceful Shutdown: Flush pending matches before exit |
-
----
-
-## 3. High-Level Architecture
+### 1.2 Key Capabilities
 
 ```mermaid
-graph TD
-    A[Scheduled Trigger] --> B[PotentialMatchesCreationScheduler]
-    B --> C[Discover Domains & Groups]
-    C --> D{For Each Group}
-    D --> E[JobExecutor: Fetch Node IDs by Cursor]
-    E --> F[PotentialMatchService: Hydrate Nodes]
-    F --> G[GraphPreProcessor: Build Graph]
-    G --> H[Symmetric/Bipartite Builder]
-    H --> I[PotentialMatchComputationProcessor]
-    I --> J[QueueManager → In-Memory or LMDB Spill]
-    J --> K[Drain: Save to DB / Stream Final]
-    L[Micrometer] --> M[(Prometheus/Grafana)]
-    N[Logs] --> O[(ELK/Splunk)]
-
-    style A fill:#4CAF50, color:white
-    style K fill:#2196F3, color:white
+mindmap
+  root((Potential Matches<br/>System))
+    Scheduling
+      Cron-based Execution
+      Cursor Pagination
+      Incremental Processing
+    Graph Building
+      Symmetric Graphs
+      Bipartite Graphs
+      LSH Indexing
+      Metadata Weighting
+    Edge Processing
+      LMDB Streaming
+      Batch Computation
+      Queue Management
+      Disk Spillover
+    Persistence
+      PostgreSQL COPY
+      Advisory Locks
+      Final Merging
+      Duplicate Handling
+    Resilience
+      Retry Logic
+      Semaphore Control
+      Backpressure
+      Graceful Shutdown
 ```
 
-### Key Layers:
-1. **Orchestration Layer**: Scheduler, task chaining
-2. **Processing Layer**: Graph building, edge generation
-3. **Buffering Layer**: QueueManager + LMDB spill
-4. **Persistence Layer**: Unified writer → LMDB + PostgreSQL
-5. **Observability Layer**: Metrics, logs, tracing
+### 1.3 System Metrics
+
+| Metric | Current Capacity | Target Scale |
+|--------|------------------|--------------|
+| **Nodes/Group** | 2,500 | 50,000 |
+| **Edges/Second** | 100K | 500K |
+| **Concurrent Domains** | 2 | 5 |
+| **Memory Footprint** | 8GB | 16GB |
+| **Processing Time** | 15 min/group | <10 min/group |
+| **Queue Capacity** | 1M matches | 10M matches |
 
 ---
 
-## 4. Component-Level Design
+## 2. Architecture Design
 
-### 4.1 `PotentialMatchesCreationScheduler`
-
-**Responsibility:** Top-level orchestration of the entire batch cycle.
-
-#### Key Features:
-- Uses `@Scheduled(cron = "0 5 11 * * *", zone = "Asia/Kolkata")`
-- Limits concurrent domains via `Semaphore(maxConcurrentDomains)`
-- Prevents overlapping group executions using `groupLocks: Map<UUID, CompletableFuture>`
-- Emits metrics for total duration and timeouts
-- Handles cleanup post-cycle
-
-#### State Management:
-```java
-private final Semaphore domainSemaphore;
-private final ConcurrentMap<UUID, CompletableFuture<Void>> groupLocks;
-```
-
-> Ensures max two domains run in parallel, but unlimited groups as long as not conflicting.
-
----
-
-### 4.2 `PotentialMatchesCreationJobExecutor`
-
-**Responsibility:** Iteratively fetches unprocessed node IDs using cursor pagination.
-
-#### Pagination Logic:
-- Queries `nodeRepository.findUnprocessedNodeIdsAndDatesByCursor(...)`
-- Applies overlap (`+200`) to avoid missing records due to clock skew
-- Stops when 3 consecutive empty pages returned
-- Persists cursor after every page
-
-#### Retry Strategy:
-- Retries failed batches up to `max-retries=3`
-- Exponential backoff: `delay = baseDelay * 2^(attempt−1)`
-- Logs retry attempts and warns on max retries reached
-
----
-
-### 4.3 `NodeFetchService`
-
-**Responsibility:** Hydration and state tracking of nodes.
-
-#### Methods:
-| Method | Purpose |
-|------|--------|
-| `fetchNodeIdsByCursor()` | Paginate unprocessed node IDs |
-| `fetchNodesInBatchesAsync()` | Load full node objects from DB |
-| `markNodesAsProcessed()` | Mark processed (idempotent) |
-| `persistCursor()` | Save progress for resume capability |
-
-#### Thread Safety:
-All async methods use dedicated executor (`nodesFetchExecutor`) with timeout protection.
-
----
-
-### 4.4 `PotentialMatchServiceImpl`
-
-**Responsibility:** Coordinate one batch of node processing.
-
-#### Flow:
-1. Partition input into sub-batches (`NODE_FETCH_BATCH_SIZE = 1000`)
-2. Acquire DB semaphore (`permits=4`) before hydration
-3. Resolve `weightFunctionKey` via `WeightFunctionResolver`
-4. Call `graphPreProcessor.buildGraph(...)`
-5. Buffer participation history → flush every 5 pages
-
-#### Async Pipeline:
-Uses `CompletableFuture` chaining:
-```java
-fetchNodes()
-  .thenCompose(processGraph)
-  .whenComplete(logDuration);
-```
-
----
-
-### 4.5 `WeightFunctionResolver`
-
-**Responsibility:** Dynamically determine how to score matches.
-
-#### Algorithm:
-```java
-Set<String> headers = nodeRepo.findDistinctMetadataKeysByGroupId(groupId);
-String key = groupId + "-" + sorted(headers).joining("-");
-```
-
-- Registers new `ConfigurableMetadataWeightFunction` if unknown.
-- Falls back to `"flat"` (equal weights) if no valid keys.
-
-> Enables zero-code-deploy adaptation per tenant/group.
-
----
-
-### 4.6 `GraphPreProcessor`
-
-**Responsibility:** Decide whether to build symmetric or bipartite graph.
-
-#### Routing Logic:
-
-| Condition | Decision |
-|---------|----------|
-| No partition config | Symmetric |
-| Left/right values defined | Bipartite |
-| Type inference: same type? | Symmetric else Bipartite |
-
-Also infers match type from existing edges in LMDB stream.
-
-#### Concurrency Control:
-- `buildSemaphore`: limits simultaneous graph builds (`default=2`)
-- Hard timeout: **45 minutes**
-
----
-
-### 4.7 `SymmetricGraphBuilder`
-
-**Responsibility:** Compute pairwise matches between chunks of nodes.
-
-#### Architecture:
-- Chunks nodes (`chunk-size=500`)
-- Spawns workers (`maxConcurrentWorkers=8`)
-- Each worker runs recursively until done
-- Finalizes via `processor.savePendingMatchesAsync()` → `saveFinalMatches()`
-
-#### Threading:
-Runs on `graphBuildExecutor`. Workers are chained via `CompletableFuture`.
-
----
-
-### 4.8 `PotentialMatchComputationProcessorImp`
-
-**Responsibility:** Core buffering, draining, and finalization logic.
-
-#### Responsibilities:
-| Subsystem | Implementation |
-|--------|----------------|
-| **Enqueue** | Accepts match chunks → stores in `QueueManagerImpl` |
-| **Drain Pending** | Pulls from queue → saves to DB/LMDB |
-| **Final Save** | Streams from LMDB → writes final matches to SQL |
-| **Cleanup** | Removes queue manager on completion |
-| **Metrics** | Tracks timeouts, retries, backpressure |
-
-#### Backpressure:
-Pauses drain if `saveSemaphore.availablePermits() < 4`.
-
-#### Graceful Shutdown:
-Flushes all queues during `@PreDestroy`.
-
----
-
-### 4.9 `GraphStore`
-
-**Responsibility:** Unified interface for reading/writing edges and LSH buckets.
-
-#### Implemented By:
-- `EdgePersistenceFacade` → delegates to orchestrator/reader/cleaner
-- Internally uses `LmdbEnvironment`, `LshBucketManager`, etc.
-
-#### Key Methods:
-```java
-persistEdgesAsync(...)     // → LMDB
-streamEdges(...)           // → Stream from LMDB
-cleanEdges(...)            // Delete prefix
-bulkIngestLSH(...)         // Update LSH tables
-```
-
----
-
-### 4.10 `UnifiedWriteOrchestrator`
-
-**Responsibility:** Single-threaded writer for thread-safe LMDB access.
-
-#### Why Needed?
-- LMDB requires single-writer semantics per process
-- Avoids MDB_BAD_RSLOT errors
-
-#### How It Works:
-- `BlockingQueue<WriteRequest>` with capacity `10,000`
-- Dedicated thread pulls and batches writes
-- Processes both edge and LSH updates
-- Retries failed transactions up to 3 times
-
-#### Request Types:
-- `EdgeWriteRequest`
-- `LshWriteRequest`
-
-Each returns `CompletableFuture<Void>` for caller notification.
-
----
-
-### 4.11 `PotentialMatchSaver` & `StorageProcessor`
-
-**Responsibility:** Final persistence into PostgreSQL.
-
-#### Strategy:
-- Use temporary table + binary `COPY FROM STDIN`
-- Merge into main table using `ON CONFLICT DO UPDATE`
-
-#### Transaction Safety:
-- Advisory lock per `groupId` prevents race conditions
-- Session tuning: `statement_timeout`, `lock_timeout`, `synchronous_commit=off`
-
-#### Binary Copy Format:
-Efficient streaming format avoids JSON/string parsing overhead.
-
----
-
-## 5. Data Flow & Sequence Diagrams
-
-### 5.1 End-to-End Batch Cycle
+### 2.1 Layered Architecture
 
 ```mermaid
-sequenceDiagram
-    participant Scheduler
-    participant JobExec
-    participant NodeFetch
-    participant MatchSvc
-    participant GraphBuilder
-    participant Processor
-    participant Queue
-    participant LMDB
-    participant Postgres
-
-    Scheduler->>JobExec: processGroup(groupId, domainId)
-    JobExec->>NodeFetch: fetchNodeIdsByCursor()
-    NodeFetch-->>JobExec: List~UUID~
-    JobExec->>NodeFetch: fetchNodesInBatchesAsync()
-    NodeFetch-->>MatchSvc: List~NodeDTO~
-
-    MatchSvc->>WeightResolver: resolveKey()
-    MatchSvc->>GraphPreProc: buildGraph(nodes)
-    alt Symmetric Match
-        GraphPreProc->>SymmetricBuilder: build(...)
-        SymmetricBuilder->>Strategy: processBatch()
-        Strategy->>Processor: processChunkMatches()
-        Processor->>Queue: enqueue(match)
-        Queue->>LMDB: spill via UnifiedWriter
+graph TB
+    subgraph "Presentation Layer"
+        A1[Scheduled Trigger<br/>@Scheduled Cron]
+        A2[Manual Trigger API<br/>Future]
     end
-
-    loop Periodically
-        Processor->>Processor: drainAndSaveRecursively()
-        Processor->>Postgres: saveMatchesAsync(batch)
+    
+    subgraph "Orchestration Layer"
+        B1[PotentialMatchesCreationScheduler]
+        B2[PotentialMatchesCreationJobExecutor]
+        B3[MatchesCreationFinalizer]
     end
-
-    Scheduler->>Processor: saveFinalMatches()
-    Processor->>LMDB: streamEdges(groupId)
-    LMDB-->>Processor: Edge stream
-    Processor->>Postgres: saveAndFinalizeMatches() via COPY + MERGE
-    Postgres-->>Scheduler: Success/Failure
+    
+    subgraph "Service Layer"
+        C1[PotentialMatchService]
+        C2[NodeFetchService]
+        C3[WeightFunctionResolver]
+    end
+    
+    subgraph "Graph Processing Layer"
+        D1[GraphPreProcessor]
+        D2[SymmetricGraphBuilder]
+        D3[BipartiteGraphBuilder]
+        D4[EdgeBuildingStrategy Factory]
+    end
+    
+    subgraph "Computation Layer"
+        E1[PotentialMatchComputationProcessor]
+        E2[QueueManager]
+        E3[EdgeProcessor]
+    end
+    
+    subgraph "Storage Layer"
+        F1[GraphStore]
+        F2[EdgePersistence]
+        F3[PotentialMatchSaver]
+        F4[StorageProcessor]
+    end
+    
+    subgraph "Infrastructure Layer"
+        G1[(LMDB<br/>Edge Cache)]
+        G2[(PostgreSQL<br/>Match Results)]
+        G3[Thread Pools]
+        G4[Semaphore Control]
+    end
+    
+    A1 --> B1
+    B1 --> B2
+    B2 --> C1
+    C1 --> C2
+    C1 --> D1
+    D1 --> D2
+    D1 --> D3
+    D2 --> E1
+    E1 --> E2
+    E1 --> F1
+    F1 --> F2
+    F2 --> G1
+    E1 --> F3
+    F3 --> F4
+    F4 --> G2
+    
+    B1 -.-> G4
+    E1 -.-> G3
+    
+    style A1 fill:#4CAF50
+    style B1 fill:#2196F3
+    style C1 fill:#FF9800
+    style D1 fill:#9C27B0
+    style E1 fill:#F44336
+    style F1 fill:#00BCD4
+    style G1 fill:#795548
 ```
 
----
-
-### 5.2 Final Save Sequence
+### 2.2 System Context Diagram
 
 ```mermaid
-sequenceDiagram
-    participant Processor
-    participant LMDB
-    participant Postgres
-    participant StorageProc
+C4Context
+    title System Context - Potential Matches Creation System
+    
+    Person(ops, "Operations Team", "Monitors & operates system")
+    Person(bizuser, "Business Applications", "Consumes match results")
+    
+    System(pms, "Potential Matches System", "Computes entity compatibility matches")
+    
+    System_Ext(nodeingest, "Node Ingestion Service", "Adds nodes to system")
+    SystemDb_Ext(postgres, "PostgreSQL", "Master data store")
+    SystemDb_Ext(lmdb, "LMDB Store", "High-performance edge cache")
+    System_Ext(monitoring, "Monitoring Stack", "Prometheus + Grafana")
+    System_Ext(scheduler, "Spring Scheduler", "Cron-based triggers")
+    
+    Rel(scheduler, pms, "Triggers daily")
+    Rel(nodeingest, postgres, "Writes nodes")
+    Rel(pms, postgres, "Reads nodes, Writes matches")
+    Rel(pms, lmdb, "Writes/Reads edges")
+    Rel(pms, monitoring, "Exports metrics")
+    Rel(ops, monitoring, "Views dashboards")
+    Rel(bizuser, postgres, "Queries matches")
+    
+    UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="2")
+```
 
-    Processor->>Processor: performStreamingFinalSave()
-    Processor->>LMDB: streamEdges(domainId, groupId)
-    LMDB-->>Processor: Iterator<EdgeDTO>
-    loop For each batch
-        Processor->>StorageProc: saveAndFinalizeMatches(batch)
-        StorageProc->>Postgres: COPY INTO temp_table
-        StorageProc->>Postgres: MERGE INTO public.potential_matches
+### 2.3 Component Interaction Overview
+
+```mermaid
+graph TB
+    subgraph "Phase 1: Initialization"
+        P1A[Scheduler Trigger] --> P1B[Get Tasks to Process]
+        P1B --> P1C[Acquire Domain Semaphore]
     end
-    Processor->>LMDB: cleanEdges(groupId)
-    Processor->>Scheduler: Done
+    
+    subgraph "Phase 2: Node Fetching"
+        P2A[Cursor-based Pagination] --> P2B[Fetch Node Batch 1000]
+        P2B --> P2C[Hydrate Node Metadata]
+        P2C --> P2D[Mark as Processed]
+    end
+    
+    subgraph "Phase 3: Graph Building"
+        P3A[Determine Match Type] --> P3B{Symmetric?}
+        P3B -->|Yes| P3C[Symmetric Builder]
+        P3B -->|No| P3D[Bipartite Builder]
+        P3C --> P3E[Chunk into 500-node batches]
+        P3D --> P3E
+        P3E --> P3F[Parallel Edge Computation]
+    end
+    
+    subgraph "Phase 4: Edge Processing"
+        P4A[PotentialMatch Objects] --> P4B[Enqueue to QueueManager]
+        P4B --> P4C{Queue Full?}
+        P4C -->|Yes| P4D[Spill to Disk]
+        P4C -->|No| P4E[Keep in Memory]
+        P4D --> P4F[Flush Batch 500]
+        P4E --> P4F
+    end
+    
+    subgraph "Phase 5: Dual Persistence"
+        P5A[Batch Ready] --> P5B[Save to LMDB]
+        P5A --> P5C[Save to PostgreSQL]
+        P5B --> P5D[UnifiedWriteOrchestrator]
+        P5C --> P5E[StorageProcessor COPY]
+    end
+    
+    subgraph "Phase 6: Finalization"
+        P6A[Drain Pending Queue] --> P6B[Final Save Stream]
+        P6B --> P6C[LMDB → PostgreSQL]
+        P6C --> P6D[Update Job Status]
+        P6D --> P6E[Cleanup & Release]
+    end
+    
+    P1C --> P2A
+    P2D --> P3A
+    P3F --> P4A
+    P4F --> P5A
+    P5E --> P6A
+    
+    style P1A fill:#E8F5E9
+    style P2A fill:#E3F2FD
+    style P3A fill:#FFF9C4
+    style P4A fill:#F3E5F5
+    style P5A fill:#FFEBEE
+    style P6A fill:#E0F2F1
 ```
 
 ---
 
-## 6. Class Diagram
+## 3. Component Design
+
+### 3.1 Scheduler Component
 
 ```mermaid
 classDiagram
-
     class PotentialMatchesCreationScheduler {
-        -domainService
-        -matchingGroupRepository
-        -jobExecutor
-        -processor
-        -meterRegistry
-        -domainSemaphore
-        -groupLocks
-        +processAllDomainsScheduled()
+        -DomainService domainService
+        -MatchingGroupRepository matchingGroupRepository
+        -PotentialMatchesCreationJobExecutor jobExecutor
+        -PotentialMatchComputationProcessor processor
+        -Semaphore domainSemaphore
+        -ConcurrentMap~UUID,CompletableFuture~ groupLocks
+        -ExecutorService batchExecutor
+        -int maxFinalBatchSize
+        -long scheduleDelay
+        +processAllDomainsScheduled() void
+        -processGroupTask(GroupTaskRequest) CompletableFuture
+        -executeGroupTaskChain(GroupTaskRequest) CompletableFuture
+        -handleCycleCompletion(String, List, Throwable) void
+        -acquireSemaphoreAsync(Semaphore, UUID) CompletableFuture
+        -cleanupIdleGroupLocks() void
     }
+    
+    class GroupTaskRequest {
+        +Domain domain
+        +UUID groupId
+        +String cycleId
+    }
+    
+    class Semaphore {
+        <<Java Concurrency>>
+        +tryAcquire(long, TimeUnit) boolean
+        +release() void
+    }
+    
+    class CompletableFuture~Void~ {
+        <<Java Async>>
+        +thenCompose(Function) CompletableFuture
+        +whenCompleteAsync(BiConsumer, Executor) CompletableFuture
+        +exceptionally(Function) CompletableFuture
+    }
+    
+    PotentialMatchesCreationScheduler --> "1" Semaphore : domainSemaphore
+    PotentialMatchesCreationScheduler --> "*" GroupTaskRequest : processes
+    PotentialMatchesCreationScheduler ..> CompletableFuture : uses
+```
 
+**Responsibility Matrix**:
+
+| Responsibility | Implementation | Rationale |
+|----------------|----------------|-----------|
+| **Job Scheduling** | `@Scheduled` annotation with cron | Spring-managed, reliable timing |
+| **Concurrency Control** | Semaphore (permits=2) | Limit concurrent domain processing |
+| **Task Distribution** | `CompletableFuture` chains | Async, non-blocking execution |
+| **Group Serialization** | `ConcurrentMap` of futures | Prevent concurrent processing of same group |
+| **Resource Cleanup** | `cleanupIdleGroupLocks()` | Remove completed futures from map |
+
+**Processing Flow**:
+
+```mermaid
+sequenceDiagram
+    participant Cron as Spring Scheduler
+    participant Sch as Scheduler
+    participant Sem as Domain Semaphore
+    participant Exec as Job Executor
+    participant Proc as Computation Processor
+    
+    Cron->>Sch: Trigger (11:05 IST)
+    Sch->>Sch: Get Active Domains & Groups
+    
+    loop For Each Group
+        Sch->>Sch: Check groupLocks map
+        alt Group Already Processing
+            Sch->>Sch: Chain to existing future
+        else Group Idle
+            Sch->>Sem: tryAcquire(120 min)
+            alt Semaphore Acquired
+                Sem-->>Sch: Success
+                Sch->>Exec: processGroup(groupId, domainId, cycleId)
+                
+                Exec->>Exec: Fetch nodes in batches
+                Exec->>Exec: Process batch with retries
+                Exec-->>Sch: Batch complete
+                
+                Sch->>Proc: savePendingMatchesAsync()
+                Proc-->>Sch: Queue drained
+                
+                Sch->>Proc: saveFinalMatches()
+                Proc-->>Sch: Final save complete
+                
+                Sch->>Proc: cleanup(groupId)
+                Sch->>Sem: release()
+            else Timeout
+                Sem-->>Sch: TimeoutException
+                Sch->>Sch: Log error, skip group
+            end
+        end
+    end
+    
+    Sch->>Sch: cleanupIdleGroupLocks()
+    Sch->>Cron: Cycle complete
+```
+
+### 3.2 Job Executor Component
+
+```mermaid
+classDiagram
     class PotentialMatchesCreationJobExecutor {
-        -potentialMatchService
-        -nodeFetchService
-        +processGroup()
+        -PotentialMatchService potentialMatchService
+        -NodeFetchService nodeFetchService
+        -MeterRegistry meterRegistry
+        -ExecutorService batchExecutor
+        -int batchLimit
+        -int maxRetries
+        -long retryDelayMillis
+        -int EMPTY_BATCH_TOLERANCE
+        +processGroup(UUID, UUID, String) CompletableFuture
+        -processGroupRecursive(UUID, UUID, String, int) CompletableFuture
+        -processPageWithRetries(UUID, UUID, String, List) CompletableFuture
+        -processPageAttempt(UUID, UUID, String, List, int) CompletableFuture
     }
-
+    
     class NodeFetchService {
-        +fetchNodeIdsByCursor()
-        +fetchNodesInBatchesAsync()
-        +markNodesAsProcessed()
-        +persistCursor()
+        -NodeRepository nodeRepository
+        -NodesCursorRepository nodesCursorRepository
+        -int BATCH_OVERLAP
+        +fetchNodeIdsByCursor(UUID, UUID, int, String) CompletableFuture~CursorPage~
+        +fetchNodesInBatchesAsync(List~UUID~, UUID, LocalDateTime) CompletableFuture~List~NodeDTO~~
+        +markNodesAsProcessed(List~UUID~, UUID) void
+        +persistCursor(UUID, UUID, OffsetDateTime, UUID) void
     }
+    
+    class CursorPage {
+        +List~UUID~ ids
+        +boolean hasMore
+        +LocalDateTime lastCreatedAt
+        +UUID lastId
+    }
+    
+    class PotentialMatchService {
+        <<interface>>
+        +processNodeBatch(List~UUID~, MatchingRequest) CompletableFuture~NodesCount~
+    }
+    
+    PotentialMatchesCreationJobExecutor --> NodeFetchService
+    PotentialMatchesCreationJobExecutor --> PotentialMatchService
+    NodeFetchService ..> CursorPage : returns
+```
 
+**Cursor-Based Pagination Strategy**:
+
+```mermaid
+flowchart TB
+    A[Start] --> B[Load Cursor Position<br/>createdAt, nodeId]
+    B --> C{Cursor Exists?}
+    C -->|No| D[Fetch from beginning<br/>WHERE processed=false]
+    C -->|Yes| E[Fetch with overlap<br/>createdAt > cursor OR<br/>createdAt = cursor AND id > cursorId]
+    
+    D --> F[Fetch LIMIT 1000 + 200]
+    E --> F
+    
+    F --> G{Result Size}
+    G -->|<= 1000| H[Process all<br/>hasMore=false]
+    G -->|> 1000| I[Process first 1000<br/>hasMore=true]
+    
+    H --> J[Update Cursor<br/>to last item]
+    I --> K[Update Cursor<br/>to item 1000]
+    
+    J --> L[Mark Nodes Processed]
+    K --> L
+    
+    L --> M{hasMore?}
+    M -->|Yes| B
+    M -->|No| N[End]
+    
+    style A fill:#4CAF50
+    style F fill:#2196F3
+    style L fill:#FF9800
+    style N fill:#4CAF50
+```
+
+**Why Overlapping Window?**
+- **Prevents Data Loss**: Concurrent inserts with same `createdAt` won't be skipped
+- **Idempotency**: Duplicate processing handled by `processed=false` filter
+- **Safety Margin**: 200-node overlap ensures completeness
+
+### 3.3 Service Layer Component
+
+```mermaid
+classDiagram
     class PotentialMatchServiceImpl {
-        +processNodeBatch()
-        -fetchNodesInSubBatches()
-        -processGraphAndMatches()
+        -NodeFetchService nodeFetchService
+        -WeightFunctionResolver weightFunctionResolver
+        -GraphPreProcessor graphPreProcessor
+        -int NODE_FETCH_BATCH_SIZE
+        -int HISTORY_FLUSH_INTERVAL
+        -Semaphore dbFetchSemaphore
+        -ConcurrentLinkedQueue~MatchParticipationHistory~ historyBuffer
+        +processNodeBatch(List~UUID~, MatchingRequest) CompletableFuture~NodesCount~
+        -fetchNodesInSubBatches(List~UUID~, UUID, LocalDateTime) CompletableFuture~List~NodeDTO~~
+        -processGraphAndMatches(List~NodeDTO~, MatchingRequest, UUID, String) CompletableFuture
+        -bufferMatchParticipationHistory(List~NodeDTO~, UUID, UUID, String) void
+        -flushHistoryIfNeeded() void
+        -acquireDbSemaphore() CompletableFuture
     }
-
+    
     class WeightFunctionResolver {
-        +resolveWeightFunctionKey()
+        -NodeRepository nodeRepository
+        +resolveWeightFunctionKey(UUID) String
     }
-
+    
     class GraphPreProcessor {
-        +buildGraph()
-        +determineMatchTypeFromExistingData()
+        -SymmetricGraphBuilderService symmetricGraphBuilder
+        -BipartiteGraphBuilderService bipartiteGraphBuilder
+        -PartitionStrategy partitionStrategy
+        -Semaphore buildSemaphore
+        +buildGraph(List~NodeDTO~, MatchingRequest) CompletableFuture~GraphResult~
+        +inferMatchType(List~NodeDTO~, List~NodeDTO~) MatchType
+        +determineMatchTypeFromExistingData(UUID, UUID, String) MatchType
+        -acquireAndBuildAsync(UUID, Supplier) CompletableFuture
     }
+    
+    PotentialMatchServiceImpl --> WeightFunctionResolver
+    PotentialMatchServiceImpl --> GraphPreProcessor
+```
 
+**Node Fetching Optimization**:
+
+```mermaid
+graph LR
+    A[1000 Node IDs] -->|Partition| B1[Batch 1<br/>IDs 1-1000]
+    
+    B1 -->|Acquire Semaphore<br/>Permits: 4| C1[DB Query 1]
+    
+    C1 -->|Hydrate| D1[NodeDTO List 1]
+    
+    D1 -->|Release Semaphore| E[Merge Results]
+    
+    E --> F[Complete List<br/>1000 NodeDTOs]
+    
+    style A fill:#E3F2FD
+    style C1 fill:#FFF9C4
+    style E fill:#C8E6C9
+    style F fill:#4CAF50
+```
+
+**Semaphore Strategy**:
+- **Purpose**: Limit concurrent database queries to prevent connection pool exhaustion
+- **Permits**: 4 (tunable)
+- **Timeout**: 60 seconds per query
+- **Benefits**: Prevents thundering herd, maintains predictable load
+
+---
+
+## 4. Data Flow Architecture
+
+### 4.1 End-to-End Data Flow
+
+```mermaid
+flowchart TB
+    subgraph "1. Initialization Phase"
+        A1[Cron Trigger<br/>11:05 IST] --> A2[Get Active Domains]
+        A2 --> A3[Get Groups per Domain]
+        A3 --> A4[Generate CycleId<br/>UUID]
+    end
+    
+    subgraph "2. Cursor Management"
+        B1[Load NodesCursor<br/>groupId + domainId]
+        B2{Cursor Exists?}
+        B3[Start from Beginning]
+        B4[Resume from Position<br/>createdAt + nodeId]
+    end
+    
+    subgraph "3. Node Fetching"
+        C1[Query: SELECT id<br/>WHERE processed=false<br/>AND createdAt > cursor<br/>LIMIT 1200]
+        C2[Fetch Node Metadata<br/>Batch 1000 IDs]
+        C3[Hydrate NodeDTO Objects]
+    end
+    
+    subgraph "4. Graph Building"
+        D1[Determine MatchType<br/>Symmetric/Bipartite]
+        D2[Select Edge Strategy<br/>LSH/Metadata/Flat]
+        D3[Partition into Chunks<br/>500 nodes/chunk]
+        D4[Parallel Edge Computation<br/>8 concurrent workers]
+    end
+    
+    subgraph "5. Queue Management"
+        E1[PotentialMatch Objects]
+        E2{Queue Size<br/>> 1M?}
+        E3[Memory Queue]
+        E4[Spill to Disk]
+        E5[Flush Batch 500]
+    end
+    
+    subgraph "6. Dual Persistence"
+        F1[LMDB Write<br/>UnifiedWriteOrchestrator]
+        F2[PostgreSQL Write<br/>StorageProcessor]
+        F3[Binary COPY Protocol]
+        F4[Temp Table Merge]
+    end
+    
+    subgraph "7. Finalization"
+        G1[Drain Queue<br/>savePendingMatchesAsync]
+        G2[Stream LMDB → SQL<br/>saveFinalMatches]
+        G3[Mark Nodes Processed]
+        G4[Update Cursor Position]
+        G5[Release Semaphores]
+    end
+    
+    A4 --> B1
+    B1 --> B2
+    B2 -->|No| B3
+    B2 -->|Yes| B4
+    B3 --> C1
+    B4 --> C1
+    
+    C1 --> C2
+    C2 --> C3
+    C3 --> D1
+    
+    D1 --> D2
+    D2 --> D3
+    D3 --> D4
+    D4 --> E1
+    
+    E1 --> E2
+    E2 -->|Yes| E4
+    E2 -->|No| E3
+    E3 --> E5
+    E4 --> E5
+    
+    E5 --> F1
+    E5 --> F2
+    F2 --> F3
+    F3 --> F4
+    
+    F4 --> G1
+    G1 --> G2
+    G2 --> G3
+    G3 --> G4
+    G4 --> G5
+    
+    style A1 fill:#E8F5E9
+    style D4 fill:#FFF9C4
+    style E5 fill:#F3E5F5
+    style F3 fill:#FFEBEE
+    style G5 fill:#C8E6C9
+```
+
+### 4.2 Detailed Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Sch as Scheduler
+    participant JobEx as Job Executor
+    participant NodeFetch as Node Fetch Service
+    participant DB as PostgreSQL
+    participant Svc as Match Service
+    participant GraphPre as Graph Preprocessor
+    participant Builder as Graph Builder
+    participant Queue as QueueManager
+    participant Proc as Computation Processor
+    participant LMDB as LMDB Store
+    participant Storage as Storage Processor
+    
+    rect rgb(230, 255, 230)
+        Note over Sch,JobEx: Phase 1: Initialization
+        Sch->>Sch: Trigger (11:05 IST)
+        Sch->>Sch: Acquire domainSemaphore
+        Sch->>JobEx: processGroup(groupId, domainId, cycleId)
+    end
+    
+    rect rgb(230, 240, 255)
+        Note over JobEx,DB: Phase 2: Node Fetching
+        loop Until emptyStreak >= 3
+            JobEx->>NodeFetch: fetchNodeIdsByCursor(groupId, limit=1000)
+            NodeFetch->>DB: SELECT id, createdAt WHERE processed=false LIMIT 1200
+            DB-->>NodeFetch: CursorPage(ids, hasMore, lastCreatedAt, lastId)
+            
+            alt Page not empty
+                JobEx->>Svc: processNodeBatch(nodeIds, request)
+                Svc->>NodeFetch: fetchNodesInBatchesAsync(nodeIds)
+                NodeFetch->>DB: SELECT * WHERE id IN (...)
+                DB-->>NodeFetch: List<Node> with metadata
+                NodeFetch-->>Svc: List<NodeDTO>
+            end
+        end
+    end
+    
+    rect rgb(255, 250, 230)
+        Note over Svc,Builder: Phase 3: Graph Building
+        Svc->>GraphPre: buildGraph(nodes, request)
+        GraphPre->>GraphPre: Determine MatchType
+        GraphPre->>Builder: build(nodes, request)
+        
+        Builder->>Builder: Index nodes (LSH/Metadata)
+        Builder->>Builder: Partition into chunks (500 nodes)
+        
+        par Parallel Workers (8 concurrent)
+            Builder->>Builder: processBatch(chunk1)
+            Builder->>Builder: processBatch(chunk2)
+            Builder->>Builder: processBatch(chunkN)
+        end
+        
+        Builder-->>GraphPre: ChunkResult(matches)
+    end
+    
+    rect rgb(250, 240, 255)
+        Note over GraphPre,Queue: Phase 4: Queue Management
+        loop For each ChunkResult
+            GraphPre->>Proc: processChunkMatches(chunkResult)
+            Proc->>Queue: enqueue(potentialMatch)
+            
+            alt Queue size > threshold
+                Queue->>Queue: Auto-flush batch
+                Queue->>Proc: Return batch (500 matches)
+            end
+        end
+    end
+    
+    rect rgb(255, 240, 240)
+        Note over Proc,Storage: Phase 5: Dual Persistence
+        Proc->>LMDB: persistEdgesAsync(matches)
+        Proc->>Storage: savePotentialMatches(entities)
+        
+        par Concurrent Writes
+            LMDB->>LMDB: UnifiedWriteOrchestrator
+            LMDB->>LMDB: Batch write (txn)
+            
+            Storage->>DB: COPY temp_potential_matches FROM STDIN (BINARY)
+            Storage->>DB: INSERT INTO potential_matches ... ON CONFLICT
+        end
+    end
+    
+    rect rgb(230, 255, 255)
+        Note over Sch,Storage: Phase 6: Finalization
+        Sch->>Proc: savePendingMatchesAsync()
+        loop Drain queue
+            Proc->>Queue: drainBatch(2000)
+            Queue-->>Proc: List<PotentialMatch>
+            Proc->>Storage: saveMatchBatch()
+        end
+        
+        Sch->>Proc: saveFinalMatches()
+        Proc->>LMDB: streamEdges(domainId, groupId, cycleId)
+        loop Stream edges
+            LMDB-->>Proc: EdgeDTO
+            Proc->>Proc: Buffer until 2000
+            Proc->>Storage: flushFinalBatchAsync()
+        end
+        
+        Sch->>Proc: cleanup(groupId)
+        Proc->>Queue: remove(groupId)
+        Sch->>Sch: Release semaphore
+    end
+```
+
+---
+
+## 5. Concurrency & Threading Model
+
+### 5.1 Thread Pool Architecture
+
+```mermaid
+graph TB
+    subgraph "Scheduler Thread Pool"
+        ST[Spring Scheduler<br/>Single Thread]
+    end
+    
+    subgraph "Match Creation Executor"
+        MCE[ThreadPoolExecutor<br/>matchCreationExecutorService]
+        MCE1[match-create-1]
+        MCE2[match-create-2]
+        MCEN[match-create-N]
+        MCE --> MCE1
+        MCE --> MCE2
+        MCE --> MCEN
+    end
+    
+    subgraph "Graph Build Executor"
+        GBE[ThreadPoolExecutor<br/>graphBuildExecutor]
+        GBE1[graph-build-1]
+        GBE2[graph-build-2]
+        GBEN[graph-build-N]
+        GBE --> GBE1
+        GBE --> GBE2
+        GBE --> GBEN
+    end
+    
+    subgraph "Nodes Fetch Executor"
+        NFE[Executor<br/>nodesFetchExecutor]
+        NFE1[fetch-1]
+        NFE2[fetch-2]
+        NFEN[fetch-N]
+        NFE --> NFE1
+        NFE --> NFE2
+        NFE --> NFEN
+    end
+    
+    subgraph "Persistence Executor"
+        PE[ExecutorService<br/>persistenceExecutor]
+        PE1[persist-1]
+        PE2[persist-2]
+        PEN[persist-N]
+        PE --> PE1
+        PE --> PE2
+        PE --> PEN
+    end
+    
+    subgraph "Storage Executor"
+        SE[ExecutorService<br/>matchesStorageExecutor]
+        SE1[storage-1]
+        SE2[storage-2]
+        SEN[storage-N]
+        SE --> SE1
+        SE --> SE2
+        SE --> SEN
+    end
+    
+    subgraph "I/O Executor"
+        IOE[ExecutorService<br/>ioExecutorService]
+        IOE1[io-1]
+        IOE2[io-2]
+        IOEN[io-N]
+        IOE --> IOE1
+        IOE --> IOE2
+        IOE --> IOEN
+    end
+    
+    ST -->|Submit Tasks| MCE
+    MCE1 -->|Fetch Nodes| NFE
+    MCE2 -->|Build Graph| GBE
+    GBE1 -->|Process Chunks| PE
+    PE1 -->|Save to LMDB/SQL| SE
+    SE1 -->|DB Operations| IOE
+    
+    style ST fill:#4CAF50
+    style MCE fill:#2196F3
+    style GBE fill:#FF9800
+    style NFE fill:#9C27B0
+    style PE fill:#F44336
+    style SE fill:#00BCD4
+    style IOE fill:#795548
+```
+
+### 5.2 Semaphore Control Flow
+
+```mermaid
+stateDiagram-v2
+    [*] --> TaskSubmitted: Group Processing Request
+    
+    TaskSubmitted --> WaitingDomainSem: Check Domain Semaphore
+    
+    WaitingDomainSem --> DomainAcquired: tryAcquire(120 min)
+    WaitingDomainSem --> DomainTimeout: Timeout
+    DomainTimeout --> [*]: Log Error & Skip
+    
+    DomainAcquired --> FetchingNodes: Start Node Fetching
+    
+    FetchingNodes --> WaitingDbSem: Query Database
+    WaitingDbSem --> DbAcquired: tryAcquire(60 sec)
+    WaitingDbSem --> DbTimeout: Timeout
+    DbTimeout --> FetchingNodes: Retry
+    
+    DbAcquired --> ProcessingBatch: Hydrate Nodes
+    ProcessingBatch --> ReleasingDbSem: Complete
+    ReleasingDbSem --> BuildingGraph: Release DB Semaphore
+    
+    BuildingGraph --> WaitingBuildSem: Acquire Build Semaphore
+    WaitingBuildSem --> BuildAcquired: tryAcquire(60 sec)
+    WaitingBuildSem --> BuildTimeout: Timeout
+    BuildTimeout --> BuildingGraph: Retry
+    
+    BuildAcquired --> ComputingEdges: Parallel Workers
+    ComputingEdges --> ReleasingBuildSem: Complete
+    ReleasingBuildSem --> QueuingMatches: Release Build Semaphore
+    
+    QueuingMatches --> WaitingStorageSem: Save Batch
+    WaitingStorageSem --> StorageAcquired: acquire()
+    
+    StorageAcquired --> SavingToDB: PostgreSQL COPY
+    SavingToDB --> ReleasingStorageSem: Complete
+    ReleasingStorageSem --> CheckMoreNodes: Release Storage Semaphore
+    
+    CheckMoreNodes --> FetchingNodes: Has More Nodes
+    CheckMoreNodes --> Finalizing: No More Nodes
+    
+    Finalizing --> DrainingQueue: savePendingMatches
+    DrainingQueue --> StreamingSave: saveFinalMatches
+    StreamingSave --> ReleasingDomainSem: Cleanup
+    ReleasingDomainSem --> [*]: Release Domain Semaphore
+```
+
+### 5.3 Semaphore Configuration
+
+```mermaid
+graph LR
+    subgraph "Application Level"
+        DS[Domain Semaphore<br/>Permits: 2<br/>Timeout: 120 min]
+        GS[Graph Build Semaphore<br/>Permits: 2<br/>Timeout: 60 sec]
+    end
+    
+    subgraph "Service Level"
+        DBS[DB Fetch Semaphore<br/>Permits: 4<br/>Timeout: 60 sec]
+        STS[Storage Semaphore<br/>Permits: 16<br/>Timeout: None]
+    end
+    
+    subgraph "Resource Protection"
+        CP[Connection Pool<br/>Max: 20<br/>Min Idle: 5]
+        TP[Thread Pools<br/>Various Sizes]
+    end
+    
+    DS -.->|Controls| DBS
+    DBS -.->|Protects| CP
+    GS -.->|Controls| STS
+    STS -.->|Uses| TP
+    
+    style DS fill:#FFCDD2
+    style DBS fill:#F8BBD0
+    style STS fill:#E1BEE7
+    style CP fill:#C5CAE9
+```
+
+**Semaphore Hierarchy**:
+
+| Semaphore | Permits | Purpose | Timeout | Scope |
+|-----------|---------|---------|---------|-------|
+| **domainSemaphore** | 2 | Limit concurrent domains | 120 min | Scheduler |
+| **buildSemaphore** | 2 | Limit concurrent graph builds | 60 sec | GraphPreProcessor |
+| **dbFetchSemaphore** | 4 | Prevent DB connection exhaustion | 60 sec | PotentialMatchService |
+| **storageSemaphore** | 16 | Limit concurrent DB writes | None | StorageProcessor |
+
+---
+
+## 6. Graph Processing Engine
+
+### 6.1 Graph Builder Architecture
+
+```mermaid
+classDiagram
     class SymmetricGraphBuilder {
-        +build()
-        -runWorkerChain()
+        -SymmetricEdgeBuildingStrategyFactory strategyFactory
+        -PotentialMatchComputationProcessor processor
+        -ExecutorService computeExecutor
+        -int chunkSize
+        -int maxConcurrentWorkers
+        -int matchBatchSize
+        -int topK
+        +build(List~NodeDTO~, MatchingRequest) CompletableFuture~GraphResult~
+        -finalizeBuild(MatchingRequest, CompletableFuture) CompletableFuture
+        -startConcurrentWorkers(...) void
+        -runWorkerChain(...) CompletableFuture
     }
-
-    class PotentialMatchComputationProcessorImp {
-        +processChunkMatches()
-        +savePendingMatchesAsync()
-        +saveFinalMatches()
-        +cleanup()
+    
+    class SymmetricEdgeBuildingStrategyFactory {
+        -FlatEdgeBuildingStrategy flatEdgeBuildingStrategy
+        -ObjectProvider~LSHIndex~ lshIndexProvider
+        -MetadataEncoder encoder
+        -EdgeProcessor edgeProcessor
+        +createStrategy(String, List~NodeDTO~) SymmetricEdgeBuildingStrategy
     }
-
-    class GraphStore {
-        +persistEdgesAsync()
-        +streamEdges()
-        +cleanEdges()
-        +bulkIngestLSH()
+    
+    class SymmetricEdgeBuildingStrategy {
+        <<interface>>
+        +indexNodes(List~NodeDTO~, int) CompletableFuture
+        +processBatch(List, List, List, Set, MatchingRequest, Map) void
     }
-
-    class EdgePersistenceFacade {
-        +persistAsync()
-        +enqueueLshChunk()
-        +streamEdges()
+    
+    class FlatEdgeBuildingStrategy {
+        +indexNodes(...) CompletableFuture
+        +processBatch(...) void
     }
-
-    class UnifiedWriteOrchestrator {
-        -queue: BlockingQueue~WriteRequest~
-        +enqueueEdgeWrite()
-        +enqueueLshWrite()
-        +run()
+    
+    class MetadataEdgeBuildingStrategy {
+        -LSHIndex lshIndex
+        -MetadataEncoder encoder
+        -EdgeProcessor edgeProcessor
+        +indexNodes(...) CompletableFuture
+        +processBatch(...) void
     }
-
-    class LmdbEdgeReader {
-        +streamEdges()
+    
+    class TaskIterator {
+        -List~List~NodeDTO~~ allChunks
+        -int totalTasks
+        +getTaskByIndex(int) ChunkTask
+        +getTotalTasks() int
     }
+    
+    SymmetricGraphBuilder --> SymmetricEdgeBuildingStrategyFactory
+    SymmetricEdgeBuildingStrategyFactory ..> SymmetricEdgeBuildingStrategy : creates
+    SymmetricEdgeBuildingStrategy <|.. FlatEdgeBuildingStrategy
+    SymmetricEdgeBuildingStrategy <|.. MetadataEdgeBuildingStrategy
+    SymmetricGraphBuilder ..> TaskIterator : uses
+```
 
-    class LmdbEdgeCleaner {
-        +deleteByPrefix()
-    }
+### 6.2 Strategy Selection Flow
 
-    class DefaultKeyPrefixProvider {
-        +makePrefix()
-        +matchesPrefix()
-    }
+```mermaid
+flowchart TD
+    A[WeightFunctionResolver] --> B[Query Node Metadata Keys]
+    B --> C{Valid Keys Found?}
+    C -->|No| D[Return 'flat']
+    C -->|Yes| E[Generate Weight Key<br/>groupId-key1-key2-...]
+    
+    E --> F{Strategy Exists?}
+    F -->|No| G[Create & Register<br/>ConfigurableMetadataWeightFunction]
+    F -->|Yes| H[Return Existing Key]
+    
+    G --> I[StrategyFactory.createStrategy]
+    H --> I
+    D --> J[FlatEdgeBuildingStrategy]
+    
+    I --> K{Key == 'flat'?}
+    K -->|Yes| J
+    K -->|No| L[MetadataEdgeBuildingStrategy]
+    
+    L --> M[Create LSHIndex]
+    L --> N[Setup MetadataEncoder]
+    L --> O[Configure EdgeProcessor]
+    
+    style A fill:#4CAF50
+    style E fill:#2196F3
+    style J fill:#FF9800
+    style L fill:#9C27B0
+```
 
-    class PotentialMatchSaver {
-        +saveMatchesAsync()
-        +countFinalMatches()
-        +deleteByGroupId()
-    }
+### 6.3 Symmetric Graph Building Process
 
-    class PotentialMatchStorageProcessor {
-        +saveAndFinalizeMatches()
-        +savePotentialMatches()
-        -copyBatchWithCancellation()
-        -withAdvisoryLock()
-    }
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Builder as SymmetricGraphBuilder
+    participant Strategy as EdgeBuildingStrategy
+    participant Iterator as TaskIterator
+    participant Worker as Worker Thread
+    participant Proc as ComputationProcessor
+    participant Queue as QueueManager
+    
+    Builder->>Builder: Partition nodes into chunks (500/chunk)
+    Builder->>Iterator: new TaskIterator(allChunks)
+    
+    Note over Iterator: Calculate cross-product tasks<br/>chunk1×chunk1, chunk1×chunk2, ...
+    
+    Builder->>Strategy: indexNodes(allNodes)
+    
+    alt LSH Strategy
+        Strategy->>Strategy: Encode node metadata
+        Strategy->>Strategy: Generate LSH signatures
+        Strategy->>Strategy: Build bucket index
+    else Flat Strategy
+        Strategy->>Strategy: No indexing needed
+    end
+    
+    Strategy-->>Builder: Indexing complete
+    
+    Builder->>Builder: Spawn 8 concurrent workers
+    
+    par Worker 1
+        Worker->>Iterator: getTaskByIndex(counter++)
+        Iterator-->>Worker: ChunkTask(source, target)
+        Worker->>Strategy: processBatch(source, target)
+        Strategy-->>Worker: List<PotentialMatch>
+        Worker->>Proc: processChunkMatches(matches)
+        Proc->>Queue: enqueue(match)
+        Worker->>Worker: Recursively get next task
+    and Worker 2
+        Worker->>Iterator: getTaskByIndex(counter++)
+        Worker->>Strategy: processBatch(...)
+        Worker->>Proc: processChunkMatches(...)
+    and Worker N
+        Worker->>Iterator: getTaskByIndex(counter++)
+        Worker->>Strategy: processBatch(...)
+        Worker->>Proc: processChunkMatches(...)
+    end
+    
+    Note over Builder,Queue: All tasks complete
+    
+    Builder->>Proc: savePendingMatchesAsync()
+    Proc->>Queue: drainBatch(2000)
+    Queue-->>Proc: Batch
+    Proc->>Proc: Save to LMDB + PostgreSQL
+    
+    Builder->>Proc: saveFinalMatches()
+    Builder->>Builder: Complete future
+```
 
+### 6.4 Cross-Product Task Calculation
+
+```mermaid
+graph TB
+    subgraph "Input: 2000 Nodes"
+        A[Chunk 1<br/>Nodes 1-500]
+        B[Chunk 2<br/>Nodes 501-1000]
+        C[Chunk 3<br/>Nodes 1001-1500]
+        D[Chunk 4<br/>Nodes 1501-2000]
+    end
+    
+    subgraph "Cross-Product Tasks"
+        T1[Task 0: C1 × C1]
+        T2[Task 1: C1 × C2]
+        T3[Task 2: C1 × C3]
+        T4[Task 3: C1 × C4]
+        T5[Task 4: C2 × C2]
+        T6[Task 5: C2 × C3]
+        T7[Task 6: C2 × C4]
+        T8[Task 7: C3 × C3]
+        T9[Task 8: C3 × C4]
+        T10[Task 9: C4 × C4]
+    end
+    
+    A --> T1
+    A --> T2
+    A --> T3
+    A --> T4
+    B --> T5
+    B --> T6
+    B --> T7
+    C --> T8
+    C --> T9
+    D --> T10
+    
+    style A fill:#E3F2FD
+    style B fill:#E3F2FD
+    style C fill:#E3F2FD
+    style D fill:#E3F2FD
+    style T1 fill:#C8E6C9
+    style T5 fill:#C8E6C9
+    style T8 fill:#C8E6C9
+    style T10 fill:#C8E6C9
+```
+
+**Formula**: For N chunks, total tasks = N × (N + 1) / 2
+- 4 chunks → 10 tasks
+- 10 chunks → 55 tasks
+- 20 chunks → 210 tasks
+
+---
+
+## 7. Storage Architecture
+
+### 7.1 Dual Storage Design
+
+```mermaid
+graph TB
+    subgraph "Match Generation"
+        A[PotentialMatch Objects]
+    end
+    
+    subgraph "Write Path"
+        A --> B{Queue Manager}
+        B -->|In-Memory| C[Memory Queue<br/>Capacity: 1M]
+        B -->|Overflow| D[Disk Spill<br/>Temp Files]
+        C --> E[Flush Batch 500]
+        D --> E
+    end
+    
+    subgraph "Dual Persistence"
+        E --> F[LMDB Write]
+        E --> G[PostgreSQL Write]
+    end
+    
+    subgraph "LMDB Storage"
+        F --> H[UnifiedWriteOrchestrator]
+        H --> I[Writer Thread Queue]
+        I --> J[Batch Write Transaction]
+        J --> K[(LMDB Files<br/>Edge Cache)]
+    end
+    
+    subgraph "PostgreSQL Storage"
+        G --> L[StorageProcessor]
+        L --> M[Acquire Advisory Lock]
+        M --> N[CREATE TEMP TABLE]
+        N --> O[COPY Binary Protocol]
+        O --> P[MERGE via INSERT ON CONFLICT]
+        P --> Q[(PostgreSQL<br/>potential_matches)]
+    end
+    
+    subgraph "Final Save Phase"
+        K --> R[Stream Edges]
+        R --> S[Convert to Entities]
+        S --> T[Final Batch Save]
+        T --> Q
+    end
+    
+    style A fill:#4CAF50
+    style E fill:#FF9800
+    style K fill:#2196F3
+    style Q fill:#9C27B0
+    style T fill:#F44336
+```
+
+### 7.2 LMDB Key-Value Structure
+
+```mermaid
+graph LR
+    subgraph "Edge Key Structure"
+        K1[Group ID<br/>16 bytes<br/>UUID] --> K2[Cycle Hash<br/>32 bytes<br/>Murmur3 128-bit]
+        K2 --> K3[Node Pair Hash<br/>32 bytes<br/>Murmur3 sorted]
+    end
+    
+    subgraph "Edge Value Structure"
+        V1[Score<br/>4 bytes<br/>float] --> V2[Domain ID<br/>16 bytes<br/>UUID]
+        V2 --> V3[From Length<br/>4 bytes<br/>int]
+        V3 --> V4[From NodeHash<br/>N bytes<br/>UTF-8]
+        V4 --> V5[To Length<br/>4 bytes<br/>int]
+        V5 --> V6[To NodeHash<br/>M bytes<br/>UTF-8]
+    end
+    
+    K1 -.->|Maps to| V1
+    
+    style K1 fill:#E3F2FD
+    style K2 fill:#E3F2FD
+    style K3 fill:#E3F2FD
+    style V1 fill:#FFF9C4
+    style V2 fill:#FFF9C4
+```
+
+**Key Design Rationale**:
+- **Grouping by groupId**: Efficient prefix scans for cleanup
+- **Cycle Hash**: Isolates processing runs, enables concurrent cycles
+- **Sorted Node Pair**: Ensures undirected edge deduplication (A→B == B→A)
+- **Fixed-size prefix**: Fast prefix matching for streaming
+
+### 7.3 UnifiedWriteOrchestrator Design
+
+```mermaid
+sequenceDiagram
+    participant Client as Client Thread
+    participant Queue as BlockingQueue<br/>Capacity: 10K
+    participant Writer as Writer Thread
+    participant LMDB as LMDB Env
+    
+    loop Concurrent Enqueue
+        Client->>Queue: enqueueEdgeWrite(matches)
+        Queue-->>Client: CompletableFuture
+        Client->>Queue: enqueueLshWrite(buckets)
+        Queue-->>Client: CompletableFuture
+    end
+    
+    loop Writer Thread Loop
+        Writer->>Queue: poll(100ms)
+        Queue-->>Writer: WriteRequest
+        
+        Writer->>Writer: drainTo(batch, 256)
+        Writer->>Writer: Partition by type
+        
+        alt Edge Writes
+            Writer->>Writer: Partition into 1024-chunk batches
+            loop For each chunk
+                Writer->>LMDB: txnWrite()
+                Writer->>LMDB: dbi.put(key, value) × 1024
+                Writer->>LMDB: txn.commit()
+                Writer->>Client: future.complete()
+            end
+        end
+        
+        alt LSH Writes
+            loop For each LSH request
+                Writer->>LMDB: txnWrite()
+                Writer->>LMDB: Merge bucket data
+                Writer->>LMDB: txn.commit()
+                Writer->>Client: future.complete()
+            end
+        end
+    end
+```
+
+**Design Benefits**:
+- **Single Writer Thread**: Eliminates LMDB write contention
+- **Batching**: Groups multiple requests into single transaction
+- **Async API**: Non-blocking enqueue with CompletableFuture
+- **Bounded Queue**: Backpressure when queue full
+
+### 7.4 PostgreSQL Storage Optimization
+
+```mermaid
+flowchart TB
+    A[Batch Ready<br/>50K Entities] --> B[Acquire Advisory Lock<br/>hashtext groupId]
+    B --> C[BEGIN Transaction]
+    C --> D[SET SESSION PARAMETERS<br/>statement_timeout: 1500s<br/>synchronous_commit: off]
+    D --> E[CREATE TEMP TABLE<br/>temp_potential_matches]
+    
+    E --> F[Partition into 50K chunks]
+    F --> G1[COPY Chunk 1 FROM STDIN<br/>Binary Protocol]
+    F --> G2[COPY Chunk 2 FROM STDIN<br/>Binary Protocol]
+    F --> GN[COPY Chunk N FROM STDIN<br/>Binary Protocol]
+    
+    G1 --> H[INSERT INTO potential_matches<br/>SELECT * FROM temp_potential_matches<br/>ON CONFLICT groupId, referenceId, matchedReferenceId<br/>DO UPDATE SET<br/>compatibilityScore = EXCLUDED.compatibilityScore]
+    G2 --> H
+    GN --> H
+    
+    H --> I[COMMIT Transaction]
+    I --> J[RESET ALL<br/>Release Advisory Lock]
+    
+    style A fill:#4CAF50
+    style G1 fill:#2196F3
+    style H fill:#FF9800
+    style I fill:#9C27B0
+```
+
+**Performance Optimizations**:
+
+| Technique | Benefit | Implementation |
+|-----------|---------|----------------|
+| **Binary COPY** | 10-15x faster than INSERT | PostgreSQL CopyManager |
+| **Temp Tables** | No WAL overhead | Session-scoped TEMP TABLE |
+| **Advisory Locks** | Prevent concurrent group writes | `pg_try_advisory_lock(hashtext(groupId))` |
+| **synchronous_commit=off** | 2-3x write throughput | Session-level setting |
+| **Batch Merging** | Single UPSERT for all rows | INSERT ON CONFLICT DO UPDATE |
+
+---
+
+## 8. Queue Management System
+
+### 8.1 QueueManager Architecture
+
+```mermaid
+classDiagram
     class QueueManagerImpl {
-        +enqueue()
-        +drainBatch()
-        +flushAllQueuesAsync()
+        -ConcurrentLinkedQueue~PotentialMatch~ memoryQueue
+        -AtomicLong memoryQueueSize
+        -DiskSpillManager diskSpillManager
+        -ScheduledExecutorService flushScheduler
+        -int capacity
+        -int flushIntervalSeconds
+        -double drainWarningThreshold
+        -boolean useDiskSpill
+        +enqueue(PotentialMatch) boolean
+        +drainBatch(int) List~PotentialMatch~
+        +getQueueSize() long
+        +getDiskSpillSize() long
+        -startPeriodicFlush() void
+        -spillToDiskIfNeeded() void
     }
+    
+    class DiskSpillManager {
+        -Path spillDirectory
+        -AtomicLong spilledCount
+        -List~Path~ spillFiles
+        +spillBatch(List~PotentialMatch~) void
+        +readBatch(int) List~PotentialMatch~
+        +cleanup() void
+    }
+    
+    class QueueManagerFactory {
+        -ExecutorService watchdogExecutor
+        -MeterRegistry meterRegistry
+        +create(QueueConfig) QueueManagerImpl
+    }
+    
+    class QueueConfig {
+        +UUID groupId
+        +UUID domainId
+        +String processingCycleId
+        +int capacity
+        +int flushIntervalSeconds
+        +double drainWarningThreshold
+        +int boostBatchFactor
+        +int maxFinalBatchSize
+        +boolean useDiskSpill
+    }
+    
+    QueueManagerImpl --> DiskSpillManager
+    QueueManagerFactory ..> QueueManagerImpl : creates
+    QueueManagerFactory ..> QueueConfig : uses
+```
 
-    PotentialMatchesCreationScheduler --> PotentialMatchesCreationJobExecutor : uses
-    PotentialMatchesCreationScheduler --> PotentialMatchComputationProcessorImp : finalizes
-    PotentialMatchesCreationJobExecutor --> NodeFetchService : reads
-    PotentialMatchServiceImpl --> NodeFetchService : hydrates
-    PotentialMatchServiceImpl --> WeightFunctionResolver : resolves
-    PotentialMatchServiceImpl --> GraphPreProcessor : triggers
-    GraphPreProcessor --> SymmetricGraphBuilder : builds
-    SymmetricGraphBuilder --> PotentialMatchComputationProcessorImp : sends
-    PotentialMatchComputationProcessorImp --> QueueManagerImpl : buffers
-    QueueManagerImpl --> GraphStore : persists
-    GraphStore --> EdgePersistenceFacade : delegates
-    EdgePersistenceFacade --> UnifiedWriteOrchestrator : enqueues
-    UnifiedWriteOrchestrator --> LmdbEnvironment : writes
-    PotentialMatchComputationProcessorImp --> PotentialMatchSaver : saves_final
-    PotentialMatchSaver --> PotentialMatchStorageProcessor : executes
-    PotentialMatchStorageProcessor --> HikariDataSource : connects
+### 8.2 Queue Operation Flow
 
+```mermaid
+stateDiagram-v2
+    [*] --> MemoryQueue: enqueue(match)
+    
+    MemoryQueue --> CheckCapacity: Increment counter
+    
+    CheckCapacity --> InMemory: size < capacity (1M)
+    CheckCapacity --> SpillToDisk: size >= capacity
+    
+    InMemory --> PeriodicFlush: Every 5 seconds
+    
+    SpillToDisk --> DiskWrite: Write batch to file
+    DiskWrite --> MemoryQueue: Clear memory, continue
+    
+    PeriodicFlush --> DrainBatch: Auto-flush trigger
+    
+    DrainBatch --> ReadMemory: Read from memory queue
+    ReadMemory --> ReadDisk: Memory empty?
+    ReadDisk --> ProcessBatch: Read from disk files
+    
+    ProcessBatch --> SaveLMDB: Dual persistence
+    ProcessBatch --> SavePostgreSQL: Dual persistence
+    
+    SaveLMDB --> MemoryQueue: Continue enqueueing
+    SavePostgreSQL --> MemoryQueue: Continue enqueueing
+    
+    MemoryQueue --> Finalize: All nodes processed
+    Finalize --> DrainAll: savePendingMatches
+    DrainAll --> [*]: cleanup(groupId)
+```
+
+### 8.3 Disk Spillover Mechanism
+
+```mermaid
+flowchart LR
+    A[Memory Queue Full<br/>1M items] --> B{Disk Spill Enabled?}
+    B -->|No| C[Block/Drop Enqueue]
+    B -->|Yes| D[Drain 100K to Disk]
+    
+    D --> E[Serialize to File<br/>/tmp/spill-{groupId}-{seq}.bin]
+    E --> F[Clear Memory<br/>Continue Accepting]
+    
+    F --> G[Track Spill Files<br/>List~Path~]
+    
+    subgraph "Drain Phase"
+        H[drainBatch 2000] --> I{Memory Empty?}
+        I -->|Yes| J[Read from Disk Files<br/>FIFO Order]
+        I -->|No| K[Return Memory Batch]
+    end
+    
+    G --> H
+    
+    J --> L[Deserialize Batch]
+    L --> M[Return to Processor]
+    K --> M
+    
+    style A fill:#FFCDD2
+    style E fill:#F8BBD0
+    style J fill:#E1BEE7
+    style M fill:#C8E6C9
+```
+
+**Spill File Format**:
+```
+┌─────────────────┬─────────────────┬─────────────────┬───────┐
+│  Magic Header   │  Version        │  Batch Size     │ Data  │
+│  4 bytes        │  2 bytes        │  4 bytes (int)  │  ...  │
+└─────────────────┴─────────────────┴─────────────────┴───────┘
+
+Data Section (repeated):
+┌─────────────────┬─────────────────┬─────────────────┬───────┐
+│  GroupId UUID   │  DomainId UUID  │  RefId Length   │ RefId │
+│  16 bytes       │  16 bytes       │  4 bytes        │ N     │
+├─────────────────┼─────────────────┼─────────────────┼───────┤
+│  MatchId Length │  MatchId        │  Score          │       │
+│  4 bytes        │  M bytes        │  4 bytes float  │       │
+└─────────────────┴─────────────────┴─────────────────┴───────┘
 ```
 
 ---
 
-## 7. Concurrency Model
+## 9. Performance Optimization
 
-| Executor | Purpose | Size | Notes |
-|--------|--------|------|-------|
-| `matchCreationExecutorService` | Coordination tasks | ≥ `maxConcurrentDomains + 2` | Must be larger than semaphores |
-| `graphBuildExecutor` | Parallel chunk processing | Configurable | Used by graph builders |
-| `persistenceExecutor` | Mapping work | Fixed | Convert DTOs to entities |
-| `matchesProcessExecutor` | Final DB saves | Fixed | Large batches |
-| `ioExecutorService` | Async history flush | Cached | Low-frequency writes |
-| `watchdogExecutor` | Health checks | Single | Background monitoring |
-| `nodesFetchExecutor` | Node hydration | Fixed | DB read isolation |
+### 9.1 Throughput Optimization Strategy
 
-> All executors injected via `@Qualifier`.
-
----
-
-## 8. Error Handling & Resilience
-
-| Failure Mode | Mitigation |
-|------------|-----------|
-| DB Timeout | Retry with exponential backoff |
-| Network Lag | Timeout guards (30s–3h) |
-| LMDB Write Conflict | Retry up to 3x |
-| OOM Risk | Spill-to-disk via LMDB |
-| Restart During Cycle | Resume via cursor |
-| Duplicate Execution | Group-level locking |
-| Queue Full | Reject gracefully, emit metric |
-| Final Save Failure | Retryable exception with alert |
-| Thread Interruption | Restore interrupt flag |
-
-### Critical Safeguards:
-- `orTimeout()` on all futures
-- `tryAcquire(timeout)` on semaphores
-- Graceful shutdown with flush timeout
-- Advisory locks in PostgreSQL
-
----
-
-## 9. Persistence Strategy
-
-### 9.1 Two-Tier Storage
-
-| Tier | Technology | Role |
-|-----|-----------|------|
-| **Tier 1 (Hot)** | JVM Heap + `QueueManagerImpl` | Fast enqueue |
-| **Tier 2 (Warm/Cold)** | LMDB (on-disk) | Spill buffer |
-| **Tier 3 (Final)** | PostgreSQL | Queryable result store |
-
-### 9.2 Why This Works
-- **Memory Efficiency**: Never load all matches in RAM
-- **Durability**: LMDB ACID guarantees
-- **Speed**: Binary copy into PostgreSQL > 100K rows/sec
-
----
-
-## 10. Observability & Monitoring
-
-### 10.1 Logging
-- Structured JSON logs with fields: `cycleId`, `groupId`, `domainId`, `status`
-- Levels: INFO for progress, DEBUG for internals, ERROR for exceptions
-
-### 10.2 Metrics (Micrometer)
-
-| Category | Examples |
-|--------|---------|
-| Timers | `batch_matches_total_duration`, `graph.build.duration` |
-| Counters | `match.job.failed_max_retries`, `final_save.error` |
-| Gauges | `write_queue_size`, `graph_build_queue_length` |
-| Histograms | `lsh.txn.buckets_per_txn` |
-
-Integrated with Prometheus + Grafana dashboards.
-
----
-
-## 11. Performance Considerations
-
-| Optimization | Benefit |
-|-------------|--------|
-| Sliding window with overlap | Prevents missed records |
-| Chunked processing | Better CPU utilization |
-| Binary COPY protocol | 3–5x faster than INSERT |
-| Asynchronous I/O | Overlap network and compute |
-| Thread-local buffers | Reduce allocation pressure |
-| Pre-sized collections | Avoid resizing |
-| Connection pooling (HikariCP) | Reuse DB connections |
-
----
-
-## 12. Scalability & Extensibility
-
-### 12.1 Horizontal Scaling
-- Scale out via **domain sharding**
-- Deploy multiple instances filtering on `domainId % N == instanceIndex`
-
-### 12.2 Extensible Components
-| Extension Point | Example |
-|---------------|--------|
-| `WeightFunctionResolver` | Add ML-based scorers |
-| `PartitionStrategy` | Custom logic for left/right split |
-| `EdgeBuildingStrategy` | New similarity models |
-| `QueueManagerConfig` | Tune spill thresholds |
-
----
-
-## 13. Testing Strategy
-
-### 13.1 Unit Tests
-- Mock repositories → test resolver logic
-- Test partitioning strategies
-- Validate cursor overlap behavior
-
-### 13.2 Integration Tests
-- Simulate restart → verify resume works
-- Inject partial failure → confirm retries
-- Measure throughput vs config changes
-
-### 13.3 Chaos Engineering
-- Kill app mid-cycle
-- Fill disk → see spill behavior
-- Induce network lag → validate timeouts
-
----
-
-## 14. Deployment & Operations
-
-### 14.1 Deployment Options
-- **Standalone Spring Boot App**
-- **Kubernetes Pod** with resource limits
-- **JVM Tuning**: `-Xmx8g`, `-XX:+UseZGC`
-
-### 14.2 Operational Commands
-
-```bash
-# View current cycle
-kubectl logs deploy/match-engine | grep "Starting BATCH MATCHING CYCLE"
-
-# Check metrics endpoint
-curl http://localhost:8080/actuator/metrics
-
-# Force cleanup (if needed)
-curl -X POST http://localhost/admin/cleanup
+```mermaid
+graph TB
+    subgraph "Input Optimization"
+        A1[Cursor-Based Pagination<br/>Avoids OFFSET penalty]
+        A2[Batch Fetching<br/>1000 nodes at a time]
+        A3[DB Semaphore<br/>Prevents connection exhaustion]
+    end
+    
+    subgraph "Processing Optimization"
+        B1[Chunking<br/>500 nodes per chunk]
+        B2[Parallel Workers<br/>8 concurrent tasks]
+        B3[LSH Indexing<br/>O log n candidate search]
+        B4[Memory Queue<br/>In-memory buffering]
+    end
+    
+    subgraph "Output Optimization"
+        C1[Batch Writes<br/>500 matches per batch]
+        C2[Binary COPY Protocol<br/>10x faster INSERT]
+        C3[LMDB Single Writer<br/>No write contention]
+        C4[Async Persistence<br/>Non-blocking saves]
+    end
+    
+    A1 --> B1
+    A2 --> B2
+    A3 --> B3
+    B1 --> C1
+    B2 --> C2
+    B3 --> C3
+    B4 --> C4
+    
+    style A1 fill:#C8E6C9
+    style B3 fill:#FFF9C4
+    style C2 fill:#FFCCBC
 ```
 
-### 14.3 Rollback Plan
-- Revert image tag
-- Monitor for duplicate cycles
-- Manually delete cursors if required
+### 9.2 Memory Management
+
+```mermaid
+pie title Memory Allocation Distribution
+    "Node Objects (NodeDTO)" : 25
+    "Edge Objects (PotentialMatch)" : 30
+    "Queue Buffers" : 20
+    "LSH Index (if enabled)" : 15
+    "Database Connection Pool" : 5
+    "Thread Stacks" : 3
+    "LMDB ByteBuffers (Direct)" : 2
+```
+
+**Memory Optimization Techniques**:
+
+| Technique | Saving | Implementation |
+|-----------|--------|----------------|
+| **Cursor Pagination** | ~80% memory | Don't load all nodes at once |
+| **Streaming Processing** | ~90% memory | Process nodes in batches, discard after |
+| **Direct ByteBuffers** | Off-heap | LMDB uses memory-mapped files |
+| **Queue Disk Spillover** | Unlimited | Spill to disk when > 1M items |
+| **Batch Clearing** | Reuse capacity | `buffer.clear()` instead of new list |
+
+### 9.3 Latency Optimization
+
+```mermaid
+gantt
+    title Processing Timeline Optimization (2000 Nodes)
+    dateFormat X
+    axisFormat %s
+    
+    section Sequential (Before)
+    Fetch All Nodes    :a1, 0, 10s
+    Build Full Graph   :a2, after a1, 30s
+    Compute All Edges  :a3, after a2, 60s
+    Save All Matches   :a4, after a3, 20s
+    
+    section Parallel (After)
+    Fetch Batch 1      :b1, 0, 2s
+    Process Batch 1    :b2, after b1, 5s
+    Save Batch 1       :b3, after b2, 3s
+    Fetch Batch 2      :b4, 2, 2s
+    Process Batch 2    :b5, after b4, 5s
+    Save Batch 2       :b6, after b5, 3s
+    Fetch Batch 3      :b7, 4, 2s
+    Process Batch 3    :b8, after b7, 5s
+    Save Batch 3       :b9, after b8, 3s
+```
+
+**Latency Reduction**: 120s → 15s (8x improvement)
 
 ---
 
-## 15. Open Questions & Future Work
+## 10. Error Handling & Resilience
 
-| Question | Status |
-|--------|--------|
-| Can we support real-time ingestion alongside batch? | Planned Q3 |
-| Should we shard further by `tenantId`? | Under review |
-| Can we replace manual advisory locks with distributed coordination (e.g., Redis)? | Exploring |
-| Is there value in caching frequently used metadata? | Yes – POC in progress |
-| Can we reduce finalization time via parallel merge? | Limited by PK constraints |
+### 10.1 Retry Mechanism
+
+```mermaid
+flowchart TD
+    A[Process Batch] --> B{Success?}
+    B -->|Yes| C[Mark Nodes Processed]
+    B -->|No| D{Retry Count < 3?}
+    
+    D -->|Yes| E[Exponential Backoff<br/>delay = 1000ms × 2^attempt-1]
+    E --> F[Wait]
+    F --> A
+    
+    D -->|No| G[Log Error<br/>Increment max_retries_exceeded]
+    G --> H[Skip Batch<br/>Continue with Next]
+    
+    C --> I[Persist Cursor]
+    H --> I
+    I --> J[Next Batch]
+    
+    style A fill:#2196F3
+    style C fill:#4CAF50
+    style G fill:#F44336
+    style I fill:#FF9800
+```
+
+**Retry Configuration**:
+
+| Attempt | Delay | Total Wait Time |
+|---------|-------|-----------------|
+| 1 | 0ms | 0ms |
+| 2 | 1000ms (1s) | 1s |
+| 3 | 2000ms (2s) | 3s |
+| Failure | - | Give up |
+
+### 10.2 Backpressure Handling
+
+```mermaid
+sequenceDiagram
+    participant Prod as Producer (Graph Builder)
+    participant Queue as QueueManager
+    participant Proc as Processor
+    participant Sem as Storage Semaphore
+    
+    loop Fast Production
+        Prod->>Queue: enqueue(match)
+        Queue->>Queue: Check capacity
+        
+        alt Queue < 1M
+            Queue-->>Prod: Accepted
+        else Queue >= 1M
+            Queue->>Queue: Spill to disk
+            Queue-->>Prod: Accepted (after spill)
+        end
+    end
+    
+    Note over Proc,Sem: Slow Consumption
+    
+    Proc->>Sem: tryAcquire()
+    Sem-->>Proc: Wait (only 16 permits)
+    
+    Proc->>Queue: drainBatch(2000)
+    Queue-->>Proc: Batch
+    
+    Proc->>Proc: Save to DB (slow)
+    Proc->>Sem: release()
+    
+    alt Queue growing
+        Queue->>Proc: Apply backpressure
+        Proc->>Proc: Sleep 2000ms
+        Proc->>Proc: Continue draining
+    end
+```
+
+### 10.3 Graceful Shutdown
+
+```mermaid
+stateDiagram-v2
+    [*] --> Running: System Active
+    
+    Running --> PreDestroy: @PreDestroy Triggered
+    
+    PreDestroy --> FlushQueues: Flush all pending queues
+    
+    FlushQueues --> WaitDrain: savePendingMatchesAsync()
+    WaitDrain --> DrainComplete: Timeout 5 min
+    WaitDrain --> DrainTimeout: Timeout exceeded
+    
+    DrainComplete --> ShutdownExecutors: Graceful shutdown
+    DrainTimeout --> ForceShutdownExecutors: Force shutdown
+    
+    ShutdownExecutors --> CloseConnections: Close DB connections
+    ForceShutdownExecutors --> CloseConnections
+    
+    CloseConnections --> CloseLMDB: Close LMDB environment
+    
+    CloseLMDB --> [*]: Shutdown complete
+```
+
+**Shutdown Sequence**:
+1. Set `shutdownInitiated = true`
+2. Flush all QueueManagers (5 min timeout)
+3. Shutdown executors gracefully (30 sec timeout)
+4. Force shutdown if needed (10 sec timeout)
+5. Close database connections
+6. Close LMDB environment
+7. Log completion metrics
 
 ---
+
+## 11. Monitoring & Observability
+
+### 11.1 Metrics Architecture
+
+```mermaid
+graph TB
+    subgraph "Application Metrics"
+        A1[Counter: matches_creation_error<br/>Labels: groupId]
+        A2[Timer: node_fetch_duration<br/>Labels: groupId]
+        A3[Timer: graph_build_duration<br/>Labels: status]
+        A4[Counter: storage_processor_matches_saved<br/>Labels: groupId]
+        A5[Gauge: write_queue_size]
+        A6[Timer: match_batch_save_time<br/>Labels: status, error_type]
+    end
+    
+    subgraph "JVM Metrics"
+        B1[Gauge: jvm_memory_used<br/>Areas: heap, non-heap]
+        B2[Timer: jvm_gc_pause<br/>GC: G1 Young, G1 Old]
+        B3[Gauge: jvm_threads_live]
+        B4[Gauge: graph_builder_active<br/>ThreadPoolExecutor]
+    end
+    
+    subgraph "System Metrics"
+        C1[Gauge: hikaricp_connections_active]
+        C2[Gauge: system_cpu_usage]
+        C3[Counter: lmdb_write_success]
+        C4[Counter: queue_rejected<br/>Labels: groupId]
+    end
+    
+    A1 --> REG[Micrometer Registry]
+    A2 --> REG
+    A3 --> REG
+    A4 --> REG
+    A5 --> REG
+    A6 --> REG
+    B1 --> REG
+    B2 --> REG
+    B3 --> REG
+    B4 --> REG
+    C1 --> REG
+    C2 --> REG
+    C3 --> REG
+    C4 --> REG
+    
+    REG --> PROM[Prometheus Scraper]
+    PROM --> GRAF[Grafana Dashboards]
+    
+    style REG fill:#4CAF50
+    style PROM fill:#FF5722
+    style GRAF fill:#2196F3
+```
+
+### 11.2 Key Performance Indicators
+
+```mermaid
+graph LR
+    subgraph "Business KPIs"
+        K1[Matches Created/Day]
+        K2[Processing Success Rate]
+        K3[Average Match Quality Score]
+    end
+    
+    subgraph "Technical KPIs"
+        K4[Nodes Processed/Second]
+        K5[Edges Computed/Second]
+        K6[Database Write TPS]
+        K7[LMDB Read Latency]
+        K8[Queue Depth]
+    end
+    
+    subgraph "Operational KPIs"
+        K9[Job Completion Time]
+        K10[Error Rate]
+        K11[Retry Rate]
+        K12[Memory Usage %]
+    end
+    
+    style K1 fill:#C8E6C9
+    style K4 fill:#BBDEFB
+    style K9 fill:#FFF9C4
+```
+
+### 11.3 Alerting Rules
+
+| Alert | Condition | Severity | Action |
+|-------|-----------|----------|--------|
+| **High Error Rate** | error_rate > 10% over 5m | P2 | Notify on-call |
+| **Queue Overflow** | queue_rejected > 100 over 1m | P3 | Log & investigate |
+| **Processing Timeout** | job_duration > 60m | P2 | Alert team |
+| **Memory Pressure** | heap_usage > 90% | P1 | Immediate action |
+| **DB Connection Pool** | active_connections > 95% | P1 | Scale or throttle |
+| **LMDB Write Failures** | lmdb_write_failure > 10 over 5m | P2 | Check disk |
+
+---
+
+## Appendix A: Database Schema
+
+### A.1 Core Tables
+
+```sql
+-- Nodes Table
+CREATE TABLE public.nodes (
+    id UUID PRIMARY KEY,
+    group_id UUID NOT NULL,
+    domain_id UUID NOT NULL,
+    reference_id VARCHAR(255) NOT NULL,
+    type VARCHAR(50),
+    metadata JSONB,
+    processed BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP,
+    CONSTRAINT uq_node_reference UNIQUE (group_id, domain_id, reference_id)
+);
+
+CREATE INDEX idx_nodes_group_domain ON nodes(group_id, domain_id);
+CREATE INDEX idx_nodes_processed ON nodes(group_id, domain_id, processed) WHERE processed = false;
+CREATE INDEX idx_nodes_cursor ON nodes(group_id, domain_id, created_at, id) WHERE processed = false;
+
+-- Potential Matches Table
+CREATE TABLE public.potential_matches (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    group_id UUID NOT NULL,
+    domain_id UUID NOT NULL,
+    processing_cycle_id VARCHAR(255),
+    reference_id VARCHAR(255) NOT NULL,
+    matched_reference_id VARCHAR(255) NOT NULL,
+    compatibility_score FLOAT NOT NULL,
+    matched_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_match UNIQUE (group_id, reference_id, matched_reference_id)
+);
+
+CREATE INDEX idx_matches_group ON potential_matches(group_id, domain_id);
+CREATE INDEX idx_matches_cycle ON potential_matches(processing_cycle_id);
+CREATE INDEX idx_matches_reference ON potential_matches(reference_id);
+
+-- Nodes Cursor Table
+CREATE TABLE public.nodes_cursor (
+    group_id UUID NOT NULL,
+    domain_id UUID NOT NULL,
+    cursor_created_at TIMESTAMP WITH TIME ZONE,
+    cursor_id UUID,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    PRIMARY KEY (group_id, domain_id)
+);
+
+-- Match Participation History
+CREATE TABLE public.match_participation_history (
+    id BIGSERIAL PRIMARY KEY,
+    node_id UUID NOT NULL,
+    group_id UUID NOT NULL,
+    domain_id UUID NOT NULL,
+    processing_cycle_id VARCHAR(255),
+    participated_at TIMESTAMP NOT NULL,
+    CONSTRAINT fk_node FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_participation_node ON match_participation_history(node_id);
+CREATE INDEX idx_participation_cycle ON match_participation_history(processing_cycle_id);
+```
+
+---
+
+## Appendix B: Configuration Reference
+
+```yaml
+# Application Configuration
+scheduling:
+  potential-match:
+    cron: "0 5 11 * * *"  # 11:05 IST daily
+    zone: "Asia/Kolkata"
+
+# Concurrency Control
+match:
+  max-concurrent-domains: 2
+  max-final-batch-size: 50000
+  save:
+    delay: 300000  # 5 minutes
+    timeout-seconds: 300
+    batch-size: 50000
+  batch-limit: 1000
+  max-retries: 3
+  retry-delay-millis: 1000
+  semaphore:
+    permits: 16
+
+# Graph Processing
+graph:
+  chunk-size: 500
+  max-concurrent-batches: 8
+  max-concurrent-builds: 2
+  match-batch-size: 500
+  top-k: 1000
+
+# Queue Management
+match:
+  queue:
+    capacity: 1000000
+    drain-warning-threshold: 0.8
+    spill-enabled: true
+  flush:
+    interval-seconds: 5
+  final-save:
+    batch-size: 2000
+
+# Node Fetching
+node:
+  fetch:
+    batch-size: 1000
+    overlap: 200
+
+# Database
+spring:
+  datasource:
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+# LMDB
+lmdb:
+  path: /var/lib/matchsystem/lmdb
+  max-dbs: 10
+  map-size: 107374182400  # 100GB
+
+# Matching
+matching:
+  topk:
+    count: 100
+  lsh:
+    num-tables: 5
+    bands-per-table: 20
+    candidate-limit: 1000
+    similarity-threshold: 0.7
+```
+
+---
+
+## Appendix C: Thread Pool Configuration
+
+```java
+@Configuration
+public class ExecutorConfig {
+    
+    @Bean(name = "matchCreationExecutorService")
+    public ThreadPoolExecutor matchCreationExecutor() {
+        return new ThreadPoolExecutor(
+            4,  // core
+            16, // max
+            60L, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(100),
+            new ThreadFactoryBuilder().setNameFormat("match-create-%d").build(),
+            new ThreadPoolExecutor.CallerRunsPolicy()
+        );
+    }
+    
+    @Bean(name = "graphBuildExecutor")
+    public ThreadPoolExecutor graphBuildExecutor() {
+        int cores = Runtime.getRuntime().availableProcessors();
+        return new ThreadPoolExecutor(
+            cores,
+            cores * 2,
+            60L, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(500),
+            new ThreadFactoryBuilder().setNameFormat("graph-build-%d").build(),
+            new ThreadPoolExecutor.CallerRunsPolicy()
+        );
+    }
+    
+    @Bean(name = "nodesFetchExecutor")
+    public Executor nodesFetchExecutor() {
+        return Executors.newFixedThreadPool(
+            8,
+            new ThreadFactoryBuilder().setNameFormat("node-fetch-%d").build()
+        );
+    }
+    
+    @Bean(name = "persistenceExecutor")
+    public ExecutorService persistenceExecutor() {
+        return Executors.newFixedThreadPool(
+            16,
+            new ThreadFactoryBuilder().setNameFormat("persist-%d").build()
+        );
+    }
+    
+    @Bean(name = "matchesStorageExecutor")
+    public ExecutorService storageExecutor() {
+        return Executors.newFixedThreadPool(
+            8,
+            new ThreadFactoryBuilder().setNameFormat("storage-%d").build()
+        );
+    }
+    
+    @Bean(name = "ioExecutorService")
+    public ExecutorService ioExecutor() {
+        return Executors.newFixedThreadPool(
+            12,
+            new ThreadFactoryBuilder().setNameFormat("io-%d").build()
+        );
+    }
+    
+    @Bean(name = "watchdogExecutor")
+    public ScheduledExecutorService watchdogExecutor() {
+        return Executors.newScheduledThreadPool(
+            2,
+            new ThreadFactoryBuilder().setNameFormat("watchdog-%d").build()
+        );
+    }
+}
+```
+
+---
+
