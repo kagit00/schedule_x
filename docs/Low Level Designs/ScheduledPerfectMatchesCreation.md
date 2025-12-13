@@ -34,31 +34,31 @@ The Perfect Match Creation System is a high-throughput, distributed graph proces
 ```mermaid
 graph TB
     subgraph "Scheduler Layer"
-        SCH[PerfectMatchesCreationScheduler<br/>@Scheduled Cron]
+        SCH["PerfectMatchesCreationScheduler<br/>@Scheduled Cron"]
     end
-    
+
     subgraph "Orchestration Layer"
-        SVC[PerfectMatchCreationService<br/>Semaphore Control]
-        EXE[PerfectMatchCreationJobExecutor<br/>Retry Logic]
+        SVC["PerfectMatchCreationService<br/>Semaphore Control"]
+        EXE["PerfectMatchCreationJobExecutor<br/>Retry Logic"]
     end
-    
+
     subgraph "Processing Layer"
-        IMPL[PerfectMatchServiceImpl<br/>Edge Streaming & Batching]
-        STRAT[MatchingStrategySelector<br/>Algorithm Selection]
+        IMPL["PerfectMatchServiceImpl<br/>Edge Streaming & Batching"]
+        STRAT["MatchingStrategySelector<br/>Algorithm Selection"]
     end
-    
+
     subgraph "Storage Layer"
-        EDGE[EdgePersistence<br/>LMDB Reader]
-        SAVER[PerfectMatchSaver<br/>Save Queue Manager]
-        STORE[PerfectMatchStorageProcessor<br/>PostgreSQL Writer]
+        EDGE["EdgePersistence<br/>LMDB Reader"]
+        SAVER["PerfectMatchSaver<br/>Save Queue Manager"]
+        STORE["PerfectMatchStorageProcessor<br/>PostgreSQL Writer"]
     end
-    
+
     subgraph "Data Sources"
-        LMDB[(LMDB<br/>Edge Store)]
-        PG[(PostgreSQL<br/>Match Results)]
-        META[(PostgreSQL<br/>Metadata)]
+        LMDB["LMDB<br/>Edge Store"]
+        PG["PostgreSQL<br/>Match Results"]
+        META["PostgreSQL<br/>Metadata"]
     end
-    
+
     SCH -->|Process Groups| SVC
     SVC -->|Acquire Semaphores| EXE
     EXE -->|Execute with Retry| IMPL
@@ -66,15 +66,16 @@ graph TB
     IMPL -->|Stream Edges| EDGE
     IMPL -->|Save Matches| SAVER
     SAVER -->|Async Write| STORE
-    
+
     EDGE -->|Read| LMDB
     STORE -->|COPY Protocol| PG
     SVC -->|Track Progress| META
-    
+
     style SCH fill:#e1f5ff
     style SVC fill:#fff4e1
     style IMPL fill:#e8f5e9
     style STORE fill:#fce4ec
+
 ```
 
 ### 2.2 Component Layer Diagram
@@ -693,41 +694,45 @@ graph TB
 ### 6.2 Error Handling Flow
 
 ```mermaid
-flowchart TD
-    A[Start Processing] --> B{Circuit Breaker State}
-    B -->|OPEN| C[Immediate Fallback<br/>Update Status FAILED]
-    B -->|CLOSED/HALF_OPEN| D[Attempt Execution]
-    
-    D --> E{Try Acquire<br/>Domain Semaphore}
-    E -->|Timeout 15min| F[TimeoutException]
-    E -->|Success| G{Try Acquire<br/>Group Semaphore}
-    
-    G -->|Timeout 240min| H[Release Domain<br/>TimeoutException]
-    G -->|Success| I[Execute Job]
-    
-    I --> J{Exception?}
-    J -->|Yes| K{Retry Count < 3?}
-    K -->|Yes| L[Exponential Backoff<br/>Sleep 2^n seconds]
-    L --> I
-    K -->|No| M[Max Retries Exceeded]
-    
-    J -->|No| N[Success Path]
-    
-    M --> O[Update Status FAILED]
-    N --> P[Update Status COMPLETED]
-    
-    O --> Q[Release Semaphores]
-    P --> Q
-    H --> Q
-    F --> Q
-    C --> R[End]
-    Q --> R
-    
-    style F fill:#FFCDD2
-    style H fill:#FFCDD2
-    style M fill:#FFCDD2
-    style O fill:#FFCDD2
-    style P fill:#C8E6C9
+graph TB
+    subgraph "Layer 1: Circuit Breaker"
+        CB["Resilience4j CircuitBreaker<br/>perfectMatchesGroup"]
+        CB -->|Open| FB1["Fallback: Update Status FAILED"]
+        CB -->|Half-Open| RETRY1["Allow Limited Requests"]
+        CB -->|Closed| PROCEED1["Normal Processing"]
+    end
+
+    subgraph "Layer 2: Retry Mechanism"
+        RT["Exponential Backoff Retry<br/>maxAttempts=3"]
+        RT -->|Attempt 1| EXEC1["Execute"]
+        RT -->|Attempt 2<br/>delay=1s| EXEC2["Execute"]
+        RT -->|Attempt 3<br/>delay=2s| EXEC3["Execute"]
+        EXEC3 -->|Still Fails| FB2["CompleteExceptionally"]
+    end
+
+    subgraph "Layer 3: Timeout Protection"
+        TO["CompletableFuture Timeout"]
+        TO -->|Semaphore: 15min| TO1["Domain Lock Timeout"]
+        TO -->|Semaphore: 240min| TO2["Group Lock Timeout"]
+        TO -->|Save: 30min| TO3["Storage Timeout"]
+    end
+
+    subgraph "Layer 4: Database Resilience"
+        DB["Database Layer"]
+        DB -->|Deadlock| DBR["@Retryable<br/>with backoff"]
+        DB -->|Advisory Lock| AL["PostgreSQL pg_try_advisory_lock"]
+        DB -->|COPY Failure| CANCEL["CopyIn.cancelCopy"]
+    end
+
+    PROCEED1 --> RT
+    RT --> TO
+    TO --> DB
+
+    style CB fill:#FFCDD2
+    style RT fill:#F8BBD0
+    style TO fill:#E1BEE7
+    style DB fill:#C5CAE9
+
 ```
 
 ### 6.3 Exception Hierarchy
@@ -1218,36 +1223,36 @@ sequenceDiagram
     participant SAVER as MatchSaver
     participant STORE as StorageProcessor
     participant PG as PostgreSQL
-    
+
     SCH->>SCH: @Scheduled Trigger (01:28 IST)
     SCH->>SVC: getTasksToProcess()
     SVC->>PG: Query LastRunPerfectMatches
     SVC->>PG: Count Nodes
     PG-->>SVC: Tasks List
-    
+
     loop For Each Group
         SCH->>SVC: processGroup(groupId, domainId)
         SVC->>SVC: tryAcquire domainSemaphore (15min)
         SVC->>SVC: tryAcquire groupSemaphore (240min)
-        
+
         SVC->>EXE: processGroup(groupId, domainId)
-        
+
         loop Retry up to 3 times
             EXE->>IMPL: processAndSaveMatches(request)
             IMPL->>PG: Get LastRun & Node Count
-            
+
             alt Node Count > Last Processed
                 IMPL->>EDGE: streamEdges(domainId, groupId)
                 EDGE->>LMDB: Open Txn, Create Cursor
-                
+
                 loop Stream Edges
                     LMDB-->>EDGE: EdgeDTO
                     EDGE-->>IMPL: EdgeDTO
                     IMPL->>IMPL: Buffer until 25k
-                    
+
                     alt Buffer Full
                         IMPL->>IMPL: Submit Batch to cpuExecutor
-                        
+
                         par Process Batch
                             IMPL->>IMPL: Build Adjacency Map
                             IMPL->>IMPL: Trim to Top-K
@@ -1255,7 +1260,7 @@ sequenceDiagram
                             STRAT-->>IMPL: Map<String, List<MatchResult>>
                             IMPL->>IMPL: Convert to Entities
                             IMPL->>SAVER: saveMatchesAsync()
-                            
+
                             SAVER->>STORE: savePerfectMatches()
                             STORE->>PG: Acquire Advisory Lock
                             STORE->>PG: CREATE TEMP TABLE
@@ -1266,7 +1271,7 @@ sequenceDiagram
                         end
                     end
                 end
-                
+
                 IMPL->>IMPL: Wait for all batches
                 IMPL-->>EXE: Success
                 EXE-->>SVC: Success
@@ -1274,13 +1279,14 @@ sequenceDiagram
                 IMPL-->>EXE: Skip (no new nodes)
             end
         end
-        
+
         SVC->>PG: Update LastRun (status=COMPLETED)
         SVC->>SVC: Release groupSemaphore
         SVC->>SVC: Release domainSemaphore
     end
-    
+
     SCH->>SCH: Job Complete
+
 ```
 
 ---
