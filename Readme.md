@@ -14,30 +14,46 @@ The entire pipeline is divided into four distinct, sequential stages, governed p
 
 ```mermaid
 graph LR
-    subgraph Ingestion Layer [System 1: Node Import System]
-        NI_IN[(Kafka/MinIO\nNode Exchange)] --> NI_PROC[Processing Engine\n(Streaming/COPY)]
-        NI_PROC --> PG_NODES[PostgreSQL\nNode Data]
+    subgraph "Ingestion Layer - System 1 Node Import"
+        NI_IN["Kafka and MinIO<br/>Node Exchange"]
+        NI_PROC["Processing Engine<br/>Streaming and COPY"]
+        PG_NODES["PostgreSQL<br/>Node Data"]
+
+        NI_IN --> NI_PROC
+        NI_PROC --> PG_NODES
     end
 
-    subgraph Match Creation Layer
-        PM_SCH[Scheduler\n(Daily Cron)] --> PM_PROC[System 2: Potential Match Creation]
+    subgraph "Match Creation Layer"
+        PM_SCH["Scheduler<br/>Daily cron"]
+        PM_PROC["System 2<br/>Potential Match Creation"]
+        LMDB_EDGES["LMDB Cache<br/>Edge data"]
+        PF_PROC["System 3<br/>Perfect Match Creation"]
+        PG_MATCHES["PostgreSQL<br/>Perfect Matches"]
+
+        PM_SCH --> PM_PROC
         PG_NODES --> PM_PROC
-        PM_PROC --> LMDB_EDGES[LMDB Cache\n(Edges)]
-        LMDB_EDGES --> PF_PROC[System 3: Perfect Match Creation]
-        PF_PROC --> PG_MATCHES[PostgreSQL\nPerfect Matches]
+        PM_PROC --> LMDB_EDGES
+        LMDB_EDGES --> PF_PROC
+        PF_PROC --> PG_MATCHES
     end
 
-    subgraph Data Transfer Layer [System 4: Match Transfer to Client]
-        MT_SCH[Scheduler\n(Post-Match Cron)] --> MT_PROC[Transfer Processor\n(Streaming Export)]
+    subgraph "Data Transfer Layer - System 4 Client Export"
+        MT_SCH["Scheduler<br/>Post match cron"]
+        MT_PROC["Transfer Processor<br/>Streaming export"]
+        FILE_OUT["Object Storage<br/>Client file"]
+        KAFKA_OUT["Kafka<br/>Notification"]
+
+        MT_SCH --> MT_PROC
         PG_MATCHES --> MT_PROC
-        MT_PROC --> FILE_OUT[Object Storage\n(Client File)]
-        MT_PROC --> KAFKA_OUT[(Kafka\nNotification)]
+        MT_PROC --> FILE_OUT
+        MT_PROC --> KAFKA_OUT
     end
 
     style NI_IN fill:#F0F8FF
     style PM_SCH fill:#FFEBCD
     style PF_PROC fill:#D8BFD8
     style FILE_OUT fill:#F0FFF0
+
 ```
 
 ---
