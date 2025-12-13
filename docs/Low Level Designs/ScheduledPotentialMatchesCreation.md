@@ -1629,29 +1629,30 @@ graph TB
 ```mermaid
 graph LR
     subgraph "Business KPIs"
-        K1[Matches Created/Day]
-        K2[Processing Success Rate]
-        K3[Average Match Quality Score]
+        K1["Matches Created / Day"]
+        K2["Processing Success Rate"]
+        K3["Average Match Quality Score"]
     end
-    
+
     subgraph "Technical KPIs"
-        K4[Nodes Processed/Second]
-        K5[Edges Computed/Second]
-        K6[Database Write TPS]
-        K7[LMDB Read Latency]
-        K8[Queue Depth]
+        K4["Nodes Processed / Second"]
+        K5["Edges Computed / Second"]
+        K6["Database Write TPS"]
+        K7["LMDB Read Latency"]
+        K8["Queue Depth"]
     end
-    
+
     subgraph "Operational KPIs"
-        K9[Job Completion Time]
-        K10[Error Rate]
-        K11[Retry Rate]
-        K12[Memory Usage %]
+        K9["Job Completion Time"]
+        K10["Error Rate"]
+        K11["Retry Rate"]
+        K12["Memory Usage %"]
     end
-    
+
     style K1 fill:#C8E6C9
     style K4 fill:#BBDEFB
     style K9 fill:#FFF9C4
+
 ```
 
 ### 11.3 Alerting Rules
