@@ -867,37 +867,38 @@ graph LR
 ```mermaid
 graph TB
     subgraph "Data Quality Rules"
-        Q1[Uniqueness<br/>No duplicate (group, domain, ref)]
-        Q2[Completeness<br/>Required fields non-null]
-        Q3[Validity<br/>Type constraints ENUM]
-        Q4[Consistency<br/>Group exists in DB]
+        Q1["Uniqueness<br/>No duplicate group-domain-ref"]
+        Q2["Completeness<br/>Required fields non-null"]
+        Q3["Validity<br/>ENUM type constraints"]
+        Q4["Consistency<br/>Group exists in database"]
     end
-    
+
     subgraph "Governance Policies"
-        G1[Access Control<br/>Row-level security by domain]
-        G2[Data Lineage<br/>Import job tracking]
-        G3[Audit Trail<br/>Job status events]
-        G4[Retention Policy<br/>90-day active jobs]
+        G1["Access Control<br/>Row-level security per domain"]
+        G2["Data Lineage<br/>Import job tracking"]
+        G3["Audit Trail<br/>Job status events"]
+        G4["Retention Policy<br/>90 day active jobs"]
     end
-    
+
     subgraph "Compliance"
-        C1[GDPR<br/>Right to erasure]
-        C2[Data Privacy<br/>PII encryption]
-        C3[Multi-Tenancy<br/>Domain isolation]
+        C1["GDPR<br/>Right to erasure"]
+        C2["Data Privacy<br/>PII encryption"]
+        C3["Multi-Tenancy<br/>Domain isolation"]
     end
-    
+
     Q1 --> G1
     Q2 --> G2
     Q3 --> G3
     Q4 --> G4
-    
+
     G1 --> C1
     G2 --> C2
     G3 --> C3
-    
+
     style Q1 fill:#C8E6C9
     style G1 fill:#BBDEFB
     style C1 fill:#FFF9C4
+
 ```
 
 ---
