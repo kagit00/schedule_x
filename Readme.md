@@ -225,81 +225,34 @@ sequenceDiagram
     participant EXE as JobExecutor
     participant FETCH as NodeFetchService
     participant PG as PostgreSQL
-    participant SVC as MatchService
-    participant PRE as GraphPreprocessor
-    participant BUILDER as GraphBuilder
-    participant QUEUE as QueueManager
+    participant STRAT as MatchingStrategy
     participant PROC as ComputationProcessor
-    participant LMDB as LMDBStore
+    participant LMDB as LMDB Edge Store
     participant STORE as StorageProcessor
 
     SCH->>SCH: Scheduled trigger
-    SCH->>SCH: Acquire domain semaphore
-    SCH->>EXE: processGroup(groupId, domainId, cycleId)
+    SCH->>EXE: processGroup(groupId, domainId)
 
-    loop Until empty streak reached
-        EXE->>FETCH: fetchNodeIdsByCursor(groupId, limit)
-        FETCH->>PG: Select unprocessed node ids
-        PG-->>FETCH: Cursor page
-        FETCH-->>EXE: Node id batch
-
-        alt Batch not empty
-            EXE->>SVC: processNodeBatch(nodeIds)
-            SVC->>FETCH: fetchNodesAsync(nodeIds)
-            FETCH->>PG: Select nodes with metadata
-            PG-->>FETCH: Node records
-            FETCH-->>SVC: Node DTOs
-        end
+    loop Until cursor exhausted
+        EXE->>FETCH: fetchNodeBatch(groupId)
+        FETCH->>PG: Select nodes by cursor
+        PG-->>FETCH: Node batch
+        FETCH-->>EXE: Nodes
     end
 
-    SVC->>PRE: buildGraph(nodes)
-    PRE->>PRE: determine match type
-    PRE->>BUILDER: build graph
+    EXE->>STRAT: determineStrategy(nodes)
+    STRAT->>PROC: computePotentialMatches(nodes)
 
-    BUILDER->>BUILDER: index nodes
-    BUILDER->>BUILDER: partition into chunks
-
-    par Parallel workers
-        BUILDER->>BUILDER: process chunk
-        BUILDER->>BUILDER: process chunk
-        BUILDER->>BUILDER: process chunk
+    par Parallel computation
+        PROC->>PROC: Compare & score nodes
+        PROC->>PROC: Generate candidate edges
     end
 
-    BUILDER-->>PRE: chunk match results
+    PROC->>LMDB: persistEdgesAsync()
+    PROC->>STORE: savePotentialMatches()
 
-    loop For each chunk result
-        PRE->>PROC: processChunkMatches
-        PROC->>QUEUE: enqueue match
+    SCH->>SCH: Release domain/group semaphore
 
-        alt Queue exceeds threshold
-            QUEUE->>QUEUE: flush batch
-            QUEUE-->>PROC: match batch
-        end
-    end
-
-    PROC->>LMDB: persist edges async
-    PROC->>STORE: save potential matches
-
-    par Concurrent persistence
-        LMDB->>LMDB: batch write transaction
-        STORE->>PG: COPY and upsert
-    end
-
-    SCH->>PROC: finalize processing
-    loop Drain remaining queue
-        PROC->>QUEUE: drain batch
-        QUEUE-->>PROC: matches
-        PROC->>STORE: save batch
-    end
-
-    PROC->>LMDB: stream final edges
-    loop Stream edges
-        LMDB-->>PROC: edge
-        PROC->>STORE: flush batch
-    end
-
-    PROC->>QUEUE: cleanup group
-    SCH->>SCH: Release semaphore
 
 ```
 
@@ -327,77 +280,30 @@ sequenceDiagram
     autonumber
     participant SCH as Scheduler
     participant SVC as CreationService
-    participant EXE as JobExecutor
-    participant IMPL as ServiceImpl
     participant EDGE as EdgePersistence
     participant LMDB as LMDB Store
     participant STRAT as MatchingStrategy
-    participant SAVER as MatchSaver
     participant STORE as StorageProcessor
     participant PG as PostgreSQL
 
-    SCH->>SCH: @Scheduled Trigger (01:28 IST)
-    SCH->>SVC: getTasksToProcess()
-    SVC->>PG: Query LastRunPerfectMatches
-    SVC->>PG: Count Nodes
-    PG-->>SVC: Tasks List
+    SCH->>SVC: processGroup(groupId, domainId)
+    SVC->>PG: Load last run state
 
-    loop For Each Group
-        SCH->>SVC: processGroup(groupId, domainId)
-        SVC->>SVC: tryAcquire domainSemaphore (15min)
-        SVC->>SVC: tryAcquire groupSemaphore (240min)
-
-        SVC->>EXE: processGroup(groupId, domainId)
-
-        loop Retry up to 3 times
-            EXE->>IMPL: processAndSaveMatches(request)
-            IMPL->>PG: Get LastRun & Node Count
-
-            alt Node Count > Last Processed
-                IMPL->>EDGE: streamEdges(domainId, groupId)
-                EDGE->>LMDB: Open Txn, Create Cursor
-
-                loop Stream Edges
-                    LMDB-->>EDGE: EdgeDTO
-                    EDGE-->>IMPL: EdgeDTO
-                    IMPL->>IMPL: Buffer until 25k
-
-                    alt Buffer Full
-                        IMPL->>IMPL: Submit Batch to cpuExecutor
-
-                        par Process Batch
-                            IMPL->>IMPL: Build Adjacency Map
-                            IMPL->>IMPL: Trim to Top-K
-                            IMPL->>STRAT: match(potentialMatches)
-                            STRAT-->>IMPL: Map<String, List<MatchResult>>
-                            IMPL->>IMPL: Convert to Entities
-                            IMPL->>SAVER: saveMatchesAsync()
-
-                            SAVER->>STORE: savePerfectMatches()
-                            STORE->>PG: Acquire Advisory Lock
-                            STORE->>PG: CREATE TEMP TABLE
-                            STORE->>PG: COPY Binary Data
-                            STORE->>PG: UPSERT from Temp
-                            STORE->>PG: COMMIT
-                            STORE->>PG: Release Advisory Lock
-                        end
-                    end
-                end
-
-                IMPL->>IMPL: Wait for all batches
-                IMPL-->>EXE: Success
-                EXE-->>SVC: Success
-            else
-                IMPL-->>EXE: Skip (no new nodes)
-            end
-        end
-
-        SVC->>PG: Update LastRun (status=COMPLETED)
-        SVC->>SVC: Release groupSemaphore
-        SVC->>SVC: Release domainSemaphore
+    EDGE->>LMDB: Open edge stream
+    loop Stream edges
+        LMDB-->>EDGE: Edge
+        EDGE-->>SVC: Edge batch
     end
 
-    SCH->>SCH: Job Complete
+    SVC->>SVC: Build adjacency map
+    SVC->>SVC: Prune to Top-K per node
+    SVC->>STRAT: Select best matches
+    STRAT-->>SVC: Final matches
+
+    SVC->>STORE: savePerfectMatches()
+    STORE->>PG: Bulk upsert results
+
+    SVC->>PG: Update run status
 
 
 ```
