@@ -62,12 +62,12 @@ flowchart TB
     R --> R3["Backpressure"]
     R --> R4["Graceful Shutdown"]
 
-    style ROOT fill:rgba(38,50,56,0.25)
-    style S fill:rgba(227,242,253,0.25)
-    style G fill:rgba(232,245,233,0.25)
-    style E fill:rgba(255,249,196,0.25)
-    style P fill:rgba(252,228,236,0.25)
-    style R fill:rgba(237,231,246,0.25)
+    style ROOT fill:#ECEFF1
+    style S fill:#E3F2FD
+    style G fill:#E8F5E9
+    style E fill:#FFFDE7
+    style P fill:#FCE4EC
+    style R fill:#EDE7F6
 
 ```
 
