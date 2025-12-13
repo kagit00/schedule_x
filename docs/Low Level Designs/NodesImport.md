@@ -1449,35 +1449,36 @@ pie title Memory Allocation 4GB Heap
 ```mermaid
 graph TB
     subgraph "Kafka Consumer Pool"
-        K1[Core: 8<br/>Max: 8<br/>Queue: 100]
-        K2[Name: kafka-consumer-*]
-        K3[Policy: CallerRunsPolicy]
+        K1["Core threads 8<br/>Max threads 8<br/>Queue size 100"]
+        K2["Thread name prefix<br/>kafka-consumer"]
+        K3["Rejection policy<br/>CallerRunsPolicy"]
     end
-    
+
     subgraph "Node Import Pool"
-        N1[Core: 8<br/>Max: 16<br/>Queue: 500]
-        N2[Name: nodes-import-*]
-        N3[Policy: CallerRunsPolicy]
+        N1["Core threads 8<br/>Max threads 16<br/>Queue size 500"]
+        N2["Thread name prefix<br/>nodes-import"]
+        N3["Rejection policy<br/>CallerRunsPolicy"]
     end
-    
+
     subgraph "General Task Pool"
-        G1[Core: 4<br/>Max: 8<br/>Queue: 100]
-        G2[Name: task-executor-*]
-        G3[Policy: CallerRunsPolicy]
+        G1["Core threads 4<br/>Max threads 8<br/>Queue size 100"]
+        G2["Thread name prefix<br/>task-executor"]
+        G3["Rejection policy<br/>CallerRunsPolicy"]
     end
-    
+
     K1 --> K2
     K2 --> K3
-    
+
     N1 --> N2
     N2 --> N3
-    
+
     G1 --> G2
     G2 --> G3
-    
+
     style K1 fill:#E3F2FD
     style N1 fill:#C8E6C9
     style G1 fill:#FFF9C4
+
 ```
 
 **Rejection Policy (CallerRunsPolicy)**:
