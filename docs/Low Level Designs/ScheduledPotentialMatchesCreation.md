@@ -30,31 +30,44 @@ The **Potential Matches Creation System** is a high-throughput, distributed grap
 
 ```mermaid
 mindmap
-  root((Potential Matches<br/>System))
-    Scheduling
+  root["Potential Matches<br/>System"]:::root
+
+    Scheduling:::sched
       Cron-based Execution
       Cursor Pagination
       Incremental Processing
-    Graph Building
+
+    Graph_Building["Graph Building"]:::graph
       Symmetric Graphs
       Bipartite Graphs
       LSH Indexing
       Metadata Weighting
-    Edge Processing
+
+    Edge_Processing["Edge Processing"]:::edge
       LMDB Streaming
       Batch Computation
       Queue Management
       Disk Spillover
-    Persistence
+
+    Persistence:::persist
       PostgreSQL COPY
       Advisory Locks
       Final Merging
       Duplicate Handling
-    Resilience
+
+    Resilience:::res
       Retry Logic
       Semaphore Control
       Backpressure
       Graceful Shutdown
+
+  classDef root fill:#263238,color:#ffffff
+  classDef sched fill:#E3F2FD
+  classDef graph fill:#E8F5E9
+  classDef edge fill:#FFFDE7
+  classDef persist fill:#FCE4EC
+  classDef res fill:#EDE7F6
+
 ```
 
 ### 1.3 System Metrics
@@ -594,32 +607,32 @@ flowchart TB
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Sch as Scheduler
-    participant JobEx as Job Executor
-    participant NodeFetch as Node Fetch Service
-    participant DB as PostgreSQL
-    participant Svc as Match Service
-    participant GraphPre as Graph Preprocessor
-    participant Builder as Graph Builder
-    participant Queue as QueueManager
-    participant Proc as Computation Processor
-    participant LMDB as LMDB Store
-    participant Storage as Storage Processor
-    
-    rect rgb(230, 255, 230)
+    participant Sch as "Scheduler"
+    participant JobEx as "Job Executor"
+    participant NodeFetch as "Node Fetch Service"
+    participant DB as "PostgreSQL"
+    participant Svc as "Match Service"
+    participant GraphPre as "Graph Preprocessor"
+    participant Builder as "Graph Builder"
+    participant Queue as "QueueManager"
+    participant Proc as "Computation Processor"
+    participant LMDB as "LMDB Store"
+    participant Storage as "Storage Processor"
+
+    rect rgba(230, 255, 230, 0.25)
         Note over Sch,JobEx: Phase 1: Initialization
         Sch->>Sch: Trigger (11:05 IST)
         Sch->>Sch: Acquire domainSemaphore
         Sch->>JobEx: processGroup(groupId, domainId, cycleId)
     end
-    
-    rect rgb(230, 240, 255)
+
+    rect rgba(230, 240, 255, 0.25)
         Note over JobEx,DB: Phase 2: Node Fetching
         loop Until emptyStreak >= 3
             JobEx->>NodeFetch: fetchNodeIdsByCursor(groupId, limit=1000)
             NodeFetch->>DB: SELECT id, createdAt WHERE processed=false LIMIT 1200
             DB-->>NodeFetch: CursorPage(ids, hasMore, lastCreatedAt, lastId)
-            
+
             alt Page not empty
                 JobEx->>Svc: processNodeBatch(nodeIds, request)
                 Svc->>NodeFetch: fetchNodesInBatchesAsync(nodeIds)
@@ -629,53 +642,53 @@ sequenceDiagram
             end
         end
     end
-    
-    rect rgb(255, 250, 230)
+
+    rect rgba(255, 250, 230, 0.25)
         Note over Svc,Builder: Phase 3: Graph Building
         Svc->>GraphPre: buildGraph(nodes, request)
         GraphPre->>GraphPre: Determine MatchType
         GraphPre->>Builder: build(nodes, request)
-        
+
         Builder->>Builder: Index nodes (LSH/Metadata)
         Builder->>Builder: Partition into chunks (500 nodes)
-        
+
         par Parallel Workers (8 concurrent)
             Builder->>Builder: processBatch(chunk1)
             Builder->>Builder: processBatch(chunk2)
             Builder->>Builder: processBatch(chunkN)
         end
-        
+
         Builder-->>GraphPre: ChunkResult(matches)
     end
-    
-    rect rgb(250, 240, 255)
+
+    rect rgba(250, 240, 255, 0.25)
         Note over GraphPre,Queue: Phase 4: Queue Management
         loop For each ChunkResult
             GraphPre->>Proc: processChunkMatches(chunkResult)
             Proc->>Queue: enqueue(potentialMatch)
-            
+
             alt Queue size > threshold
                 Queue->>Queue: Auto-flush batch
                 Queue->>Proc: Return batch (500 matches)
             end
         end
     end
-    
-    rect rgb(255, 240, 240)
+
+    rect rgba(255, 240, 240, 0.25)
         Note over Proc,Storage: Phase 5: Dual Persistence
         Proc->>LMDB: persistEdgesAsync(matches)
         Proc->>Storage: savePotentialMatches(entities)
-        
+
         par Concurrent Writes
             LMDB->>LMDB: UnifiedWriteOrchestrator
             LMDB->>LMDB: Batch write (txn)
-            
+
             Storage->>DB: COPY temp_potential_matches FROM STDIN (BINARY)
             Storage->>DB: INSERT INTO potential_matches ... ON CONFLICT
         end
     end
-    
-    rect rgb(230, 255, 255)
+
+    rect rgba(230, 255, 255, 0.25)
         Note over Sch,Storage: Phase 6: Finalization
         Sch->>Proc: savePendingMatchesAsync()
         loop Drain queue
@@ -683,7 +696,7 @@ sequenceDiagram
             Queue-->>Proc: List<PotentialMatch>
             Proc->>Storage: saveMatchBatch()
         end
-        
+
         Sch->>Proc: saveFinalMatches()
         Proc->>LMDB: streamEdges(domainId, groupId, cycleId)
         loop Stream edges
@@ -691,11 +704,12 @@ sequenceDiagram
             Proc->>Proc: Buffer until 2000
             Proc->>Storage: flushFinalBatchAsync()
         end
-        
+
         Sch->>Proc: cleanup(groupId)
         Proc->>Queue: remove(groupId)
         Sch->>Sch: Release semaphore
     end
+
 ```
 
 ---
@@ -1345,31 +1359,32 @@ stateDiagram-v2
 
 ```mermaid
 flowchart LR
-    A[Memory Queue Full<br/>1M items] --> B{Disk Spill Enabled?}
-    B -->|No| C[Block/Drop Enqueue]
-    B -->|Yes| D[Drain 100K to Disk]
-    
-    D --> E[Serialize to File<br/>/tmp/spill-{groupId}-{seq}.bin]
-    E --> F[Clear Memory<br/>Continue Accepting]
-    
-    F --> G[Track Spill Files<br/>List~Path~]
-    
+    A["Memory Queue Full<br/>1M items"] --> B{"Disk Spill Enabled?"}
+    B -->|No| C["Block / Drop Enqueue"]
+    B -->|Yes| D["Drain 100K to Disk"]
+
+    D --> E["Serialize to File<br/>/tmp/spill-(groupId)-(seq).bin"]
+    E --> F["Clear Memory<br/>Continue Accepting"]
+
+    F --> G["Track Spill Files<br/>List<Path>"]
+
     subgraph "Drain Phase"
-        H[drainBatch 2000] --> I{Memory Empty?}
-        I -->|Yes| J[Read from Disk Files<br/>FIFO Order]
-        I -->|No| K[Return Memory Batch]
+        H["drainBatch 2000"] --> I{"Memory Empty?"}
+        I -->|Yes| J["Read from Disk Files<br/>FIFO Order"]
+        I -->|No| K["Return Memory Batch"]
     end
-    
+
     G --> H
-    
-    J --> L[Deserialize Batch]
-    L --> M[Return to Processor]
+
+    J --> L["Deserialize Batch"]
+    L --> M["Return to Processor"]
     K --> M
-    
+
     style A fill:#FFCDD2
     style E fill:#F8BBD0
     style J fill:#E1BEE7
     style M fill:#C8E6C9
+
 ```
 
 **Spill File Format**:
