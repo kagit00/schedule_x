@@ -1,11 +1,22 @@
+Matching Platform — Plain English Overview (with Design Doc Links)
+===============================================================
 
-# Matching Pipeline — Overview
+What this system does
+---------------------
+This platform takes raw entity data (called “nodes”), computes which nodes are compatible with each other, selects the best matches, and then delivers those results to client-facing systems.
 
-This platform ingests **nodes**, generates **potential matches**, computes **perfect matches**, and then **exports match results** to clients as a file with a downstream notification.
+It runs as a pipeline made of four major stages:
 
----
+1) Nodes Import
+2) Potential Matches Creation
+3) Perfect Match Creation
+4) Match Transfer to Client
 
-## End-to-End Flow
+Each stage is designed to handle large volumes, run safely on schedules or triggers, and produce outputs that are reliable to re-run.
+
+High-level flow in one sentence
+-------------------------------
+We ingest nodes into PostgreSQL → compute candidate relationships (potential matches) → refine those candidates into final selections (perfect matches) → export results to a file and notify downstream consumers.
 
 ```mermaid
 flowchart LR
@@ -26,97 +37,158 @@ flowchart LR
   MTS --> FILE[(Export File)]
   MTS --> TOPIC[(Match Suggestions Topic)]
   TOPIC --> CLIENTS[Downstream / Client Systems]
+
 ```
 
----
+Key terms in plain English
+--------------------------
+- Node: A single entity you want to match (user/product/resource).
+- Potential Match: A candidate pairing between two nodes, usually many per node, with a compatibility score.
+- Perfect Match: The best match(es) selected from the candidates based on configured rules.
+- Domain / Group: Logical partitions for multi-tenancy and business segmentation (matching runs per domain+group).
+- Cursor / Run State: A saved “position” so incremental processing can resume and avoid reprocessing everything.
+- LMDB: A fast local storage used to read/write large edge sets efficiently (often treated as regenerable/staging).
+- Export Artifact: A file containing match outputs in a client-consumable format.
+- Notification Event: A message (Kafka-like) that tells downstream systems “your file is ready” and where to fetch it.
 
-## 1) Nodes Import
+Stage 1 — Nodes Import (getting data in)
+----------------------------------------
+Goal: Bring large sets of nodes into PostgreSQL quickly and safely.
 
-**Goal:** Load nodes into PostgreSQL reliably and at high volume.
+In practice:
+- An upstream system requests an import by sending a message.
+- The request either points to a compressed CSV file in object storage (MinIO/S3) or includes a reference list.
+- The import service streams and parses the input in batches to avoid memory spikes.
+- Nodes are written efficiently using PostgreSQL bulk operations (COPY + merge/UPSERT).
+- The system records job status so operators and downstream systems know whether the import succeeded, partially succeeded, or failed.
 
-**How it works**
-- Import request arrives via Kafka (file-based or reference-based).
-- For file-based imports, the service downloads a CSV.GZ from MinIO/S3 and streams it in batches.
-- Nodes are persisted using bulk writes (COPY + merge/UPSERT).
-- A job status update is persisted and published.
+Output:
+- Nodes (and metadata) stored in PostgreSQL.
+- A job status update (persisted and typically published).
 
-**Output:** `nodes` (and metadata) in PostgreSQL.
+Why this stage matters:
+- All later stages depend on clean, consistent node data.
+- Idempotent writes let the system safely retry without creating duplicates.
 
----
+Stage 2 — Potential Matches Creation (creating candidates)
+----------------------------------------------------------
+Goal: Generate “candidate match edges” between nodes in each domain/group.
 
-## 2) Potential Matches Creation
+In practice:
+- Runs on a schedule and/or incrementally.
+- Reads nodes from PostgreSQL and uses a matching strategy based on data shape and configuration:
+    - LSH (Locality-Sensitive Hashing) for large-scale similarity detection
+    - Metadata-weighted comparisons when metadata keys and weights matter
+    - Flat strategy as a simple fallback for small sets or limited metadata
+- Applies pruning (often Top-K per node) to keep results manageable.
+- Stores candidate edges in LMDB (and optionally PostgreSQL depending on implementation).
 
-**Goal:** Generate candidate match relationships efficiently.
+Output:
+- Candidate edges (potential matches) stored where the next stage can read them efficiently (commonly LMDB).
 
-**How it works**
-- Runs on a schedule and/or incrementally (cursor-based).
-- Fetches relevant nodes for each (domain, group).
-- Selects a strategy (LSH / metadata-weighted / flat) based on configuration and data shape.
-- Computes candidate edges and applies pruning (e.g., Top‑K) to control volume.
-- Persists candidate edges to LMDB (and optionally to PostgreSQL depending on configuration).
+Why this stage matters:
+- It reduces an otherwise explosive “compare everything with everything” problem into a smaller candidate set.
 
-**Output:** Candidate edges (primarily in LMDB for fast streaming).
+Stage 3 — Perfect Match Creation (choosing final matches)
+---------------------------------------------------------
+Goal: Turn candidate edges into final “best match” results that the business can act on.
 
----
+In practice:
+- Runs on a schedule per domain/group.
+- Streams edges from LMDB to avoid loading huge graphs in memory.
+- Applies the configured algorithm:
+    - Symmetric: treat the match relationship as mutual (requires canonicalization to prevent duplicates)
+    - Asymmetric: treat matches as directional (one-way preference/selection rules)
+- Writes final results into PostgreSQL using bulk persistence and deduplication rules.
 
-## 3) Perfect Match Creation
+Output:
+- Perfect matches stored in PostgreSQL (typically with cycle/run identifiers and timestamps).
 
-**Goal:** Convert candidate edges into final “best” matches.
+Why this stage matters:
+- It produces the final deliverable matching output used by client-facing features and reporting.
 
-**How it works**
-- Runs on a schedule per (domain, group).
-- Streams edges from LMDB (forward-only, memory-efficient).
-- Applies configured algorithm:
-    - **Symmetric**: mutual / canonicalized pairing
-    - **Asymmetric**: one-way selection rules
-- Writes perfect matches to PostgreSQL using bulk persistence.
+Stage 4 — Match Transfer to Client (export + notify)
+----------------------------------------------------
+Goal: Provide clients/downstream systems an easy-to-consume artifact and a reliable notification.
 
-**Output:** `perfect_matches` in PostgreSQL.
+In practice:
+- Runs on a schedule per domain/group.
+- Streams potential matches and perfect matches out of PostgreSQL using JDBC streaming.
+- Converts database entities into a transfer-friendly DTO format.
+- Merges both sources via a bounded queue (producer-consumer pipeline) to control memory and add backpressure.
+- ExportService writes the data to a file (the client artifact).
+- A notification event is published containing the file reference (path/URI, metadata such as counts/checksum).
 
----
+Output:
+- Exported match file (stored in agreed storage).
+- A messaging event telling consumers where the file is.
 
-## 4) Match Transfer to Client
+Why this stage matters:
+- It decouples internal storage schemas from client consumption needs.
+- It supports high-volume delivery without requiring clients to query large DB tables directly.
 
-**Goal:** Export matches as a client-consumable file and notify downstream systems.
+How the pipeline fits together
+------------------------------
+- Nodes Import must succeed before meaningful matching can occur.
+- Potential Matches builds candidate edges from nodes.
+- Perfect Match selects the final best matches from those candidates.
+- Match Transfer exports and announces results for downstream systems.
 
-**How it works**
-- Runs on a schedule per (domain, group).
-- Streams **potential** and **perfect** matches from PostgreSQL.
-- Maps records to a transfer DTO and merges streams via a bounded queue (backpressure).
-- `ExportService` writes the output file.
-- Publishes a notification event containing the file reference.
+Operational model (how it runs safely)
+--------------------------------------
+- Batch/scheduled execution: predictable load and simpler operations.
+- Concurrency controls: limits how many domains/groups run at once to protect DB and I/O.
+- Backpressure: bounded queues prevent “fast producers” from overwhelming “slow consumers.”
+- Resilience:
+    - Retries for transient failures
+    - Circuit breakers to prevent cascading failures
+    - Clear per-group failure isolation where possible
+- Observability:
+    - metrics for throughput, duration, failures
+    - executor health and queue depth monitoring
+    - structured logs with correlation fields (domainId, groupId, jobId/cycleId)
 
-**Output:** Exported file + message on the match-suggestions topic.
+Links to Design Documents
+------------------------
+Below are the documents this overview is based on. Replace placeholders with your internal wiki/repo URLs.
 
----
+High-Level Designs (HLD)
+- Nodes Import System — HLD  
+  Link: https://github.com/kagit00/schedule_x/blob/master/docs/High%20Level%20Designs/NodesImport.md
+- Potential Matches Creation System — HLD  
+  Link: https://github.com/kagit00/schedule_x/blob/master/docs/High%20Level%20Designs/ScheduledPotentialMatchesCreation.md
+- Perfect Match Creation System — HLD  
+  Link: https://github.com/kagit00/schedule_x/blob/master/docs/High%20Level%20Designs/ScheduledPerfectMatchesCreation.md
+- Match Transfer to Client — HLD  
+  Link: https://github.com/kagit00/schedule_x/blob/master/docs/High%20Level%20Designs/MatchesTransfer.md
 
-## Scheduling and Concurrency
+Low-Level Designs (LLD)
+- Nodes Import System — LLD  
+  Link: https://github.com/kagit00/schedule_x/blob/master/docs/Low%20Level%20Designs/NodesImport.md
+- Potential Matches Creation System — LLD  
+  Link: https://github.com/kagit00/schedule_x/blob/master/docs/Low%20Level%20Designs/ScheduledPotentialMatchesCreation.md
+- Perfect Match Creation System — LLD  
+  Link: https://github.com/kagit00/schedule_x/blob/master/docs/Low%20Level%20Designs/ScheduledPerfectMatchesCreation.md
+- Match Transfer to Client — LLD  
+  Link: https://github.com/kagit00/schedule_x/blob/master/docs/Low%20Level%20Designs/MatchesTransfer.md
 
-- Each stage is **batch/scheduled** (with per-group task execution).
-- Concurrency is controlled using **executors + permits** to avoid overloading DB and storage.
-- Backpressure is enforced where streaming meets export (bounded queue).
+Suggested reading order (for new engineers)
+-------------------------------------------
+1) End-to-end overview (this document)
+2) Nodes Import HLD + LLD
+3) Potential Matches HLD + LLD
+4) Perfect Match HLD + LLD
+5) Match Transfer HLD + LLD
+6) Runbooks and dashboards (operational readiness)
 
----
+Notes and assumptions
+---------------------
+- PostgreSQL is the system of record for nodes and final match outputs.
+- LMDB is used as a performance layer for edge streaming and may be treated as regenerable depending on implementation.
+- Export files and notifications are the public “delivery contract” for clients/downstream systems.
 
-## Operational Notes
-
-- **Idempotency:** Writes use unique constraints and merge/UPSERT behavior to support safe reruns.
-- **Resilience:** Retries and circuit breakers protect dependencies (DB, storage, export, messaging).
-- **Observability:** Metrics track throughput, duration, failures, and executor health.
-
----
-
-## Module Map (Logical)
-
-```mermaid
-flowchart TB
-  A[Nodes Import] --> B[Potential Matches]
-  B --> C[Perfect Matches]
-  C --> D[Match Transfer]
-
-  A -->|writes| PG[(PostgreSQL)]
-  B -->|writes| LMDB[(LMDB)]
-  C -->|writes| PG
-  D -->|reads| PG
-```
-
+Document ownership
+------------------
+- Primary owners: Matching Platform Engineering
+- Reviewers: Data Platform, SRE/Operations, Security
+- Update cadence: review after any algorithm change, schema change, or export contract change
