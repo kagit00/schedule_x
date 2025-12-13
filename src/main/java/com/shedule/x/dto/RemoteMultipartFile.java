@@ -11,10 +11,6 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.util.Objects;
 
-/**
- * Represents a remote file stored in MinIO and exposes it as a MultipartFile.
- * Handles both plain object paths and full MinIO URLs.
- */
 public class RemoteMultipartFile implements MultipartFile {
 
     private final String bucketName;
