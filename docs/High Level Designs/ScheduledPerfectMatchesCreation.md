@@ -233,50 +233,53 @@ graph TB
 
 ```mermaid
 sequenceDiagram
+    autonumber
+
     participant S as Scheduler
     participant O as Orchestrator
     participant P as Processor
-    participant G as Graph Engine
+    participant G as GraphEngine
     participant L as LMDB
     participant D as PostgreSQL
-    
-    rect rgb(200, 230, 255)
+
+    rect rgba(200,230,255,0.35)
         Note over S,O: Initialization Phase
-        S->>O: Trigger Daily Job (01:28 IST)
-        O->>D: Get Eligible Tasks
-        D-->>O: Task List (Domain+Group pairs)
+        S->>O: Trigger daily job
+        O->>D: Fetch eligible tasks
+        D-->>O: Task list (domain, group)
     end
-    
-    rect rgb(230, 255, 200)
+
+    rect rgba(230,255,200,0.35)
         Note over O,P: Orchestration Phase
-        loop For Each Task
-            O->>O: Acquire Concurrency Permits
-            O->>P: Execute Processing Job
+        loop For each task
+            O->>O: Acquire concurrency permits
+            O->>P: Start processing task
         end
     end
-    
-    rect rgb(255, 240, 200)
+
+    rect rgba(255,240,200,0.35)
         Note over P,L: Processing Phase
-        P->>G: Load Matching Context
-        P->>L: Stream Graph Edges
-        L-->>P: Edge Stream
-        P->>G: Apply Matching Algorithm
-        G-->>P: Match Results
+        P->>G: Load matching context
+        P->>L: Stream graph edges
+        L-->>P: Edge data stream
+        P->>G: Execute matching algorithm
+        G-->>P: Match results
     end
-    
-    rect rgb(255, 220, 230)
+
+    rect rgba(255,220,230,0.35)
         Note over P,D: Persistence Phase
-        P->>D: Bulk Insert Matches (COPY)
-        D-->>P: Acknowledgment
-        P->>D: Update Progress Metadata
+        P->>D: Bulk insert matches (COPY)
+        D-->>P: Insert acknowledgment
+        P->>D: Update progress metadata
     end
-    
-    rect rgb(230, 230, 250)
+
+    rect rgba(230,230,250,0.35)
         Note over O,D: Completion Phase
-        P-->>O: Task Complete
-        O->>O: Release Permits
-        O->>D: Update Job Status
+        P-->>O: Task completed
+        O->>O: Release permits
+        O->>D: Update job status
     end
+
 ```
 
 ---
