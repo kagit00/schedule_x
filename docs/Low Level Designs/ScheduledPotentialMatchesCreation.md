@@ -1349,34 +1349,6 @@ stateDiagram-v2
 
 ### 8.3 Disk Spillover Mechanism
 
-```mermaid
-flowchart LR
-    A[Memory Queue Full<br/>1M items] --> B{Disk Spill Enabled?}
-    B -->|No| C[Block/Drop Enqueue]
-    B -->|Yes| D[Drain 100K to Disk]
-    
-    D --> E[Serialize to File<br/>/tmp/spill-{groupId}-{seq}.bin]
-    E --> F[Clear Memory<br/>Continue Accepting]
-    
-    F --> G[Track Spill Files<br/>List~Path~]
-    
-    subgraph "Drain Phase"
-        H[drainBatch 2000] --> I{Memory Empty?}
-        I -->|Yes| J[Read from Disk Files<br/>FIFO Order]
-        I -->|No| K[Return Memory Batch]
-    end
-    
-    G --> H
-    
-    J --> L[Deserialize Batch]
-    L --> M[Return to Processor]
-    K --> M
-    
-    style A fill:#FFCDD2
-    style E fill:#F8BBD0
-    style J fill:#E1BEE7
-    style M fill:#C8E6C9
-```
 
 **Spill File Format**:
 ```
