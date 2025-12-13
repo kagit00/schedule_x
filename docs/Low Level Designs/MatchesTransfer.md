@@ -292,40 +292,40 @@ sequenceDiagram
 ```mermaid
 classDiagram
     class MatchTransferProcessor {
-        -PotentialMatchStreamingService potentialMatchStreamingService
-        -PerfectMatchStreamingService perfectMatchStreamingService
-        -ExportService exportService
-        -ScheduleXProducer scheduleXProducer
-        -Executor matchTransferExecutor
-        -int batchSize
-        +processMatchTransfer(UUID, Domain) CompletableFuture~Void~
-        -exportAndSend(UUID, Domain, Supplier) CompletableFuture~Void~
-        -exportAndSendSync(UUID, Domain, Supplier) void
-        +processMatchTransferFallback(UUID, Domain, Throwable) CompletableFuture~Void~
+        -potentialMatchStreamingService
+        -perfectMatchStreamingService
+        -exportService
+        -scheduleXProducer
+        -matchTransferExecutor
+        -batchSize : int
+        +processMatchTransfer(id, domain)
+        -exportAndSend(id, domain, supplier)
+        -exportAndSendSync(id, domain, supplier)
+        +processMatchTransferFallback(id, domain, error)
     }
-    
+
     class CircuitBreaker {
         <<annotation>>
-        +name: String
-        +fallbackMethod: String
+        name : String
+        fallbackMethod : String
     }
-    
+
     class Retryable {
         <<annotation>>
-        +value: Class[]
-        +maxAttempts: int
-        +backoff: Backoff
+        maxAttempts : int
+        backoff : Backoff
     }
-    
-    class BlockingQueue~List~MatchTransfer~~ {
-        <<Java Concurrency>>
-        +put(List) void
-        +poll(long, TimeUnit) List
+
+    class MatchTransferQueue {
+        <<concurrent>>
+        put(batch)
+        poll(timeout)
     }
-    
-    MatchTransferProcessor ..> CircuitBreaker
-    MatchTransferProcessor ..> Retryable
-    MatchTransferProcessor --> BlockingQueue : uses
+
+    MatchTransferProcessor ..> CircuitBreaker : protected by
+    MatchTransferProcessor ..> Retryable : retried by
+    MatchTransferProcessor --> MatchTransferQueue : uses
+
 ```
 
 **Producer-Consumer Pattern**:
