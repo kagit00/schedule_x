@@ -1326,36 +1326,36 @@ flowchart TD
 ```mermaid
 stateDiagram-v2
     [*] --> PENDING: Job Created
-    
+
     PENDING --> PROCESSING: Start Import
-    
-    PROCESSING --> COMPLETED: All Batches Success
-    PROCESSING --> FAILED: Any Critical Error
-    PROCESSING --> FAILED: Partial Failure (some nodes failed)
-    
-    FAILED --> [*]: Publish Failure Status
-    COMPLETED --> [*]: Publish Success Status
-    
+
+    PROCESSING --> COMPLETED: All batches succeeded
+    PROCESSING --> FAILED: Critical or partial failure
+
+    FAILED --> [*]: Publish failure status
+    COMPLETED --> [*]: Publish success status
+
     note right of PENDING
         Initial state
         Job ID assigned
     end note
-    
+
     note right of PROCESSING
-        Batches being processed
-        Processed count incrementing
+        Batches in progress
+        Processed count increasing
     end note
-    
+
     note right of COMPLETED
         All nodes processed
-        Success list = Total
+        Success count equals total
     end note
-    
+
     note right of FAILED
         Error occurred
-        Success + Failed = Total
-        Reason stored
+        Success plus failed equals total
+        Failure reason stored
     end note
+
 ```
 
 **Status Update Events**:
@@ -1378,34 +1378,35 @@ stateDiagram-v2
 ```mermaid
 graph LR
     subgraph "Input Optimization"
-        I1[Kafka Partitioning<br/>Parallel Consumers]
-        I2[Batch Fetching<br/>100 records/poll]
-        I3[Compression<br/>LZ4]
+        I1["Kafka Partitioning<br/>Parallel consumers"]
+        I2["Batch Fetching<br/>100 records per poll"]
+        I3["Compression<br/>LZ4 enabled"]
     end
-    
+
     subgraph "Processing Optimization"
-        P1[Streaming CSV<br/>No full load in memory]
-        P2[Parallel Batch Processing<br/>8 concurrent futures]
-        P3[Thread Pool Sizing<br/>8 threads]
+        P1["Streaming CSV<br/>No full memory load"]
+        P2["Parallel Batch Processing<br/>Eight concurrent tasks"]
+        P3["Thread Pool Sizing<br/>Eight threads"]
     end
-    
+
     subgraph "Storage Optimization"
-        S1[PostgreSQL COPY<br/>10x faster than INSERT]
-        S2[Batch Size 1000<br/>Optimal for COPY]
-        S3[Transaction Batching<br/>Reduce commits]
+        S1["PostgreSQL COPY<br/>Much faster than INSERT"]
+        S2["Batch Size<br/>One thousand records"]
+        S3["Transaction Batching<br/>Reduced commit frequency"]
     end
-    
+
     I1 --> P1
     I2 --> P2
     I3 --> P3
-    
+
     P1 --> S1
     P2 --> S2
     P3 --> S3
-    
+
     style I1 fill:#C8E6C9
     style P2 fill:#BBDEFB
     style S1 fill:#FFF9C4
+
 ```
 
 **Performance Benchmarks**:
@@ -1422,14 +1423,15 @@ graph LR
 ### 9.2 Memory Management
 
 ```mermaid
-pie title Memory Allocation (4GB Heap)
+pie title Memory Allocation 4GB Heap
     "Kafka Buffers" : 15
     "Thread Pools" : 20
     "CSV Parsing Buffers" : 25
-    "Node Objects (batches)" : 30
+    "Node Objects in Batches" : 30
     "Database Connection Pool" : 5
     "Metadata Maps" : 3
-    "Overhead" : 2
+    "Runtime Overhead" : 2
+
 ```
 
 **Memory Optimization Techniques**:
