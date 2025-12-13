@@ -1210,27 +1210,23 @@ sequenceDiagram
 
 ```mermaid
 flowchart TB
-    A[Batch Ready<br/>50K Entities] --> B[Acquire Advisory Lock<br/>hashtext groupId]
-    B --> C[BEGIN Transaction]
-    C --> D[SET SESSION PARAMETERS<br/>statement_timeout: 1500s<br/>synchronous_commit: off]
-    D --> E[CREATE TEMP TABLE<br/>temp_potential_matches]
-    
-    E --> F[Partition into 50K chunks]
-    F --> G1[COPY Chunk 1 FROM STDIN<br/>Binary Protocol]
-    F --> G2[COPY Chunk 2 FROM STDIN<br/>Binary Protocol]
-    F --> GN[COPY Chunk N FROM STDIN<br/>Binary Protocol]
-    
-    G1 --> H[INSERT INTO potential_matches<br/>SELECT * FROM temp_potential_matches<br/>ON CONFLICT groupId, referenceId, matchedReferenceId<br/>DO UPDATE SET<br/>compatibilityScore = EXCLUDED.compatibilityScore]
+    A[Batch Ready: 50K entities] --> B[Acquire advisory lock]
+    B --> C[Begin transaction]
+    C --> D[Set session parameters]
+    D --> E[Create temp table]
+
+    E --> F[Partition into chunks]
+    F --> G1[COPY chunk to temp table]
+    F --> G2[COPY chunk to temp table]
+    F --> GN[COPY chunk to temp table]
+
+    G1 --> H[Upsert into potential_matches]
     G2 --> H
     GN --> H
-    
-    H --> I[COMMIT Transaction]
-    I --> J[RESET ALL<br/>Release Advisory Lock]
-    
-    style A fill:#4CAF50
-    style G1 fill:#2196F3
-    style H fill:#FF9800
-    style I fill:#9C27B0
+
+    H --> I[Commit transaction]
+    I --> J[Release advisory lock]
+
 ```
 
 **Performance Optimizations**:
@@ -1252,85 +1248,84 @@ flowchart TB
 ```mermaid
 classDiagram
     class QueueManagerImpl {
-        -ConcurrentLinkedQueue~PotentialMatch~ memoryQueue
-        -AtomicLong memoryQueueSize
-        -DiskSpillManager diskSpillManager
-        -ScheduledExecutorService flushScheduler
-        -int capacity
-        -int flushIntervalSeconds
-        -double drainWarningThreshold
-        -boolean useDiskSpill
-        +enqueue(PotentialMatch) boolean
-        +drainBatch(int) List~PotentialMatch~
-        +getQueueSize() long
-        +getDiskSpillSize() long
-        -startPeriodicFlush() void
-        -spillToDiskIfNeeded() void
+        -memoryQueue
+        -memoryQueueSize
+        -diskSpillManager
+        -flushScheduler
+        -capacity
+        -flushIntervalSeconds
+        -drainWarningThreshold
+        -useDiskSpill
+        +enqueue(match)
+        +drainBatch(limit)
+        +getQueueSize()
+        +getDiskSpillSize()
     }
-    
+
     class DiskSpillManager {
-        -Path spillDirectory
-        -AtomicLong spilledCount
-        -List~Path~ spillFiles
-        +spillBatch(List~PotentialMatch~) void
-        +readBatch(int) List~PotentialMatch~
-        +cleanup() void
+        -spillDirectory
+        -spilledCount
+        -spillFiles
+        +spillBatch(batch)
+        +readBatch(limit)
+        +cleanup()
     }
-    
+
     class QueueManagerFactory {
-        -ExecutorService watchdogExecutor
-        -MeterRegistry meterRegistry
-        +create(QueueConfig) QueueManagerImpl
+        -watchdogExecutor
+        -meterRegistry
+        +create(config)
     }
-    
+
     class QueueConfig {
-        +UUID groupId
-        +UUID domainId
-        +String processingCycleId
-        +int capacity
-        +int flushIntervalSeconds
-        +double drainWarningThreshold
-        +int boostBatchFactor
-        +int maxFinalBatchSize
-        +boolean useDiskSpill
+        +groupId
+        +domainId
+        +processingCycleId
+        +capacity
+        +flushIntervalSeconds
+        +drainWarningThreshold
+        +boostBatchFactor
+        +maxFinalBatchSize
+        +useDiskSpill
     }
-    
-    QueueManagerImpl --> DiskSpillManager
+
+    QueueManagerImpl --> DiskSpillManager : spills to
     QueueManagerFactory ..> QueueManagerImpl : creates
     QueueManagerFactory ..> QueueConfig : uses
+
 ```
 
 ### 8.2 Queue Operation Flow
 
 ```mermaid
-stateDiagram-v2
-    [*] --> MemoryQueue: enqueue(match)
-    
-    MemoryQueue --> CheckCapacity: Increment counter
-    
-    CheckCapacity --> InMemory: size < capacity (1M)
-    CheckCapacity --> SpillToDisk: size >= capacity
-    
-    InMemory --> PeriodicFlush: Every 5 seconds
-    
-    SpillToDisk --> DiskWrite: Write batch to file
-    DiskWrite --> MemoryQueue: Clear memory, continue
-    
-    PeriodicFlush --> DrainBatch: Auto-flush trigger
-    
-    DrainBatch --> ReadMemory: Read from memory queue
-    ReadMemory --> ReadDisk: Memory empty?
-    ReadDisk --> ProcessBatch: Read from disk files
-    
-    ProcessBatch --> SaveLMDB: Dual persistence
-    ProcessBatch --> SavePostgreSQL: Dual persistence
-    
-    SaveLMDB --> MemoryQueue: Continue enqueueing
-    SavePostgreSQL --> MemoryQueue: Continue enqueueing
-    
-    MemoryQueue --> Finalize: All nodes processed
-    Finalize --> DrainAll: savePendingMatches
-    DrainAll --> [*]: cleanup(groupId)
+flowchart TD
+    Start([Start]) --> Enqueue[Enqueue match]
+
+    Enqueue --> CheckCapacity[Check capacity]
+
+    CheckCapacity -->|Below limit| InMemory[Store in memory]
+    CheckCapacity -->|At limit| SpillToDisk[Spill to disk]
+
+    InMemory --> PeriodicFlush[Periodic flush trigger]
+    SpillToDisk --> DiskWrite[Write batch to disk]
+    DiskWrite --> Enqueue
+
+    PeriodicFlush --> DrainBatch[Drain batch]
+    DrainBatch --> ReadMemory[Read from memory]
+
+    ReadMemory -->|Empty| ReadDisk[Read from disk]
+    ReadMemory -->|Has data| ProcessBatch[Process batch]
+    ReadDisk --> ProcessBatch
+
+    ProcessBatch --> SaveLMDB[Persist to LMDB]
+    ProcessBatch --> SavePostgres[Persist to PostgreSQL]
+
+    SaveLMDB --> Enqueue
+    SavePostgres --> Enqueue
+
+    Enqueue -->|All processed| Finalize[Finalize]
+    Finalize --> Cleanup[Cleanup group]
+
 ```
 
 ### 8.3 Disk Spillover Mechanism
@@ -1360,25 +1355,25 @@ Data Section (repeated):
 ### 9.1 Throughput Optimization Strategy
 
 ```mermaid
-graph TB
-    subgraph "Input Optimization"
-        A1["Cursor-Based Pagination<br/>Avoids OFFSET penalty"]
-        A2["Batch Fetching<br/>1000 nodes at a time"]
-        A3["DB Semaphore<br/>Prevents connection exhaustion"]
+flowchart TB
+    subgraph Input_Optimization
+        A1[Cursor-based pagination]
+        A2[Batch fetching]
+        A3[DB semaphore]
     end
 
-    subgraph "Processing Optimization"
-        B1["Chunking<br/>500 nodes per chunk"]
-        B2["Parallel Workers<br/>8 concurrent tasks"]
-        B3["LSH Indexing<br/>O(log n) candidate search"]
-        B4["Memory Queue<br/>In-memory buffering"]
+    subgraph Processing_Optimization
+        B1[Chunking]
+        B2[Parallel workers]
+        B3[LSH indexing]
+        B4[Memory queue]
     end
 
-    subgraph "Output Optimization"
-        C1["Batch Writes<br/>500 matches per batch"]
-        C2["Binary COPY Protocol<br/>10x faster INSERT"]
-        C3["LMDB Single Writer<br/>No write contention"]
-        C4["Async Persistence<br/>Non-blocking saves"]
+    subgraph Output_Optimization
+        C1[Batch writes]
+        C2[Binary COPY]
+        C3[LMDB single writer]
+        C4[Async persistence]
     end
 
     A1 --> B1
@@ -1389,9 +1384,6 @@ graph TB
     B3 --> C3
     B4 --> C4
 
-    style A1 fill:#C8E6C9
-    style B3 fill:#FFF9C4
-    style C2 fill:#FFCCBC
 ```
 
 ### 9.2 Memory Management
