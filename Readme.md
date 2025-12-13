@@ -70,64 +70,134 @@ Why this stage matters:
 - All later stages depend on clean, consistent node data.
 - Idempotent writes let the system safely retry without creating duplicates.
 
+### i) File-Based Import Sequence
+
 ```mermaid
-graph TB
-    subgraph "Event Layer"
-        A1[Kafka Consumers<br/>Topic Pattern Matching]
-        A2[Message Routing<br/>DLQ Support]
+sequenceDiagram
+    autonumber
+    participant Kafka
+    participant Consumer
+    participant JobSvc as Import Job Service
+    participant FileSvc as File Import Service
+    participant MinIO
+    participant Parser as CSV Parser
+    participant Processor as Import Processor
+    participant Storage as Storage Processor
+    participant DB as PostgreSQL
+    participant Status as Status Updater
+    
+    Kafka->>Consumer: NodeExchange message (filePath)
+    Consumer->>JobSvc: startNodesImport(payload)
+    
+    JobSvc->>JobSvc: Validate payload (file-based)
+    JobSvc->>DB: Insert NodesImportJob (PENDING)
+    DB-->>JobSvc: jobId
+    
+    JobSvc->>JobSvc: Resolve MultipartFile
+    
+    alt Remote file (http/https)
+        JobSvc->>MinIO: Download file via S3 API
+        MinIO-->>JobSvc: RemoteMultipartFile
+    else Local file
+        JobSvc->>JobSvc: FileSystemMultipartFile (local path)
     end
     
-    subgraph "Processing Layer"
-        B1[Payload Processor<br/>Message Parsing]
-        B2[Import Job Service<br/>Job Orchestration]
-        B3[File Processing Engine<br/>CSV Streaming]
-        B4[Batch Processing Engine<br/>Reference Lists]
+    JobSvc->>FileSvc: processNodesImport(jobId, file, exchange)
+    FileSvc->>DB: Update job status (PROCESSING)
+    
+    FileSvc->>FileSvc: Open GZIP stream
+    FileSvc->>Parser: parseInBatches(gzipStream, callback)
+    
+    loop For each 1000 rows
+        Parser-->>FileSvc: Batch of NodeResponse
+        FileSvc->>FileSvc: processBatchAsync (thread pool)
+        
+        par Parallel Batch Processing
+            FileSvc->>Processor: processBatch(jobId, batch, ...)
+            Processor->>Processor: Convert NodeResponse → Node
+            Processor->>Storage: saveNodesSafely(nodes)
+            
+            Storage->>Storage: Generate UUIDs if missing
+            Storage->>DB: COPY to temp_nodes (binary)
+            Storage->>DB: INSERT ON CONFLICT (upsert)
+            DB-->>Storage: Returning nodeId, referenceId
+            
+            Storage->>DB: Batch insert metadata
+            
+            Processor->>DB: Increment processed count
+            Processor->>Processor: Track success/failed lists
+        end
+        
+        FileSvc->>FileSvc: orTimeout(calculateBatchTimeout)
     end
     
-    subgraph "Storage Layer"
-        C1[Nodes Import Processor<br/>Batch Handling]
-        C2[Nodes Storage Processor<br/>PostgreSQL COPY]
-        C3[Metadata Batch Writer<br/>Bulk Metadata Insert]
+    FileSvc->>FileSvc: joinAndClearFutures (wait all)
+    FileSvc->>Status: finalizeJob(success, failed, total)
+    
+    alt All succeeded
+        Status->>DB: Update job (COMPLETED)
+        Status->>Kafka: Publish success status
+    else Some failed
+        Status->>DB: Update job (FAILED)
+        Status->>Kafka: Publish failure status
+    end
+```
+
+### ii) Reference-Based Import Sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Kafka
+    participant Consumer
+    participant JobSvc as Import Job Service
+    participant BatchSvc as Batch Import Service
+    participant Processor as Import Processor
+    participant Storage as Storage Processor
+    participant DB as PostgreSQL
+    participant Status as Status Updater
+    
+    Kafka->>Consumer: NodeExchange (referenceIds list)
+    Consumer->>JobSvc: startNodesImport(payload)
+    
+    JobSvc->>JobSvc: Validate payload (reference-based)
+    JobSvc->>DB: Insert NodesImportJob (PENDING)
+    DB-->>JobSvc: jobId
+    
+    JobSvc->>JobSvc: createNodesFromReferences(referenceIds)
+    JobSvc->>JobSvc: Partition into 1000-node batches
+    
+    JobSvc->>BatchSvc: processNodesImport(jobId, referenceIds, groupId, ...)
+    BatchSvc->>DB: Update job status (PROCESSING)
+    BatchSvc->>DB: Update total nodes count
+    
+    loop For each batch
+        BatchSvc->>BatchSvc: processBatchAsync (thread pool)
+        
+        par Parallel Processing
+            BatchSvc->>Processor: processAndPersist(jobId, groupId, nodes, ...)
+            
+            Processor->>DB: saveAll(batch) via JPA
+            DB-->>Processor: Saved entities
+            
+            Processor->>Processor: Track success list
+            Processor->>DB: Increment processed count
+        end
+        
+        BatchSvc->>BatchSvc: orTimeout(calculateBatchTimeout)
     end
     
-    subgraph "State Management"
-        D1[Status Updater<br/>Job Lifecycle]
-        D2[Status Publisher<br/>Kafka Producer]
+    BatchSvc->>BatchSvc: joinAndClearFutures
+    
+    alt All batches succeeded
+        BatchSvc->>Status: completeJob(jobId, groupId, success, total)
+        Status->>DB: Update job (COMPLETED)
+        Status->>Kafka: Publish success status
+    else Any batch failed
+        BatchSvc->>Status: failJob(jobId, groupId, reason, success, failed)
+        Status->>DB: Update job (FAILED)
+        Status->>Kafka: Publish failure status
     end
-    
-    subgraph "Infrastructure"
-        E1[(PostgreSQL<br/>Nodes + Metadata)]
-        E2[(MinIO<br/>File Storage)]
-        E3[Kafka<br/>Topics]
-        E4[Metrics<br/>Prometheus]
-    end
-    
-    A1 --> B1
-    A2 --> B1
-    B1 --> B2
-    B2 --> B3
-    B2 --> B4
-    B3 --> C1
-    B4 --> C1
-    C1 --> C2
-    C2 --> C3
-    
-    B2 --> D1
-    C1 --> D1
-    D1 --> D2
-    
-    C2 --> E1
-    C3 --> E1
-    B3 --> E2
-    A1 --> E3
-    D2 --> E3
-    D1 --> E4
-    
-    style A1 fill:#4CAF50
-    style B2 fill:#2196F3
-    style C2 fill:#FF9800
-    style D1 fill:#9C27B0
-    style E1 fill:#607D8B
 ```
 
 Stage 2 — Potential Matches Creation (creating candidates)
