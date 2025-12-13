@@ -29,37 +29,46 @@ The **Potential Matches Creation System** is a high-throughput, distributed grap
 ### 1.2 Key Capabilities
 
 ```mermaid
-mindmap
-  root(("Potential Matches<br/>System"))
+flowchart TB
+    ROOT["Potential Matches<br/>System"]
 
-    Scheduling["Scheduling"]
-      Cron-based Execution
-      Cursor Pagination
-      Incremental Processing
+    ROOT --> S["Scheduling"]
+    ROOT --> G["Graph Building"]
+    ROOT --> E["Edge Processing"]
+    ROOT --> P["Persistence"]
+    ROOT --> R["Resilience"]
 
-    Graph_Building["Graph Building"]
-      Symmetric Graphs
-      Bipartite Graphs
-      LSH Indexing
-      Metadata Weighting
+    S --> S1["Cron-based Execution"]
+    S --> S2["Cursor Pagination"]
+    S --> S3["Incremental Processing"]
 
-    Edge_Processing["Edge Processing"]
-      LMDB Streaming
-      Batch Computation
-      Queue Management
-      Disk Spillover
+    G --> G1["Symmetric Graphs"]
+    G --> G2["Bipartite Graphs"]
+    G --> G3["LSH Indexing"]
+    G --> G4["Metadata Weighting"]
 
-    Persistence["Persistence"]
-      PostgreSQL COPY
-      Advisory Locks
-      Final Merging
-      Duplicate Handling
+    E --> E1["LMDB Streaming"]
+    E --> E2["Batch Computation"]
+    E --> E3["Queue Management"]
+    E --> E4["Disk Spillover"]
 
-    Resilience["Resilience"]
-      Retry Logic
-      Semaphore Control
-      Backpressure
-      Graceful Shutdown
+    P --> P1["PostgreSQL COPY"]
+    P --> P2["Advisory Locks"]
+    P --> P3["Final Merging"]
+    P --> P4["Duplicate Handling"]
+
+    R --> R1["Retry Logic"]
+    R --> R2["Semaphore Control"]
+    R --> R3["Backpressure"]
+    R --> R4["Graceful Shutdown"]
+
+    style ROOT fill:rgba(38,50,56,0.25)
+    style S fill:rgba(227,242,253,0.25)
+    style G fill:rgba(232,245,233,0.25)
+    style E fill:rgba(255,249,196,0.25)
+    style P fill:rgba(252,228,236,0.25)
+    style R fill:rgba(237,231,246,0.25)
+
 ```
 
 ### 1.3 System Metrics
