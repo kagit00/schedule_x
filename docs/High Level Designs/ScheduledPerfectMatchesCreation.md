@@ -1309,38 +1309,39 @@ flowchart TD
 ```mermaid
 graph TB
     subgraph "Application"
-        APP[Perfect Match System]
+        APP["Perfect Match System"]
     end
-    
+
     subgraph "Metrics Pipeline"
-        APP -->|Micrometer| M1[Prometheus]
-        M1 --> M2[Grafana Dashboards]
-        M1 --> M3[Alert Manager]
-        M3 -->|PagerDuty| M4[On-Call Engineer]
+        APP -->|Micrometer| M1["Prometheus"]
+        M1 --> M2["Grafana Dashboards"]
+        M1 --> M3["Alert Manager"]
+        M3 -->|PagerDuty| M4["On Call Engineer"]
     end
-    
+
     subgraph "Logging Pipeline"
-        APP -->|Logback| L1[Filebeat]
-        L1 --> L2[Logstash]
-        L2 --> L3[Elasticsearch]
-        L3 --> L4[Kibana]
+        APP -->|Logback| L1["Filebeat"]
+        L1 --> L2["Logstash"]
+        L2 --> L3["Elasticsearch"]
+        L3 --> L4["Kibana"]
     end
-    
+
     subgraph "Tracing Pipeline Future"
-        APP -.->|OpenTelemetry| T1[Jaeger]
-        T1 -.-> T2[Trace Analysis]
+        APP -.->|OpenTelemetry| T1["Jaeger"]
+        T1 -.-> T2["Trace Analysis"]
     end
-    
+
     subgraph "Health Checks"
-        APP -->|HTTP| H1[/actuator/health]
-        H1 --> H2[Load Balancer]
-        H1 --> H3[Monitoring System]
+        APP -->|HTTP| H1["Health Endpoint actuator health"]
+        H1 --> H2["Load Balancer"]
+        H1 --> H3["Monitoring System"]
     end
-    
+
     style APP fill:#4CAF50
     style M1 fill:#FF9800
     style L3 fill:#2196F3
     style H1 fill:#9C27B0
+
 ```
 
 ### 14.2 Key Metrics & Dashboards
@@ -1540,36 +1541,65 @@ flowchart LR
 ### System Capabilities Summary
 
 ```mermaid
-mindmap
-  root((Perfect Match System))
-    Functional
-      Scheduled Processing
-      Incremental Updates
-      Multi-Algorithm Support
-      Result Persistence
-    Non-Functional
-      High Performance
-        500K edges/min
-        <15 min latency
-      High Reliability
-        99.5% uptime
-        Auto-retry
-      Scalability
-        Horizontal scaling ready
-        Resource efficient
-      Security
-        Encryption at rest/transit
-        Audit logging
-    Operational
-      Monitoring
-        Prometheus metrics
-        Grafana dashboards
-      Logging
-        Centralized ELK
-        Structured logs
-      Maintenance
-        Zero-downtime deploy
-        Automated backups
+graph TB
+    ROOT["Perfect Match System"]
+
+    %% Top-level categories
+    ROOT --> F["Functional"]
+    ROOT --> NF["Non Functional"]
+    ROOT --> OP["Operational"]
+
+    %% Functional
+    F --> F1["Scheduled Processing"]
+    F --> F2["Incremental Updates"]
+    F --> F3["Multi Algorithm Support"]
+    F --> F4["Result Persistence"]
+
+    %% Non-Functional
+    NF --> NFP["High Performance"]
+    NF --> NFR["High Reliability"]
+    NF --> NFS["Scalability"]
+    NF --> NFSec["Security"]
+
+    %% Performance details
+    NFP --> NFP1["500K edges per minute"]
+    NFP --> NFP2["Less than 15 min latency"]
+
+    %% Reliability details
+    NFR --> NFR1["99.5 percent uptime"]
+    NFR --> NFR2["Auto retry"]
+
+    %% Scalability details
+    NFS --> NFS1["Horizontal scaling ready"]
+    NFS --> NFS2["Resource efficient"]
+
+    %% Security details
+    NFSec --> NFSec1["Encryption at rest and transit"]
+    NFSec --> NFSec2["Audit logging"]
+
+    %% Operational
+    OP --> OPMon["Monitoring"]
+    OP --> OPLog["Logging"]
+    OP --> OPMaint["Maintenance"]
+
+    %% Monitoring details
+    OPMon --> OPMon1["Prometheus metrics"]
+    OPMon --> OPMon2["Grafana dashboards"]
+
+    %% Logging details
+    OPLog --> OPLog1["Centralized ELK"]
+    OPLog --> OPLog2["Structured logs"]
+
+    %% Maintenance details
+    OPMaint --> OPM1["Zero downtime deploy"]
+    OPMaint --> OPM2["Automated backups"]
+
+    %% Styling
+    style ROOT fill:#4CAF50,color:#ffffff
+    style F fill:#E3F2FD
+    style NF fill:#FFF3E0
+    style OP fill:#E8F5E9
+
 ```
 
 ---
