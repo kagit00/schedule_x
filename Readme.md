@@ -437,25 +437,18 @@ Links to Design Documents
 ------------------------
 Below are the documents this overview is based on. 
 
-High-Level Designs (HLD)
-- Nodes Import System — HLD  
-  Link: https://github.com/kagit00/schedule_x/blob/master/docs/High%20Level%20Designs/NodesImport.md
-- Potential Matches Creation System — HLD  
-  Link: https://github.com/kagit00/schedule_x/blob/master/docs/High%20Level%20Designs/ScheduledPotentialMatchesCreation.md
-- Perfect Match Creation System — HLD  
-  Link: https://github.com/kagit00/schedule_x/blob/master/docs/High%20Level%20Designs/ScheduledPerfectMatchesCreation.md
-- Match Transfer to Client — HLD  
-  Link: https://github.com/kagit00/schedule_x/blob/master/docs/High%20Level%20Designs/MatchesTransfer.md
 
-Low-Level Designs (LLD)
-- Nodes Import System — LLD  
-  Link: https://github.com/kagit00/schedule_x/blob/master/docs/Low%20Level%20Designs/NodesImport.md
-- Potential Matches Creation System — LLD  
-  Link: https://github.com/kagit00/schedule_x/blob/master/docs/Low%20Level%20Designs/ScheduledPotentialMatchesCreation.md
-- Perfect Match Creation System — LLD  
-  Link: https://github.com/kagit00/schedule_x/blob/master/docs/Low%20Level%20Designs/ScheduledPerfectMatchesCreation.md
-- Match Transfer to Client — LLD  
-  Link: https://github.com/kagit00/schedule_x/blob/master/docs/Low%20Level%20Designs/MatchesTransfer.md
+**High-Level Designs (HLD)**
+- [Nodes Import](https://github.com/kagit00/schedule_x/blob/master/docs/High%20Level%20Designs/NodesImport.md)
+- [Potential Matches Creation](https://github.com/kagit00/schedule_x/blob/master/docs/High%20Level%20Designs/ScheduledPotentialMatchesCreation.md)
+- [Perfect Match Creation](https://github.com/kagit00/schedule_x/blob/master/docs/High%20Level%20Designs/ScheduledPerfectMatchesCreation.md)
+- [Match Transfer](https://github.com/kagit00/schedule_x/blob/master/docs/High%20Level%20Designs/MatchesTransfer.md)
+
+**Low-Level Designs (LLD)**
+- [Nodes Import](https://github.com/kagit00/schedule_x/blob/master/docs/Low%20Level%20Designs/NodesImport.md)
+- [Potential Matches Creation](https://github.com/kagit00/schedule_x/blob/master/docs/Low%20Level%20Designs/ScheduledPotentialMatchesCreation.md)
+- [Perfect Match Creation](https://github.com/kagit00/schedule_x/blob/master/docs/Low%20Level%20Designs/ScheduledPerfectMatchesCreation.md)
+- [Match Transfer](https://github.com/kagit00/schedule_x/blob/master/docs/Low%20Level%20Designs/MatchesTransfer.md)
 
 Suggested reading order 
 -------------------------------------------
@@ -652,3 +645,5 @@ Notes
 - PostgreSQL is the system of record for nodes and match outputs.
 - LMDB is used as a performance layer for edge streaming and may be treated as regenerable depending on implementation.
 - Export files and notifications are the public “delivery contract” for clients/downstream systems.
+
+
