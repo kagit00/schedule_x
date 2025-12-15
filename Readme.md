@@ -466,6 +466,187 @@ Suggested reading order
 5) Match Transfer HLD + LLD
 
 
+---
+
+## Running locally
+
+ScheduleX is not deployed yet. Run it locally with Docker Compose.
+
+### Prerequisites
+
+- Docker Engine + Docker Compose v2
+- Free ports on host:
+    - `8080` (ScheduleX)
+    - `5433` (Postgres exposed on host)
+    - `6379` (Redis)
+    - `9092` (Kafka)
+    - `2181` (ZooKeeper)
+- A Docker network named `kafka-network` (required because both compose files use `external: true`)
+
+### 1) Create the shared Docker network
+
+```bash
+docker network create kafka-network || true
+```
+
+### 2) Start Kafka + ZooKeeper (infra)
+
+Your `infra.yml` brings up ZooKeeper + Kafka and attaches them to the external network:
+
+```bash
+docker compose -f infra.yml up -d
+```
+
+Verify:
+
+```bash
+docker ps --filter "name=zookeeper|kafka"
+```
+
+Kafka is advertised as `kafka:9092`, which matches your app config (`SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:9092`).
+
+### 3) Start ScheduleX + Postgres + Redis
+
+From the repo root (where your main `docker-compose.yml` lives):
+
+```bash
+docker compose up -d --build
+```
+
+Tail logs:
+
+```bash
+docker logs -f schedulex
+```
+
+### 4) Verify services
+
+- ScheduleX: http://localhost:8080
+- PostgreSQL (from host):
+    - Host: `localhost`
+    - Port: `5433`
+    - DB: `schedulex`
+    - User: `postgres`
+    - Pass: `postgres`
+- Redis: `localhost:6379`
+
+### MinIO note (required for import/export paths)
+
+Your `schedulex` container is configured with:
+
+- `MINIO_ENDPOINT=http://minio:9000`
+- `MINIO_BUCKET=flairbit-exports`
+
+So anything that touches object storage (file-based imports / exports) will expect a **MinIO container reachable as `minio` on `kafka-network`**.
+
+If you don’t already run MinIO, add this to `infra.yml`:
+
+```yaml
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - kafka-network
+```
+
+and under `volumes:` add:
+
+```yaml
+  minio_data:
+```
+
+Then restart infra:
+
+```bash
+docker compose -f infra.yml up -d
+```
+
+### Volume paths (important for contributors)
+
+Your current compose uses absolute host paths, e.g.:
+
+- `/home/kaustav/.../pgdata:/var/lib/postgresql/data`
+- `/home/kaustav/.../graph-store:/app/graph-store`
+
+For contributor-friendliness, consider changing these to relative paths:
+
+```yaml
+volumes:
+  - ./pgdata:/var/lib/postgresql/data
+# and
+  - ./graph-store:/app/graph-store
+```
+
+and create them once:
+
+```bash
+mkdir -p pgdata graph-store
+```
+
+### Stopping everything
+
+```bash
+docker compose down
+docker compose -f infra.yml down
+```
+
+---
+
+## Contributing
+
+### How to contribute
+
+1. Fork the repo
+2. Create a feature branch:
+    - `feat/<name>` for features
+    - `fix/<name>` for bug fixes
+    - `docs/<name>` for documentation
+3. Make small, reviewable commits
+4. Open a PR describing:
+    - what changed and why
+    - how to run/test it locally
+    - any expected behavior or performance impact (especially for batch jobs)
+
+### What’s most helpful
+
+- Reliability improvements (idempotency, retries, run-state/cursor correctness)
+- Performance improvements (streaming, batching, DB query tuning)
+- Better local-dev experience (Docker setup, sample configs, scripts)
+- Tests (unit + integration), especially around matching correctness
+
+### Local checks before a PR
+
+From the repo root:
+
+```bash
+mvn -DskipTests package
+mvn test
+```
+
+If your change touches any stage (Import / Potential Matches / Perfect Matches / Transfer), include in the PR notes:
+- how re-runs behave (idempotent? deduped?)
+- any schema changes or run-state/cursor changes
+- any new configuration flags/env vars
+
+### Reporting issues
+
+Please include:
+- what you expected vs what happened
+- logs (remove secrets)
+- how you ran it (Docker / local JVM)
+- steps to reproduce
+
+---
+
 Notes 
 ---------------------
 - PostgreSQL is the system of record for nodes and match outputs.
