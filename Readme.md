@@ -1,6 +1,14 @@
 ScheduleX — Overview (with Design Doc Links)
 ===============================================================
 
+TL;DR
+-----
+- Batch-based matching engine for large-scale entity pairing
+- Avoids O(n²) similarity search via LSH + staged refinement
+- Candidate edges are streamed via LMDB; final match records are persisted in PostgreSQL
+- Designed for safe re-runs, partial failures, and multi-tenant isolation (domain + group)
+
+
 What this system does
 ---------------------
 This platform takes raw entity data (called “nodes”), computes which nodes are compatible with each other, selects the best matches, and then delivers those results to client-facing systems.
@@ -40,16 +48,28 @@ flowchart LR
 
 ```
 
+
+Scale characteristics (observed)
+-------------------------------
+These numbers are indicative from development / local runs and are not an SLA.
+
+- Processes 100k+ nodes per run (domain+group dependent)
+- Generates millions of candidate edges over time (rate depends on strategy + data shape)
+- Streams large edge sets from LMDB without loading the full graph into memory
+
+
 Key terms 
 --------------------------
 - Node: A single entity we want to match (user/product/resource).
-- Potential Match: A candidate pairing between two nodes, usually many per node, with a compatibility score.
-- Perfect Match: The best match(es) selected from the candidates based on configured rules.
+- Potential Match (candidate edge): A candidate pairing (“edge”) between two nodes, with a compatibility score. Many can exist per node.
+- Perfect Match (final match record): The selected best match(es) produced from candidate edges under configured rules (Top-K, symmetric/asymmetric).
 - Domain / Group: Logical partitions for multi-tenancy and business segmentation (matching runs per domain+group).
 - Cursor / Run State: A saved “position” so incremental processing can resume and avoid reprocessing everything.
 - LMDB: A fast local storage used to read/write large edge sets efficiently (often treated as regenerable/staging).
 - Export Artifact: A file containing match outputs in a client-consumable format.
 - Notification Event: A message (Kafka-like) that tells downstream systems “your file is ready” and where to fetch it.
+- Candidate edge: Synonym for “potential match” when discussing graph/LMDB storage.
+- Final match record: Synonym for “perfect match” when discussing PostgreSQL outputs and exports.
 
 Stage 1 — Nodes Import 
 ----------------------------------------
@@ -645,5 +665,8 @@ Notes
 - PostgreSQL is the system of record for nodes and match outputs.
 - LMDB is used as a performance layer for edge streaming and may be treated as regenerable depending on implementation.
 - Export files and notifications are the public “delivery contract” for clients/downstream systems.
+
+
+---
 
 
