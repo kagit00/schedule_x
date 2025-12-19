@@ -481,6 +481,21 @@ Suggested reading order
 
 ---
 
+## Failures & Scaling Lessons
+
+While scaling ScheduleX to very large node and edge cardinalities, several non-trivial failures shaped the final architecture:
+
+- Out-of-memory failures while ranking crore-scale potential matches, which forced a move away from in-memory ranking toward disk-backed Top-K selection.
+- Severe under-generation of candidate edges due to early LSH candidate caps, leading to full candidate expansion with higher hash-table and band counts.
+- Missed matches caused by bucket-isolated processing, resolved by introducing sliding-window cross-batch matching.
+- Fragmented similarity space due to per-bucket LSH initialization, corrected using a global, incrementally built LSH index.
+- Scheduler stalls after massive edge expansion, requiring explicit backpressure and bounded streaming.
+- Deadlocks caused by semaphore starvation in async execution paths, leading to stricter lifecycle management.
+- PostgreSQL checkpoint saturation during heavy batch writes, driving WAL and checkpoint tuning.
+
+  These failures only surfaced at scale and directly influenced ScheduleX’s memory, storage, and matching architecture.
+---
+
 ## Running locally
 
 ScheduleX is not deployed yet. Run it locally with Docker Compose.
