@@ -336,64 +336,6 @@ sequenceDiagram
     SCH->>SCH: Release domain/group semaphore
 ```
 
-### Bipartite Graph Processing Detail
-
-When bipartite matching is selected, the system processes cross-partition comparisons:
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant BIP as BipartiteBuilder
-    participant CHUNK as ChunkManager
-    participant COMP as CompletionService
-    participant SEM as ComputeSemaphore
-    participant STRAT as EdgeBuildingStrategy
-    participant CALC as CompatibilityCalculator
-    participant STORE as GraphStore
-    participant LMDB as LMDB
-
-    BIP->>CHUNK: Partition left nodes (500/chunk)
-    BIP->>CHUNK: Partition right nodes (500/chunk)
-    CHUNK-->>BIP: leftChunks[n], rightChunks[m]
-    
-    BIP->>BIP: Calculate totalTasks = n × m
-
-    loop Submit initial batch (4 concurrent)
-        BIP->>SEM: tryAcquire(30 sec)
-        SEM-->>BIP: Permit granted
-        BIP->>COMP: submit(chunkPair)
-    end
-
-    loop Until all tasks complete
-        COMP-->>BIP: take() completed chunk
-        
-        rect rgb(255, 249, 196)
-            Note over STRAT,CALC: Inside chunk task
-            STRAT->>STRAT: For each leftNode × rightNode
-            STRAT->>CALC: calculate(left, right)
-            CALC->>CALC: Find common metadata keys
-            CALC->>CALC: Score matches (exact/numeric/substring)
-            CALC-->>STRAT: compatibility score
-            
-            alt score > threshold (0.05)
-                STRAT->>STRAT: Add PotentialMatch
-            end
-        end
-        
-        BIP->>STORE: persistEdgesAsync(matches)
-        STORE->>LMDB: Write batch transaction
-        
-        alt More chunks to process
-            BIP->>SEM: tryAcquire(30 sec)
-            BIP->>COMP: submit(nextChunkPair)
-        end
-    end
-
-    BIP->>BIP: Wait for all persistence futures
-    BIP->>STORE: streamEdges(groupId)
-    BIP->>STORE: cleanEdges(groupId)
-    BIP-->>BIP: Return GraphResult
-```
 
 
 Stage 3 — Perfect Match Creation (choosing final matches)
