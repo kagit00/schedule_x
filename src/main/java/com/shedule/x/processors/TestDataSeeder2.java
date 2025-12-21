@@ -15,7 +15,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 
 @Slf4j
-//@Component
+@Component
 @Profile("!prod")
 @RequiredArgsConstructor
 public class TestDataSeeder2 {
@@ -24,7 +24,7 @@ public class TestDataSeeder2 {
     private final MatchingGroupRepository groupRepository;
     private final MatchingConfigurationRepository configurationRepository;
 
-    //@PostConstruct
+    @PostConstruct
     public void seedTestData() {
         if (configurationRepository.count() > 0) {
             log.info("➡ Matching configurations already exist, skipping seeding.");

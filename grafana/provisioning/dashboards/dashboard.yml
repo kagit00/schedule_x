@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: "ScheduleX Dashboards"
+    orgId: 1
+    folder: "ScheduleX"
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

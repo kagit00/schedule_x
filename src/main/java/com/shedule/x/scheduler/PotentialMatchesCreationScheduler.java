@@ -130,7 +130,7 @@ public class PotentialMatchesCreationScheduler {
         groupLocks.entrySet().removeIf(entry -> entry.getValue().isDone());
     }
 
-    @Scheduled(cron = "0 57 16 * * *", zone = "Asia/Kolkata")
+    @Scheduled(cron = "0 24 13 * * *", zone = "Asia/Kolkata")
     public void processAllDomains() {
         if (!isSafeToRun()) {
             log.warn("Scheduler already running — skipping this invocation.");

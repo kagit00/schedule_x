@@ -516,93 +516,30 @@ graph LR
 
 ```mermaid
 flowchart TB
-    subgraph "1. Initialization Phase"
-        A1[Cron Trigger<br/>11:05 IST] --> A2[Get Active Domains]
-        A2 --> A3[Get Groups per Domain]
-        A3 --> A4[Generate CycleId<br/>UUID]
+    subgraph "3. Graph Building"
+        D1[Determine MatchType] --> D2{Symmetric?}
+        D2 -->|Yes| D3[Symmetric Builder<br/>(LSH/Metadata)]
+        D2 -->|No| D4[Bipartite Builder]
+        
+        D4 --> D5[Partition Nodes<br/>left/right]
+        D5 --> D6[Chunk into 500-node batches]
+        D6 --> D7[Parallel Chunk Pairs<br/>(left[i] × right[j])]
+        D7 --> D8[Compute Metadata Similarity]
+        D8 --> D9[Generate PotentialMatches]
     end
     
-    subgraph "2. Cursor Management"
-        B1[Load NodesCursor<br/>groupId + domainId]
-        B2{Cursor Exists?}
-        B3[Start from Beginning]
-        B4[Resume from Position<br/>createdAt + nodeId]
-    end
+    D9 --> E1[Enqueue to QueueManager]
+    E1 --> E2{Queue Full?}
+    E2 -->|Yes| E3[Spill to Disk]
+    E2 -->|No| E4[Keep in Memory]
+    E3 & E4 --> E5[Flush Batch 500]
     
-    subgraph "3. Node Fetching"
-        C1[Query: SELECT id<br/>WHERE processed=false<br/>AND createdAt > cursor<br/>LIMIT 1200]
-        C2[Fetch Node Metadata<br/>Batch 1000 IDs]
-        C3[Hydrate NodeDTO Objects]
-    end
+    E5 --> F1[LMDB Write]
+    E5 --> F2[PostgreSQL Write]
     
-    subgraph "4. Graph Building"
-        D1[Determine MatchType<br/>Symmetric/Bipartite]
-        D2[Select Edge Strategy<br/>LSH/Metadata/Flat]
-        D3[Partition into Chunks<br/>500 nodes/chunk]
-        D4[Parallel Edge Computation<br/>8 concurrent workers]
-    end
-    
-    subgraph "5. Queue Management"
-        E1[PotentialMatch Objects]
-        E2{Queue Size<br/>> 1M?}
-        E3[Memory Queue]
-        E4[Spill to Disk]
-        E5[Flush Batch 500]
-    end
-    
-    subgraph "6. Dual Persistence"
-        F1[LMDB Write<br/>UnifiedWriteOrchestrator]
-        F2[PostgreSQL Write<br/>StorageProcessor]
-        F3[Binary COPY Protocol]
-        F4[Temp Table Merge]
-    end
-    
-    subgraph "7. Finalization"
-        G1[Drain Queue<br/>savePendingMatchesAsync]
-        G2[Stream LMDB → SQL<br/>saveFinalMatches]
-        G3[Mark Nodes Processed]
-        G4[Update Cursor Position]
-        G5[Release Semaphores]
-    end
-    
-    A4 --> B1
-    B1 --> B2
-    B2 -->|No| B3
-    B2 -->|Yes| B4
-    B3 --> C1
-    B4 --> C1
-    
-    C1 --> C2
-    C2 --> C3
-    C3 --> D1
-    
-    D1 --> D2
-    D2 --> D3
-    D3 --> D4
-    D4 --> E1
-    
-    E1 --> E2
-    E2 -->|Yes| E4
-    E2 -->|No| E3
-    E3 --> E5
-    E4 --> E5
-    
-    E5 --> F1
-    E5 --> F2
-    F2 --> F3
-    F3 --> F4
-    
-    F4 --> G1
-    G1 --> G2
-    G2 --> G3
-    G3 --> G4
-    G4 --> G5
-    
-    style A1 fill:#E8F5E9
-    style D4 fill:#FFF9C4
-    style E5 fill:#F3E5F5
-    style F3 fill:#FFEBEE
-    style G5 fill:#C8E6C9
+    style D4 fill:#F48FB1
+    style D7 fill:#CE93D8
+    style D8 fill:#B39DDB
 ```
 
 ### 4.2 Detailed Sequence Diagram
@@ -1021,7 +958,90 @@ sequenceDiagram
     Builder->>Builder: Complete future
 ```
 
-### 6.4 Cross-Product Task Calculation
+### 6.4 Bipartite Graph Building Process
+
+Handles matching between two disjoint node sets (e.g., Patients vs Doctors). Uses brute-force chunked comparison (no LSH).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant PreProc as GraphPreProcessor
+    participant PartStrat as PartitionStrategy
+    participant Builder as BipartiteGraphBuilder
+    participant EdgeStrat as BipartiteEdgeBuildingStrategy
+    participant Queue as QueueManager
+    participant Store as GraphStore
+
+    PreProc->>PartStrat: partition(nodes, key, leftValue, rightValue)
+    PartStrat-->>PreProc: leftNodes, rightNodes
+
+    alt MatchType == SYMMETRIC
+        PreProc->>PreProc: Route to SymmetricBuilder
+    else MatchType == BIPARTITE
+        PreProc->>Builder: build(leftNodes, rightNodes, request)
+        
+        Builder->>Builder: Split left/right into chunks (size=500)
+        Note over Builder: leftChunks = BatchUtils.partition(left, 500)<br/>rightChunks = BatchUtils.partition(right, 500)
+
+        Builder->>Builder: Create task pairs (leftChunk[i] × rightChunk[j])
+        Note over Builder: Total tasks = leftChunks.size() × rightChunks.size()
+
+        loop For each chunk pair
+            Builder->>EdgeStrat: processBatch(leftChunk, rightChunk)
+            EdgeStrat->>EdgeStrat: Compute metadata similarity
+            EdgeStrat-->>Builder: List<PotentialMatch>
+            Builder->>Queue: enqueue(matches)
+        end
+
+        Builder->>Store: persistEdgesAsync(matches)
+        Store->>Store: Save to LMDB + PostgreSQL (async)
+        Builder-->>PreProc: GraphResult
+    end
+```
+
+### 6.5 Bipartite Edge Computation Flow
+
+Edge creation logic in BipartiteEdgeBuildingStrategy.processBatch():
+
+
+```mermaid
+flowchart TD
+    A[Start: Left Batch & Right Batch] --> B[Loop over leftBatch]
+    B --> C[Loop over rightBatch]
+    C --> D[Calculate similarity score]
+    
+    D --> E{score > 0.05?}
+    E -->|Yes| F[Create PotentialMatch]
+    E -->|No| C
+    
+    F --> G[Add to matches list]
+    C -->|End right loop| B
+    B -->|End left loop| H[Return matches]
+    
+    style D fill:#FFF9C4
+    style F fill:#C8E6C9
+```
+
+**Similarity Calculation** (`MetadataCompatibilityCalculator`):  
+| Step                          | Logic                                                                 |
+|-------------------------------|----------------------------------------------------------------------|
+| **1. Common Keys**            | `commonKeys = meta1.keySet() ∩ meta2.keySet()`                       |
+| **2. Per-Key Scoring**        |                                                                      |
+| &nbsp;&nbsp;- Exact match     | `score = 0.7`                                                       |
+| &nbsp;&nbsp;- Numeric match   | `score = 0.7` if within 60% tolerance                              |
+| &nbsp;&nbsp;- Multi-value     | `score = 0.7` if shared item in comma-separated list                |
+| &nbsp;&nbsp;- Partial match   | `score = 0.35` if one value contains the other                       |
+| &nbsp;&nbsp;- No match        | `score = 0.0`                                                       |
+| **3. Final Score**            | `max(Σ per-key scores, 0.4)`                                        |
+| **4. Threshold**              | Only create edge if `score > 0.05`                                   |
+
+> 💡 **Why no LSH?**  
+> Bipartite graphs compare **distinct sets** (e.g., `Customers` vs `Products`). LSH is inefficient here because:
+> 1. No need to reduce O(*m×n*) comparisons (chunking limits work).
+> 2. Metadata-based similarity is cheap to compute (string operations).
+
+
+### 6.6 Cross-Product Task Calculation
 
 ```mermaid
 graph TB
@@ -1240,6 +1260,20 @@ flowchart TB
 | **Advisory Locks** | Prevent concurrent group writes | `pg_try_advisory_lock(hashtext(groupId))` |
 | **synchronous_commit=off** | 2-3x write throughput | Session-level setting |
 | **Batch Merging** | Single UPSERT for all rows | INSERT ON CONFLICT DO UPDATE |
+
+---
+
+### **Performance Impact of Bipartite Flow**
+| Metric                          | Symmetric (LSH)       | Bipartite (Metadata)  |
+|---------------------------------|-----------------------|-----------------------|
+| **Edge Computation**            | O(*n*) (approx)       | O(*m×n*)              |
+| **Chunk Processing**            | Cross-chunk LSH lookups| Direct pairwise loops |
+| **Latency**                     | Faster for large *n*  | Predictable (fixed chunk size) |
+| **Use Case**                    | Same-type matching    | Cross-type matching   |
+
+**Optimization for Bipartite**:
+- **Parallel Chunk Pairs**: Processes `left[i] × right[j]` in parallel (up `maxConcurrentBatches=4`).
+- **Early Termination**: Skips pairs where metadata has no common keys.
 
 ---
 

@@ -46,7 +46,7 @@ services:
     build: .
     container_name: schedulex
     volumes:
-      - /home/kaustav/schedulex/schedule_x/graph-store:/app/graph-store
+      - /home/kaustav/schedulex/graph-store:/app/graph-store
     depends_on:
       - postgres
       - redis
@@ -91,8 +91,35 @@ services:
     networks:
       - kafka-network
 
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    networks:
+      - kafka-network
+
+  grafana:
+    image: grafana/grafana
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      - prometheus
+    networks:
+      - kafka-network
+
+
+
 volumes:
   schedulex_redis_data:
+  grafana-data:
 
 networks:
   kafka-network:
