@@ -337,7 +337,6 @@ sequenceDiagram
 ```
 
 
-
 Stage 3 — Perfect Match Creation (choosing final matches)
 ---------------------------------------------------------
 Goal: Turn candidate edges into final “best match” results that the business can act on.
