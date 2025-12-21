@@ -222,12 +222,15 @@ sequenceDiagram
 
 Stage 2 — Potential Matches Creation (creating candidates)
 ----------------------------------------------------------
-Goal: Generate “candidate match edges” between nodes in each domain/group.
+Goal: Generate "candidate match edges" between nodes in each domain/group.
 
 In practice:
 - Runs on a schedule and/or incrementally.
-- Reads nodes from PostgreSQL and uses a matching strategy based on data shape and configuration:
-    - LSH (Locality-Sensitive Hashing) for large-scale similarity detection
+- Reads nodes from PostgreSQL and determines the appropriate graph topology:
+    - **Symmetric Graphs**: For matching entities of the same type (e.g., user-to-user similarity)
+    - **Bipartite Graphs**: For matching entities across two distinct types (e.g., jobs↔candidates, buyers↔sellers)
+- Uses a matching strategy based on data shape and configuration:
+    - LSH (Locality-Sensitive Hashing) for large-scale similarity detection (symmetric only)
     - Metadata-weighted comparisons when metadata keys and weights matter
     - Flat strategy as a simple fallback for small sets or limited metadata
 - Stores candidate edges in LMDB (and optionally PostgreSQL).
@@ -236,7 +239,55 @@ Output:
 - Candidate edges (potential matches) stored where the next stage can read them efficiently (commonly LMDB).
 
 Why this stage matters:
-- It reduces an otherwise explosive “compare everything with everything” problem into a smaller candidate set.
+- It reduces an otherwise explosive "compare everything with everything" problem into a smaller candidate set.
+
+### Graph Topology Decision Flow
+
+```mermaid
+flowchart TD
+    A[Nodes Batch Ready] --> B{Has Partition<br/>Configuration?}
+    
+    B -->|No partition key<br/>or missing values| C[SYMMETRIC<br/>All nodes vs All nodes]
+    
+    B -->|Has partitionKey +<br/>leftValue + rightValue| D[Partition Nodes]
+    
+    D --> E[Left Partition]
+    D --> F[Right Partition]
+    
+    E --> G{MatchType Setting}
+    F --> G
+    
+    G -->|Explicit SYMMETRIC| C
+    G -->|Explicit BIPARTITE| H[BIPARTITE<br/>Left vs Right only]
+    G -->|AUTO| I{Same node types<br/>in both partitions?}
+    
+    I -->|Yes| C
+    I -->|No| H
+    
+    C --> J[SymmetricGraphBuilder<br/>Uses LSH indexing]
+    H --> K[BipartiteGraphBuilder<br/>Brute-force pairwise]
+    
+    J --> L[Candidate Edges]
+    K --> L
+    
+    style C fill:#4CAF50,color:#fff
+    style H fill:#FF9800,color:#fff
+    style J fill:#C8E6C9
+    style K fill:#FFE0B2
+```
+
+### Symmetric vs Bipartite Comparison
+
+| Aspect | Symmetric Graph | Bipartite Graph |
+|--------|-----------------|-----------------|
+| **Use Case** | Same-type matching (users↔users) | Cross-type matching (jobs↔candidates) |
+| **Algorithm** | LSH for approximate neighbors | Exhaustive pairwise comparison |
+| **Complexity** | O(N log N) approximate | O(L × R) exact |
+| **Accuracy** | Approximate (tunable threshold) | Exact compatibility scores |
+| **Partition** | Single node set | Two distinct partitions |
+| **Best For** | Large homogeneous datasets | Smaller heterogeneous datasets |
+
+### Main Processing Sequence
 
 ```mermaid
 sequenceDiagram
@@ -245,7 +296,9 @@ sequenceDiagram
     participant EXE as JobExecutor
     participant FETCH as NodeFetchService
     participant PG as PostgreSQL
-    participant STRAT as MatchingStrategy
+    participant PRE as GraphPreProcessor
+    participant SYM as SymmetricBuilder
+    participant BIP as BipartiteBuilder
     participant PROC as ComputationProcessor
     participant LMDB as LMDB Edge Store
     participant STORE as StorageProcessor
@@ -260,21 +313,88 @@ sequenceDiagram
         FETCH-->>EXE: Nodes
     end
 
-    EXE->>STRAT: determineStrategy(nodes)
-    STRAT->>PROC: computePotentialMatches(nodes)
-
-    par Parallel computation
-        PROC->>PROC: Compare & score nodes
-        PROC->>PROC: Generate candidate edges
+    EXE->>PRE: buildGraph(nodes, request)
+    PRE->>PRE: Determine graph topology
+    
+    alt Symmetric Match
+        PRE->>SYM: build(allNodes, request)
+        SYM->>SYM: Index nodes with LSH
+        SYM->>SYM: Process chunk pairs
+        SYM-->>PRE: GraphResult
+    else Bipartite Match
+        PRE->>PRE: Partition nodes (left/right)
+        PRE->>BIP: build(leftNodes, rightNodes, request)
+        BIP->>BIP: Chunk both partitions
+        BIP->>BIP: Cartesian product comparison
+        BIP-->>PRE: GraphResult
     end
 
+    PRE->>PROC: processMatches(result)
     PROC->>LMDB: persistEdgesAsync()
     PROC->>STORE: savePotentialMatches()
 
     SCH->>SCH: Release domain/group semaphore
-
-
 ```
+
+### Bipartite Graph Processing Detail
+
+When bipartite matching is selected, the system processes cross-partition comparisons:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant BIP as BipartiteBuilder
+    participant CHUNK as ChunkManager
+    participant COMP as CompletionService
+    participant SEM as ComputeSemaphore
+    participant STRAT as EdgeBuildingStrategy
+    participant CALC as CompatibilityCalculator
+    participant STORE as GraphStore
+    participant LMDB as LMDB
+
+    BIP->>CHUNK: Partition left nodes (500/chunk)
+    BIP->>CHUNK: Partition right nodes (500/chunk)
+    CHUNK-->>BIP: leftChunks[n], rightChunks[m]
+    
+    BIP->>BIP: Calculate totalTasks = n × m
+
+    loop Submit initial batch (4 concurrent)
+        BIP->>SEM: tryAcquire(30 sec)
+        SEM-->>BIP: Permit granted
+        BIP->>COMP: submit(chunkPair)
+    end
+
+    loop Until all tasks complete
+        COMP-->>BIP: take() completed chunk
+        
+        rect rgb(255, 249, 196)
+            Note over STRAT,CALC: Inside chunk task
+            STRAT->>STRAT: For each leftNode × rightNode
+            STRAT->>CALC: calculate(left, right)
+            CALC->>CALC: Find common metadata keys
+            CALC->>CALC: Score matches (exact/numeric/substring)
+            CALC-->>STRAT: compatibility score
+            
+            alt score > threshold (0.05)
+                STRAT->>STRAT: Add PotentialMatch
+            end
+        end
+        
+        BIP->>STORE: persistEdgesAsync(matches)
+        STORE->>LMDB: Write batch transaction
+        
+        alt More chunks to process
+            BIP->>SEM: tryAcquire(30 sec)
+            BIP->>COMP: submit(nextChunkPair)
+        end
+    end
+
+    BIP->>BIP: Wait for all persistence futures
+    BIP->>STORE: streamEdges(groupId)
+    BIP->>STORE: cleanEdges(groupId)
+    BIP-->>BIP: Return GraphResult
+```
+
 
 Stage 3 — Perfect Match Creation (choosing final matches)
 ---------------------------------------------------------
@@ -683,5 +803,3 @@ Notes
 
 
 ---
-
-
