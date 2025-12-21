@@ -23,79 +23,7 @@
 
 The **Potential Matches Creation System** is an enterprise-grade graph processing platform designed to compute and persist compatibility relationships between entities at scale. The system processes millions of nodes daily, generating match recommendations using sophisticated algorithms including LSH (Locality-Sensitive Hashing), metadata-based weighting, and flat comparison strategies.
 
-### 1.2 Business Value Proposition
 
-```mermaid
-flowchart TB
-    ROOT["Business Value"]
-
-    ROOT --> AUTO["Automation"]
-    ROOT --> SC["Scale"]
-    ROOT --> QL["Quality"]
-    ROOT --> EF["Efficiency"]
-    ROOT --> INT["Intelligence"]
-
-    AUTO --> A1["Eliminates manual matching"]
-    AUTO --> A2["Reduces human error"]
-    AUTO --> A3["24/7 processing capability"]
-
-    SC --> S1["Millions of entities"]
-    SC --> S2["Billions of comparisons"]
-    SC --> S3["Sub-linear complexity"]
-
-    QL --> Q1["Algorithmic consistency"]
-    QL --> Q2["Configurable strategies"]
-    QL --> Q3["Continuous improvement"]
-
-    EF --> E1["Cost reduction vs manual"]
-    EF --> E2["Fast processing time"]
-    EF --> E3["Resource optimization"]
-
-    INT --> I1["LSH similarity detection"]
-    INT --> I2["Metadata weighting"]
-    INT --> I3["Adaptive learning"]
-
-    style ROOT fill:#ECEFF1
-    style AUTO fill:#E3F2FD
-    style SC fill:#E8F5E9
-    style QL fill:#FFFDE7
-    style EF fill:#FCE4EC
-    style INT fill:#EDE7F6
-
-```
-
-### 1.3 Key Metrics
-
-| Metric | Current Capacity | Target (12 months) | Strategic Goal (24 months) |
-|--------|------------------|-------------------|---------------------------|
-| **Nodes Processed/Day** | 50K | 500K | 5M |
-| **Match Computations/Sec** | 100K | 500K | 2M |
-| **Processing Latency** | 15 min/group | <10 min/group | <5 min/group |
-| **System Availability** | 99.5% | 99.9% | 99.99% |
-| **Concurrent Domains** | 2 | 5 | 20 |
-| **Storage Footprint** | 200GB | 2TB | 20TB |
-
-### 1.4 Strategic Alignment
-
-```mermaid
-graph LR
-    A[Business Strategy:<br/>AI-Powered Matching] --> B[Platform Capability:<br/>Graph Processing]
-    B --> C[System Feature:<br/>Potential Matches]
-    C --> D[Business Outcome:<br/>Revenue Growth]
-    
-    E[Market Demand:<br/>Personalization] --> F[Technical Innovation:<br/>LSH + Metadata]
-    F --> C
-    
-    G[Operational Excellence:<br/>Automation] --> H[System Design:<br/>Scheduled Batch]
-    H --> C
-    
-    style A fill:#4CAF50
-    style B fill:#2196F3
-    style C fill:#FF9800
-    style D fill:#9C27B0
-```
-
----
 
 
 ## 3. System Architecture
