@@ -780,15 +780,6 @@ gantt
     Auto-Scaling               :p4-3, 2025-08-01, 45d
 ```
 
-**Capacity Planning**:
-
-| Year | Nodes/Day | Matches/Day | Storage | Infrastructure Cost |
-|------|-----------|-------------|---------|-------------------|
-| **Current** | 50K | 10M | 200GB | $5K/month |
-| **Year 1** | 500K | 100M | 2TB | $15K/month |
-| **Year 2** | 5M | 1B | 20TB | $50K/month |
-| **Year 3** | 50M | 50B | 200TB | $200K/month |
-
 ---
 
 
