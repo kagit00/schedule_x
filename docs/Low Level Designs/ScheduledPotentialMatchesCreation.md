@@ -516,27 +516,28 @@ graph LR
 
 ```mermaid
 flowchart TB
-    subgraph "3. Graph Building"
+    subgraph G["3. Graph Building"]
         D1[Determine MatchType] --> D2{Symmetric?}
-        D2 -->|Yes| D3[Symmetric Builder<br/>(LSH/Metadata)]
+        D2 -->|Yes| D3[Symmetric Builder - LSH Metadata]
         D2 -->|No| D4[Bipartite Builder]
-        
-        D4 --> D5[Partition Nodes<br/>left/right]
-        D5 --> D6[Chunk into 500-node batches]
-        D6 --> D7[Parallel Chunk Pairs<br/>(left[i] × right[j])]
+
+        D4 --> D5[Partition Nodes left right]
+        D5 --> D6[Chunk into 500 node batches]
+        D6 --> D7[Parallel Chunk Pairs left i x right j]
         D7 --> D8[Compute Metadata Similarity]
         D8 --> D9[Generate PotentialMatches]
     end
-    
+
     D9 --> E1[Enqueue to QueueManager]
     E1 --> E2{Queue Full?}
     E2 -->|Yes| E3[Spill to Disk]
     E2 -->|No| E4[Keep in Memory]
-    E3 & E4 --> E5[Flush Batch 500]
-    
+    E3 --> E5[Flush Batch 500]
+    E4 --> E5[Flush Batch 500]
+
     E5 --> F1[LMDB Write]
     E5 --> F2[PostgreSQL Write]
-    
+
     style D4 fill:#F48FB1
     style D7 fill:#CE93D8
     style D8 fill:#B39DDB
