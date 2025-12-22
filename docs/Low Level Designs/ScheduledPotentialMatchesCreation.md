@@ -18,7 +18,7 @@
 8. [Queue Management System](#8-queue-management-system)
 9. [Performance Optimization](#9-performance-optimization)
 10. [Error Handling & Resilience](#10-error-handling--resilience)
-11. [Monitoring & Observability](#11-monitoring--observability)
+
 
 ---
 
