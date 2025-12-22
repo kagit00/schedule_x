@@ -10,12 +10,7 @@
 3. [Component Design](#3-component-design)
 4. [Data Flow Architecture](#4-data-flow-architecture)
 5. [Concurrency & Threading Model](#5-concurrency--threading-model)
-6. [Streaming Architecture](#6-streaming-architecture)
-7. [Export & File Processing](#7-export--file-processing)
-8. [Kafka Integration](#8-kafka-integration)
-9. [Error Handling & Resilience](#9-error-handling--resilience)
-10. [Performance Optimization](#10-performance-optimization)
-11. [Monitoring & Observability](#11-monitoring--observability)
+
 
 ---
 
