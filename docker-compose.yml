@@ -47,6 +47,7 @@ services:
     container_name: schedulex
     volumes:
       - /home/kaustav/schedulex/graph-store:/app/graph-store
+      - ./logs:/logs
     depends_on:
       - postgres
       - redis
@@ -79,6 +80,7 @@ services:
     depends_on:
       - postgres
       - redis
+
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/schedulex
       SPRING_DATASOURCE_USERNAME: postgres

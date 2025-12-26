@@ -60,12 +60,15 @@ ENV DEPENDENCIES="kafka:9092 postgres:5432 redis:6379"
 
 # Start-up script: wait for dependencies, then run the app
 CMD ["sh", "-c", "\
+mkdir -p /logs; \
+echo \"==== NEW RUN `date` ====\" >> /logs/schedulex.log; \
 for dep in $DEPENDENCIES; do \
   host=$(echo $dep | cut -d: -f1); \
   port=$(echo $dep | cut -d: -f2); \
   until nc -z $host $port; do \
-    echo waiting for $host:$port; sleep 2; \
+    echo waiting for $host:$port >> /logs/schedulex.log; sleep 2; \
   done; \
 done; \
-echo 'All dependencies are up! Starting ScheduleX...'; \
-exec java $JAVA_OPTS -jar app.jar"]
+echo 'All dependencies are up! Starting ScheduleX...' >> /logs/schedulex.log; \
+exec java $JAVA_OPTS -jar app.jar >> /logs/schedulex.log 2>&1"]
+
