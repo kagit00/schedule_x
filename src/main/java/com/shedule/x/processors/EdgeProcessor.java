@@ -25,6 +25,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -41,7 +42,14 @@ public final class EdgeProcessor {
             AtomicReference<Snapshot> currentSnapshot,
             EdgeBuildingConfig config,
             Semaphore chunkSemaphore,
-            ThreadLocal<List<GraphRecords.PotentialMatch>> chunkMatchesBuffer) {
+            ThreadLocal<List<GraphRecords.PotentialMatch>> chunkMatchesBuffer,
+            Map<String, Object> context) {
+
+        // 1. Resolve Cancellation Supplier safely
+        @SuppressWarnings("unchecked")
+        Supplier<Boolean> isCancelled = (context != null && context.get("cancellationCheck") instanceof Supplier)
+                ? (Supplier<Boolean>) context.get("cancellationCheck")
+                : () -> false;
 
         final Map<UUID, NodeDTO> targetNodeMap = (targetBatch == null || targetBatch.isEmpty())
                 ? Collections.emptyMap()
@@ -51,6 +59,12 @@ public final class EdgeProcessor {
         List<GraphRecords.PotentialMatch> allMatches = new ArrayList<>();
 
         for (List<NodeDTO> chunk : nodeChunks) {
+            // 2. High-level cancellation check
+            if (Thread.currentThread().isInterrupted() || isCancelled.get()) {
+                log.warn("Symmetric edge processing cancelled for groupId={}", groupId);
+                break;
+            }
+
             boolean acquired = false;
             try {
                 acquired = chunkSemaphore.tryAcquire(config.getChunkTimeoutSeconds(), TimeUnit.SECONDS);
@@ -59,8 +73,9 @@ public final class EdgeProcessor {
                     continue;
                 }
 
-                if (!waitForLshReady(currentSnapshot, chunk.size(), groupId)) {
-                    log.warn("LSH indexing not ready in time for chunk in groupId={} — skipping this chunk", groupId);
+                // 3. Pass isCancelled to the waiting logic
+                if (!waitForLshReady(currentSnapshot, chunk.size(), groupId, isCancelled)) {
+                    log.warn("LSH indexing not ready or cancelled for groupId={}", groupId);
                     continue;
                 }
 
@@ -68,25 +83,26 @@ public final class EdgeProcessor {
                 List<Pair<int[], UUID>> nodesForBulkQuery = chunk.stream()
                         .map(node -> {
                             int[] encoded = snap.encodedNodesCache().get(node.getId());
-                            if (encoded == null) {
-                                log.warn("Encoded vector missing for node {} in groupId={} (should not happen)", node.getId(), groupId);
-                                return null;
-                            }
+                            if (encoded == null) return null;
                             return Pair.of(encoded, node.getId());
                         })
                         .filter(Objects::nonNull)
                         .toList();
 
-                if (nodesForBulkQuery.isEmpty()) {
+                if (nodesForBulkQuery.isEmpty()) continue;
+
+                // 4. Query LSH with a clean blocking get (avoids CF zombie tasks)
+                CompletableFuture<Map<UUID, Set<UUID>>> queryFuture = lshIndex.queryAsyncAll(nodesForBulkQuery);
+                Map<UUID, Set<UUID>> bulkCandidates;
+                try {
+                    bulkCandidates = queryFuture.get(config.getChunkTimeoutSeconds(), TimeUnit.SECONDS);
+                } catch (TimeoutException e) {
+                    queryFuture.cancel(true); // Attempt to kill the LSH query task
+                    log.error("LSH Query timed out for groupId={}", groupId);
                     continue;
                 }
 
-                CompletableFuture<Map<UUID, Set<UUID>>> queryFuture = lshIndex
-                        .queryAsyncAll(nodesForBulkQuery)
-                        .orTimeout(config.getChunkTimeoutSeconds(), TimeUnit.SECONDS);
-
-                Map<UUID, Set<UUID>> bulkCandidates = queryFuture.get(config.getChunkTimeoutSeconds(), TimeUnit.SECONDS);
-
+                // 5. Process candidates with per-node cancellation checks
                 allMatches.addAll(processChunkCandidates(
                         chunk,
                         bulkCandidates,
@@ -96,12 +112,13 @@ public final class EdgeProcessor {
                         compatibilityCalculator,
                         config.getSimilarityThreshold(),
                         config.getCandidateLimit(),
-                        chunkMatchesBuffer
+                        chunkMatchesBuffer,
+                        isCancelled
                 ));
 
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                log.error("Interrupted during chunk processing for groupId={}", groupId, e);
+                log.error("Interrupted during chunk processing for groupId={}", groupId);
                 break;
             } catch (Exception e) {
                 log.error("Error processing chunk for groupId={}", groupId, e);
@@ -116,29 +133,29 @@ public final class EdgeProcessor {
         return allMatches;
     }
 
-    private boolean waitForLshReady(AtomicReference<Snapshot> currentSnapshot, int expectedSize, UUID groupId) {
+    private boolean waitForLshReady(
+            AtomicReference<Snapshot> currentSnapshot,
+            int expectedSize,
+            UUID groupId,
+            Supplier<Boolean> isCancelled) {
+
         int attempts = 0;
         final int maxAttempts = 30;
         final long baseDelayMs = 3000L;
 
         while (attempts < maxAttempts) {
+            if (Thread.currentThread().isInterrupted() || isCancelled.get()) {
+                return false;
+            }
+
             Snapshot snap = currentSnapshot.get();
             if (snap != null && snap.encodedNodesCache() != null) {
                 int cached = snap.encodedNodesCache().size();
-                if (cached >= expectedSize * 0.7) {
-                    if (attempts > 0) {
-                        log.info("LSH ready for groupId={} after {} attempts (cache={})", groupId, attempts, cached);
-                    }
-                    return true;
-                }
+                if (cached >= expectedSize * 0.7) return true;
             }
 
             attempts++;
-            long delay = Math.min(baseDelayMs * (1L << (attempts - 1)), 15000L); // exponential → max 15s
-            if (attempts <= 3 || attempts % 5 == 0) {
-                log.info("Waiting for LSH indexing — groupId={}, attempt {}/{}, cache has {} nodes",
-                        groupId, attempts, maxAttempts, snap == null ? 0 : snap.encodedNodesCache().size());
-            }
+            long delay = Math.min(baseDelayMs * (1L << (attempts - 1)), 15000L);
 
             try {
                 Thread.sleep(delay);
@@ -147,8 +164,6 @@ public final class EdgeProcessor {
                 return false;
             }
         }
-
-        log.error("LSH indexing took too long for groupId={} — giving up after {} attempts", groupId, maxAttempts);
         return false;
     }
 
@@ -161,44 +176,39 @@ public final class EdgeProcessor {
             CompatibilityCalculator compatibilityCalculator,
             double similarityThreshold,
             int candidateLimit,
-            ThreadLocal<List<GraphRecords.PotentialMatch>> chunkMatchesBuffer) {
+            ThreadLocal<List<GraphRecords.PotentialMatch>> chunkMatchesBuffer,
+            Supplier<Boolean> isCancelled) {
 
         List<GraphRecords.PotentialMatch> chunkMatches = chunkMatchesBuffer.get();
         chunkMatches.clear();
 
         for (NodeDTO node : sourceChunk) {
+            if (Thread.currentThread().isInterrupted() || isCancelled.get()) {
+                break;
+            }
+
             try {
                 Set<UUID> rawCandidates = bulkCandidates.getOrDefault(node.getId(), Collections.emptySet());
-                if (rawCandidates.isEmpty()) {
-                    continue;
+                if (rawCandidates.isEmpty()) continue;
+                List<GraphRecords.PotentialMatch> nodeMatches = new ArrayList<>();
+
+                for (UUID candidateId : rawCandidates) {
+                    if (node.getId().equals(candidateId)) continue;
+
+                    NodeDTO candidateNode = targetNodeMap.get(candidateId);
+                    if (candidateNode == null) continue;
+
+                    double score = compatibilityCalculator.calculate(node, candidateNode);
+                    if (score >= similarityThreshold) {
+                        nodeMatches.add(new GraphRecords.PotentialMatch(
+                                node.getReferenceId(), candidateNode.getReferenceId(),
+                                score, groupId, domainId));
+                    }
                 }
 
-                List<GraphRecords.PotentialMatch> nodeMatches = rawCandidates.stream()
-                        .filter(candidateId -> !node.getId().equals(candidateId))
+                nodeMatches.sort(Comparator.comparingDouble(GraphRecords.PotentialMatch::getCompatibilityScore).reversed());
+                chunkMatches.addAll(nodeMatches.stream().limit(candidateLimit).toList());
 
-                        .filter(targetNodeMap::containsKey)
-
-                        .map(candidateId -> {
-                            NodeDTO candidateNode = targetNodeMap.get(candidateId);
-
-                            if (candidateNode == null) {
-                                return null;
-                            }
-
-                            double compatibilityScore = compatibilityCalculator.calculate(node, candidateNode);
-                            if (compatibilityScore >= similarityThreshold) {
-                                return new GraphRecords.PotentialMatch(
-                                        node.getReferenceId(), candidateNode.getReferenceId(),
-                                        compatibilityScore, groupId, domainId);
-                            }
-                            return null;
-                        })
-                        .filter(Objects::nonNull)
-                        .sorted(Comparator.comparingDouble(GraphRecords.PotentialMatch::getCompatibilityScore).reversed())
-                        .limit(candidateLimit)
-                        .toList();
-
-                chunkMatches.addAll(nodeMatches);
             } catch (Exception e) {
                 log.error("Node processing failed for nodeId={} groupId={}", node.getId(), groupId, e);
             }

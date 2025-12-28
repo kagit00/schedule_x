@@ -41,7 +41,6 @@ import java.util.stream.Stream;
 @Slf4j
 @Component
 public class GraphPreProcessor {
-    private static final long HARD_TIMEOUT_MINUTES = 45;
 
     private final SymmetricGraphBuilderService symmetricGraphBuilder;
     private final BipartiteGraphBuilderService bipartiteGraphBuilder;
@@ -133,10 +132,8 @@ public class GraphPreProcessor {
         }
 
         return buildFuture
-                .orTimeout(HARD_TIMEOUT_MINUTES, TimeUnit.MINUTES)
                 .exceptionally(ex -> {
                     if (ex instanceof TimeoutException) {
-                        log.error("HARD TIMEOUT ({} min) | groupId={}", HARD_TIMEOUT_MINUTES, groupId);
                         buildFuture.cancel(true);
                     }
                     throw new CompletionException(ex);

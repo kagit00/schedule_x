@@ -27,12 +27,13 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 @Slf4j
 @Service
 public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
-    private static final long CHUNK_TIMEOUT_SECONDS = 30;
+    private static final long CHUNK_TIMEOUT_SECONDS = 3600;
     private static final int MAX_RETRIES = 3;
     private static final long RETRY_BACKOFF_MS = 1000;
 
@@ -310,6 +311,7 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
         }
     }
 
+
     private Future<GraphRecords.ChunkResult> submitChunk(
             ExecutorCompletionService<GraphRecords.ChunkResult> completionService,
             List<NodeDTO> leftBatch,
@@ -317,6 +319,7 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
             MatchingRequest request,
             int chunkIndex,
             Semaphore computeSemaphore) {
+
         if (leftBatch.isEmpty() || rightBatch.isEmpty()) {
             log.debug("Skipping empty chunk for groupId={}, chunkIndex={}", request.getGroupId(), chunkIndex);
             computeSemaphore.release();
@@ -325,13 +328,19 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
 
         Future<GraphRecords.ChunkResult> future = completionService.submit(() -> {
             try {
-                return processBipartiteChunk(leftBatch, rightBatch, request, chunkIndex)
-                        .orTimeout(CHUNK_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-                        .get();
+                // CRITICAL CHANGE: Removed .orTimeout(...)
+                // We now rely on the Future.get() in the main loop to handle overall flow,
+                // or explicit cancellation if the parent task dies.
+                return processBipartiteChunk(leftBatch, rightBatch, request, chunkIndex).get();
+            } catch (InterruptedException | ExecutionException e) {
+                log.error("Chunk execution failed | groupId={} | chunk={}", request.getGroupId(), chunkIndex, e);
+                throw e; // Re-throw to be caught by completionService.take()
             } finally {
+                // ALWAYS release the semaphore, even if it crashed
                 computeSemaphore.release();
             }
         });
+
         bipartiteFuturesPending.incrementAndGet();
         return future;
     }
@@ -347,16 +356,19 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
     }
 
 
+
     private CompletableFuture<GraphRecords.ChunkResult> processBipartiteChunk(
             List<NodeDTO> leftBatch,
             List<NodeDTO> rightBatch,
             MatchingRequest request,
             int chunkIndex) {
+
         Instant start = Instant.now();
         List<GraphRecords.PotentialMatch> matches = new ArrayList<>();
         UUID groupId = request.getGroupId();
 
         String weightFunctionKey = request.getWeightFunctionKey();
+
         if ("flat".equalsIgnoreCase(weightFunctionKey)) {
             matches.addAll(leftBatch.stream()
                     .flatMap(left -> rightBatch.stream()
@@ -365,13 +377,26 @@ public class BipartiteGraphBuilder implements BipartiteGraphBuilderService {
                                     request.getDomainId())))
                     .toList());
         } else {
-            Map<String, Object> context = Map.of("executor", computeExecutor);
-            bipartiteEdgeBuildingStrategy.processBatch(leftBatch, rightBatch, matches, ConcurrentHashMap.newKeySet(), groupId,
-                    request.getDomainId(), context);
+            Map<String, Object> context = new HashMap<>();
+            context.put("executor", computeExecutor);
+            context.put("cancellationCheck", (Supplier<Boolean>) () -> Thread.currentThread().isInterrupted());
+
+            bipartiteEdgeBuildingStrategy.processBatch(
+                    leftBatch,
+                    rightBatch,
+                    matches,
+                    ConcurrentHashMap.newKeySet(),
+                    groupId,
+                    request.getDomainId(),
+                    context
+            );
         }
 
         meterRegistry.counter("bipartite_matches_generated", "groupId", groupId.toString()).increment(matches.size());
-        return CompletableFuture.completedFuture(new GraphRecords.ChunkResult(Set.of(), matches, chunkIndex, start));
+
+        return CompletableFuture.completedFuture(
+                new GraphRecords.ChunkResult(Set.of(), matches, chunkIndex, start)
+        );
     }
 
 

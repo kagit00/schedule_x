@@ -28,6 +28,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.function.Supplier;
 
 
 @Slf4j
@@ -78,10 +79,8 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
         UUID groupId = request.getGroupId();
         log.info("All tasks processed. Finalizing build | groupId={}", groupId);
 
-        // 1. Save Pending (Flush Queue)
         return processor.savePendingMatchesAsync(groupId, request.getDomainId(), request.getProcessingCycleId(), matchBatchSize)
                 .thenCompose(v ->
-                        // 2. Final Save (Streaming)
                         processor.saveFinalMatches(groupId, request.getDomainId(), request.getProcessingCycleId(), null, topK)
                 )
                 .thenRun(() -> {
@@ -179,6 +178,7 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
                 });
     }
 
+
     private CompletableFuture<Void> runWorkerChain(
             TaskIterator taskIterator,
             int totalTasks,
@@ -187,40 +187,52 @@ public class SymmetricGraphBuilder implements SymmetricGraphBuilderService {
             MatchingRequest request) {
 
         if (shutdownInitiated || Thread.currentThread().isInterrupted()) {
+            log.warn("Worker chain stopped due to interrupt/shutdown | groupId={}", request.getGroupId());
             return CompletableFuture.completedFuture(null);
         }
 
-        int myIndex = counter.getAndIncrement();
-        if (myIndex >= totalTasks) {
+        int index = counter.getAndIncrement();
+        if (index >= totalTasks) {
             return CompletableFuture.completedFuture(null);
         }
 
-        ChunkTask task = taskIterator.getTaskByIndex(myIndex);
+        ChunkTask task = taskIterator.getTaskByIndex(index);
 
-        if (myIndex % 1000 == 0) {
+        if (index % 100 == 0) {
             log.info("Progress: {}/{} tasks processed | groupId={}",
-                    myIndex, totalTasks, request.getGroupId());
+                    index, totalTasks, request.getGroupId());
         }
 
         return CompletableFuture.supplyAsync(() -> {
+                    if (Thread.currentThread().isInterrupted()) {
+                        throw new CompletionException(new InterruptedException("Worker thread interrupted"));
+                    }
+
                     try {
                         List<GraphRecords.PotentialMatch> matches = new ArrayList<>();
+                        Map<String, Object> context = Map.of(
+                                "cancellationCheck", (Supplier<Boolean>) () -> Thread.currentThread().isInterrupted()
+                        );
+
                         strategy.processBatch(
                                 task.sourceNodes(),
                                 task.targetNodes(),
                                 matches,
                                 Collections.emptySet(),
                                 request,
-                                Map.of()
+                                context
                         );
 
                         return new GraphRecords.ChunkResult(
                                 Collections.emptySet(),
                                 matches,
-                                myIndex,
+                                index,
                                 Instant.now()
                         );
                     } catch (Exception e) {
+                        if (e instanceof InterruptedException || Thread.currentThread().isInterrupted()) {
+                            throw new CompletionException(new InterruptedException());
+                        }
                         throw new CompletionException(e);
                     }
                 }, computeExecutor)

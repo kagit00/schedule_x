@@ -66,8 +66,11 @@ public class MetadataEdgeBuildingStrategy implements SymmetricEdgeBuildingStrate
             Map<String, Object> context) {
 
         UUID groupId = request.getGroupId();
-        int targetSize = (targetNodes == null) ? 0 : targetNodes.size();
-        log.info("Processing batch: Source={} vs Target={} for groupId={}", sourceNodes.size(), targetSize, groupId);
+
+        if (Thread.currentThread().isInterrupted()) {
+            log.warn("Symmetric batch aborted before start due to interrupt | groupId={}", groupId);
+            return;
+        }
 
         boolean acquired = false;
         try {
@@ -76,6 +79,7 @@ public class MetadataEdgeBuildingStrategy implements SymmetricEdgeBuildingStrate
                 log.warn("Timed out acquiring chunkSemaphore for groupId={}", groupId);
                 return;
             }
+
 
             matches.addAll(edgeProcessor.processBatchSync(
                     sourceNodes,
@@ -87,18 +91,19 @@ public class MetadataEdgeBuildingStrategy implements SymmetricEdgeBuildingStrate
                     currentSnapshot,
                     config,
                     chunkSemaphore,
-                    chunkMatchesBuffer
+                    chunkMatchesBuffer,
+                    context
             ));
-
-            log.info("Completed batch for groupId={}, total matches found in this task={}",
-                    groupId, matches.size());
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            log.error("Interrupted acquiring chunkSemaphore for groupId={}", groupId, e);
+            log.error("Interrupted during symmetric batch for groupId={}", groupId);
         } catch (Exception e) {
-            log.error("Batch processing failed for groupId={}", groupId, e);
-            throw new RuntimeException("Batch processing failed for groupId=" + groupId, e);
+            if (Thread.currentThread().isInterrupted()) {
+                log.warn("Symmetric batch processing halted due to interruption | groupId={}", groupId);
+            } else {
+                throw new RuntimeException("Batch processing failed", e);
+            }
         } finally {
             if (acquired) {
                 chunkSemaphore.release();

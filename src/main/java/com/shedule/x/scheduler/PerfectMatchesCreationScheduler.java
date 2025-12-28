@@ -43,7 +43,7 @@ public class PerfectMatchesCreationScheduler {
         this.perfectMatchCreationService = perfectMatchCreationService;
     }
 
-    @Scheduled(cron = "0 28 1 * * *", zone = "Asia/Kolkata")
+    @Scheduled(cron = "0 51 15 * * *", zone = "Asia/Kolkata")
     public void createPerfectMatches() {
         if (!isSafeToRunPerfectMatches()) {
             log.warn("Skipping perfect matches creation - system not ready or already running");

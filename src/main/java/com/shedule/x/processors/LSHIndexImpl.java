@@ -118,6 +118,10 @@ public class LSHIndexImpl implements LSHIndex {
             ids.clear();
 
             for (int band = 0; band < numBands; band++) {
+                if (band % 5 == 0 && Thread.currentThread().isInterrupted()) {
+                    throw new RuntimeException("LSH Band Query Interrupted");
+                }
+
                 int bucketHash = bandHashes[band] & 0xFFFF;
                 Set<UUID> bucket = graphStore.getBucket(band, bucketHash);
                 if (bucket == null || bucket.isEmpty()) continue;
@@ -262,48 +266,6 @@ public class LSHIndexImpl implements LSHIndex {
     }
 
     @Override
-    public CompletableFuture<Map<UUID, Set<UUID>>> queryAsyncAll(List<Pair<int[], UUID>> nodes) {
-        if (nodes == null || nodes.isEmpty()) {
-            return CompletableFuture.completedFuture(Collections.emptyMap());
-        }
-
-        final int nodeCount = nodes.size();
-
-        return CompletableFuture.supplyAsync(() -> {
-            Timer.Sample sample = Timer.start(meterRegistry);
-
-            try {
-                Map<UUID, Set<UUID>> result = new ConcurrentHashMap<>(nodeCount);
-
-                // Parallel query processing
-                nodes.parallelStream().forEach(p -> {
-                    try {
-                        result.put(p.getValue(), querySync(p.getKey(), p.getValue()));
-                    } catch (Exception e) {
-                        log.error("Failed to query node {} in bulk query", p.getValue(), e);
-                        meterRegistry.counter("lsh.bulk_query.node_failure").increment();
-                    }
-                });
-
-                sample.stop(meterRegistry.timer("lsh.bulk_query.duration"));
-                meterRegistry.counter("lsh.bulk_query.requests").increment();
-                meterRegistry.summary("lsh.bulk_query.node_count").record(nodeCount);
-                meterRegistry.summary("lsh.bulk_query.result_count").record(result.size());
-
-                log.debug("Bulk LSH query completed: {}/{} nodes processed",
-                        result.size(), nodeCount);
-
-                return result;
-
-            } catch (Exception e) {
-                meterRegistry.counter("lsh.bulk_query.failure").increment();
-                log.error("Bulk LSH query failed for {} nodes", nodeCount, e);
-                throw new CompletionException("Bulk LSH query failed", e);
-            }
-        }, executor);
-    }
-
-    @Override
     public long getNodePriorityScore(UUID nodeId) {
         short[] hashes = nodeHashCache.getIfPresent(nodeId);
         if (hashes != null && hashes.length > 0) {
@@ -360,7 +322,42 @@ public class LSHIndexImpl implements LSHIndex {
         }
     }
 
-    public CacheStats getCacheStats() {
-        return nodeHashCache.stats();
+    @Override
+    public CompletableFuture<Map<UUID, Set<UUID>>> queryAsyncAll(List<Pair<int[], UUID>> nodes) {
+        if (nodes == null || nodes.isEmpty()) {
+            return CompletableFuture.completedFuture(Collections.emptyMap());
+        }
+
+        final int nodeCount = nodes.size();
+
+        return CompletableFuture.supplyAsync(() -> {
+            Timer.Sample sample = Timer.start(meterRegistry);
+
+            try {
+                Map<UUID, Set<UUID>> result = new ConcurrentHashMap<>(nodeCount);
+
+                for (Pair<int[], UUID> p : nodes) {
+
+                    if (Thread.currentThread().isInterrupted()) {
+                        log.warn("Bulk LSH query interrupted/cancelled. Stopping mid-batch.");
+                        break;
+                    }
+
+                    try {
+                        result.put(p.getValue(), querySync(p.getKey(), p.getValue()));
+                    } catch (Exception e) {
+                        log.error("Failed to query node {} in bulk query", p.getValue(), e);
+                        meterRegistry.counter("lsh.bulk_query.node_failure").increment();
+                    }
+                }
+
+                sample.stop(meterRegistry.timer("lsh.bulk_query.duration"));
+                return result;
+
+            } catch (Exception e) {
+                meterRegistry.counter("lsh.bulk_query.failure").increment();
+                throw new CompletionException("Bulk LSH query failed", e);
+            }
+        }, executor);
     }
 }

@@ -14,11 +14,11 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Supplier;
 
 @Slf4j
 @Component
 public class BipartiteEdgeBuildingStrategy {
-    private static final int MATCH_BATCH_SIZE = 250;
 
     private final MeterRegistry meterRegistry;
     private final GraphBuilderMetrics metrics;
@@ -44,23 +44,33 @@ public class BipartiteEdgeBuildingStrategy {
             UUID domainId,
             Map<String, Object> context
     ) {
+        @SuppressWarnings("unchecked")
+        Supplier<Boolean> isCancelled = (context != null && context.containsKey("cancellationCheck"))
+                ? (Supplier<Boolean>) context.get("cancellationCheck")
+                : () -> false;
+
+        if (isCancelled.get() || Thread.currentThread().isInterrupted()) {
+            throw new RuntimeException("Build cancelled by user/system");
+        }
+
         Timer.Sample sample = Timer.start(meterRegistry);
-        log.debug("Processing bipartite batch of {} left nodes vs {} right nodes for groupId={}",
-                leftBatch.size(), rightBatch.size(), groupId);
 
         for (NodeDTO leftNode : leftBatch) {
+            if (Thread.currentThread().isInterrupted() || isCancelled.get()) {
+                log.warn("Bipartite batch processing cancelled/interrupted | groupId={}", groupId);
+                throw new RuntimeException("Operation cancelled");
+            }
+
             for (NodeDTO rightNode : rightBatch) {
                 double score = compatibilityCalculator.calculate(leftNode, rightNode);
                 if (score > similarityThreshold) {
-
-                    GraphRecords.PotentialMatch match = new GraphRecords.PotentialMatch(
+                    matches.add(new GraphRecords.PotentialMatch(
                             leftNode.getReferenceId(),
                             rightNode.getReferenceId(),
                             score,
                             groupId,
                             domainId
-                    );
-                    matches.add(match);
+                    ));
                     metrics.recordEdgeWeight(score);
                 }
             }
