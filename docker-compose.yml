@@ -1,3 +1,5 @@
+version: "3.8"
+
 services:
   postgres:
     image: postgres:16
@@ -10,21 +12,26 @@ services:
       POSTGRES_DB: schedulex
     ports:
       - "5433:5432"
-    command: [
-      "postgres",
-
-      "-c", "shared_buffers=1GB",
-      "-c", "work_mem=32MB",
-      "-c", "maintenance_work_mem=512MB",
-      "-c", "temp_buffers=64MB",
-
-      "-c", "wal_buffers=64MB",
-      "-c", "checkpoint_completion_target=0.9",
-      "-c", "max_wal_size=16GB",
-      "-c", "min_wal_size=2GB",
-
-      "-c", "max_connections=300"
-    ]
+    command:
+      - postgres
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - work_mem=32MB
+      - -c
+      - maintenance_work_mem=512MB
+      - -c
+      - temp_buffers=64MB
+      - -c
+      - wal_buffers=64MB
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - max_wal_size=16GB
+      - -c
+      - min_wal_size=2GB
+      - -c
+      - max_connections=300
     volumes:
       - /home/kaustav/schedulex/schedule_x/pgdata:/var/lib/postgresql/data
     networks:
@@ -41,28 +48,76 @@ services:
     networks:
       - kafka-network
 
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - kafka-network
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb -p local/flairbit-exports &&
+      mc mb -p local/schedulex-exports &&
+      echo 'MinIO buckets initialized'
+      "
+    networks:
+      - kafka-network
+    restart: "no"
+
   schedulex:
-    mem_limit: 2g
     build: .
     container_name: schedulex
+    mem_limit: 2g
     volumes:
       - /home/kaustav/schedulex/graph-store:/app/graph-store
       - ./logs:/logs
     depends_on:
       - postgres
       - redis
+      - minio
     environment:
       JAVA_OPTS: "-Xmx1200m -Xms512m --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED"
+
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/schedulex
       SPRING_DATASOURCE_USERNAME: postgres
       SPRING_DATASOURCE_PASSWORD: postgres
+
       SPRING_REDIS_HOST: redis
       SPRING_REDIS_PORT: 6379
+
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      MINIO_ENDPOINT: http://minio:9000
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
-      MINIO_BUCKET: flairbit-exports
+
+      # MinIO (matches application.properties)
+      minio.use: "true"
+      minio.endpoint: http://minio:9000
+      minio.access-key: minioadmin
+      minio.secret-key: minioadmin
+
+      # Explicit buckets
+      minio.import-bucket: flairbit-exports
+      minio.matches.export.bucket-name: schedulex-exports
+
       GRAPH_STORE_PATH: /app/graph-store
     ports:
       - "8080:8080"
@@ -80,7 +135,6 @@ services:
     depends_on:
       - postgres
       - redis
-
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/schedulex
       SPRING_DATASOURCE_USERNAME: postgres
@@ -89,7 +143,7 @@ services:
       SPRING_REDIS_PORT: 6379
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     command: >
-      sh -c "echo 'Test-generation image built. Use docker cp to extract generated tests from the image/container.'; sleep 5"
+      sh -c "echo 'Test-generation image built.'; sleep 5"
     networks:
       - kafka-network
 
@@ -117,11 +171,10 @@ services:
     networks:
       - kafka-network
 
-
-
 volumes:
   schedulex_redis_data:
   grafana-data:
+  minio-data:
 
 networks:
   kafka-network:

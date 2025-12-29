@@ -31,7 +31,7 @@ public class MatchesTransferScheduler {
     private final Executor matchTransferGroupExecutor;
     private final MeterRegistry meterRegistry;
 
-    @Scheduled(cron = "${match.transfer.cron-schedule}")
+    @Scheduled(cron = "0 30 1 * * *", zone = "Asia/Kolkata")
     public void scheduledMatchesTransferJob() {
         List<Domain> domains = domainService.getActiveDomains();
         if (domains.isEmpty()) {
