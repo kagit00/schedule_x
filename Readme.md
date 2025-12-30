@@ -742,5 +742,10 @@ Notes
 - LMDB is used as a performance layer for edge streaming and may be treated as regenerable depending on implementation.
 - Export files and notifications are the public “delivery contract” for clients/downstream systems.
 
+---
+
+Media
+----------------------
+<img src="docs/scr.png" width="1330" alt=""/>
 
 ---
