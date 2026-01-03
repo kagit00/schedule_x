@@ -749,3 +749,5 @@ Media
 <img src="docs/scr.png" width="1330" alt=""/>
 
 ---
+
+This repository includes real execution logs from production-scale runs, illustrating throughput, memory behavior, retries, and backpressure: /logs
