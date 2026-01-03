@@ -30,33 +30,33 @@ The **Potential Matches Creation System** is a batch-oriented graph processing d
 
 ```mermaid
 graph TB
-    subgraph "Presentation Layer"
-        A1[Scheduled Triggers<br/>@Scheduled Cron]
-        A2[Manual API<br/>(Conceptual)]
+    subgraph Presentation_Layer
+        A1[Scheduled Triggers\n@Scheduled Cron]
+        A2[Manual API\nConceptual]
     end
     
-    subgraph "Application Services Layer"
-        B1[Orchestration Service<br/>Job Scheduling & Coordination]
-        B2[Processing Service<br/>Business Logic]
-        B3[Node Management Service<br/>Entity Lifecycle]
+    subgraph Application_Services_Layer
+        B1[Orchestration Service\nJob Scheduling & Coordination]
+        B2[Processing Service\nBusiness Logic]
+        B3[Node Management Service\nEntity Lifecycle]
     end
     
-    subgraph "Domain Layer"
-        C1[Graph Processing<br/>Algorithms & Strategies]
-        C2[Match Computation<br/>Scoring & Ranking]
-        C3[Queue Management<br/>Buffering & Flow Control]
+    subgraph Domain_Layer
+        C1[Graph Processing\nAlgorithms & Strategies]
+        C2[Match Computation\nScoring & Ranking]
+        C3[Queue Management\nBuffering & Flow Control]
     end
     
-    subgraph "Infrastructure Layer"
-        D1[Data Access<br/>Repositories & DAOs]
-        D2[Storage Abstraction<br/>LMDB + PostgreSQL]
-        D3[Concurrency Control<br/>Semaphores & Thread Pools]
+    subgraph Infrastructure_Layer
+        D1[Data Access\nRepositories & DAOs]
+        D2[Storage Abstraction\nLMDB + PostgreSQL]
+        D3[Concurrency Control\nSemaphores & Thread Pools]
         D4[Instrumentation]
     end
     
-    subgraph "External Systems"
-        E1[(PostgreSQL<br/>Master Database)]
-        E2[(LMDB<br/>Edge Cache)]
+    subgraph External_Systems
+        E1[(PostgreSQL\nMaster Database)]
+        E2[(LMDB\nEdge Cache)]
         E3[Configuration]
     end
     
@@ -80,6 +80,7 @@ graph TB
     style C1 fill:#FF9800
     style D1 fill:#9C27B0
     style E1 fill:#607D8B
+
 ```
 
 ---

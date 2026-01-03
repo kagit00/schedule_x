@@ -64,32 +64,32 @@ flowchart TB
 
 ```mermaid
 graph TB
-    subgraph "Presentation Layer"
+    subgraph Presentation_Layer
         A1[Scheduled Jobs]
-        A2[REST APIs<br/>(Conceptual)]
+        A2[REST APIs\nConceptual]
         A3[Monitoring Endpoints]
     end
     
-    subgraph "Application Layer"
+    subgraph Application_Layer
         B1[Job Orchestration]
         B2[Workflow Management]
         B3[Business Logic]
     end
     
-    subgraph "Domain Layer"
+    subgraph Domain_Layer
         C1[Matching Algorithms]
         C2[Graph Processing]
         C3[Strategy Selection]
     end
     
-    subgraph "Infrastructure Layer"
+    subgraph Infrastructure_Layer
         D1[LMDB Integration]
         D2[PostgreSQL Access]
         D3[Thread Pool Management]
         D4[Instrumentation]
     end
     
-    subgraph "Cross-Cutting Concerns"
+    subgraph Cross_Cutting_Concerns
         E1[Security]
         E2[Logging]
         E3[Error Handling]
@@ -116,6 +116,7 @@ graph TB
     style C1 fill:#FF9800
     style D1 fill:#9C27B0
     style E1 fill:#F44336
+
 ```
 
 ### 3.2 Component Interaction Overview

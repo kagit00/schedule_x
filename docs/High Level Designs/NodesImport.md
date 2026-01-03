@@ -29,37 +29,37 @@ The **Node Import System** is an event-driven data ingestion system designed to 
 
 ```mermaid
 graph TB
-    subgraph "Event Layer"
-        A1[Kafka Consumer<br/>Topic Pattern Matching]
-        A2[Message Router<br/>Payload Type Detection]
-        A3[DLQ Handler<br/>Error Routing]
+    subgraph Event_Layer
+        A1[Kafka Consumer\nTopic Pattern Matching]
+        A2[Message Router\nPayload Type Detection]
+        A3[DLQ Handler\nError Routing]
     end
     
-    subgraph "Application Layer"
-        B1[Import Job Orchestrator<br/>Lifecycle Management]
-        B2[File Processing Service<br/>CSV Streaming]
-        B3[Batch Processing Service<br/>Reference Handling]
-        B4[Status Management Service<br/>State Tracking]
+    subgraph Application_Layer
+        B1[Import Job Orchestrator\nLifecycle Management]
+        B2[File Processing Service\nCSV Streaming]
+        B3[Batch Processing Service\nReference Handling]
+        B4[Status Management Service\nState Tracking]
     end
     
-    subgraph "Domain Layer"
-        C1[Node Factory<br/>Entity Creation]
-        C2[Validation Engine<br/>Business Rules]
-        C3[Metadata Normalizer<br/>Key Standardization]
+    subgraph Domain_Layer
+        C1[Node Factory\nEntity Creation]
+        C2[Validation Engine\nBusiness Rules]
+        C3[Metadata Normalizer\nKey Standardization]
     end
     
-    subgraph "Infrastructure Layer"
-        D1[Storage Processor<br/>PostgreSQL COPY]
-        D2[File Resolver<br/>Object Storage/Filesystem]
-        D3[Metrics Collector<br/>Instrumentation]
-        D4[Transaction Manager<br/>ACID Control]
+    subgraph Infrastructure_Layer
+        D1[Storage Processor\nPostgreSQL COPY]
+        D2[File Resolver\nObject Storage / Filesystem]
+        D3[Metrics Collector\nInstrumentation]
+        D4[Transaction Manager\nACID Control]
     end
     
-    subgraph "External Systems"
-        E1[(PostgreSQL<br/>Primary Data Store)]
-        E2[(Object Storage<br/>File Storage)]
-        E3[Messaging System<br/>Event Bus]
-        E4[Instrumentation<br/>Metrics]
+    subgraph External_Systems
+        E1[(PostgreSQL\nPrimary Data Store)]
+        E2[(Object Storage\nFile Storage)]
+        E3[Messaging System\nEvent Bus]
+        E4[Instrumentation\nMetrics]
     end
     
     A1 --> B1
@@ -84,6 +84,7 @@ graph TB
     style C1 fill:#FF9800
     style D1 fill:#9C27B0
     style E1 fill:#607D8B
+
 ```
 
 ---
