@@ -1,6 +1,6 @@
 # Perfect Match Creation System - Low-Level Design Document
 
-*Based on a reference implementation*
+
 
 ---
 
