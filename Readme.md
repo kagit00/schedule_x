@@ -750,4 +750,6 @@ Media
 
 ---
 
-This repository includes real execution logs from production-scale runs, illustrating throughput, memory behavior, retries, and backpressure: /logs
+This repository includes real execution logs from production-scale runs, illustrating throughput, memory behavior, retries, and backpressure: 
+
+- [LOGS](https://github.com/kagit00/schedule_x/blob/master/docs/Low%20Level%20Designs/NodesImport.md)
