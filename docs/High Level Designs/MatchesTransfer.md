@@ -1,5 +1,7 @@
 # **Match Transfer to Client — High-Level Design (HLD) with Diagrams**
 
+
+
 ---
 
 ## **1) Purpose and Scope**
@@ -21,13 +23,13 @@ graph TD
 ### **Scope**
 - **Objective**: Periodically export potential and perfect matches for each group/domain to a file and notify downstream systems.
 - **Inputs**:
-    - `PotentialMatchEntity` and `PerfectMatchEntity` streams from PostgreSQL.
+    - Streams of `PotentialMatchEntity` and `PerfectMatchEntity` from PostgreSQL.
 - **Process**:
-    - Transforms DB entities into transfer DTOs.
+    - Transforms database entities into transfer DTOs.
     - Exports to a file via `ExportService`.
-    - Publishes a file reference to a Kafka-like topic.
+    - Publishes a file reference to a messaging topic.
 - **Constraints**:
-    - Batch/scheduled execution only.
+    - Batch/scheduled execution.
     - High-throughput streaming from the database.
 
 ---
@@ -45,7 +47,7 @@ flowchart TD
 ```
 
 - **Scheduler**: `MatchesTransferScheduler.scheduledMatchesTransferJob`
-- **Cron Expression**: `${match.transfer.cron-schedule}`
+- **Cron Expression**: Configurable via property (e.g., `${match.transfer.cron-schedule}`)
 - **Behavior**:
     - Enumerates active domains and their associated groups.
     - Submits per-group transfer tasks to a dedicated group-level executor.
@@ -80,7 +82,7 @@ graph TD
 
     subgraph Output
         G --> K[ExportedFile]
-        H --> L[Kafka: MatchSuggestionsExchange]
+        H --> L[Messaging Topic: MatchSuggestionsExchange]
     end
 ```
 
@@ -110,12 +112,12 @@ flowchart TD
 1. **Scheduler**: Submits an async task for each group.
 2. **Processor**:
     - Starts two streaming producers (Potential and Perfect).
-    - Maps DB entities to `MatchTransfer` DTOs and enqueues them.
+    - Maps database entities to `MatchTransfer` DTOs and enqueues them.
     - Builds a lazy `Stream` that polls the queue.
 3. **Export & Send**:
     - `ExportService` consumes the stream and creates a file.
-    - A `MatchSuggestionsExchange` message is published to Kafka.
-4. **Monitoring**: The scheduler collects metrics and logs for each group.
+    - A message is published to the messaging topic.
+4. **Monitoring**: Collects metrics and logs for each group.
 
 ---
 
@@ -138,17 +140,15 @@ classDiagram
     class MatchTransferProcessor {
         +Coordinates streaming, export, and messaging
         +Producer-consumer pipeline with backpressure
-        +Implements resilience (@CircuitBreaker, @Retryable)
+        +Implements resilience mechanisms
     }
 
     class PotentialMatchStreamingService {
         +JDBC forward-only streaming
-        +Retry on SQL errors
     }
 
     class PerfectMatchStreamingService {
         +JDBC forward-only streaming
-        +Retry on SQL errors
     }
 
     class ExportService {
@@ -182,7 +182,7 @@ graph TD
 
   subgraph Output
     E["ExportedFile"]
-    F["MatchSuggestionsExchange\n(Kafka)"]
+    F["MatchSuggestionsExchange\n(Message)"]
   end
 
   A --> C
@@ -195,7 +195,7 @@ graph TD
 
 - **Inputs**: Streams of `PotentialMatchEntity` and `PerfectMatchEntity`.
 - **Transform**: Maps entities to a common `MatchTransfer` DTO and merges them.
-- **Outputs**: An `ExportedFile` and a `MatchSuggestionsExchange` message.
+- **Outputs**: An `ExportedFile` and a message on the topic.
 
 ---
 
@@ -210,22 +210,22 @@ graph TD
   end
 
   subgraph Backpressure
-    B1["Bounded Queue (capacity=100)"]
+    B1["Bounded Queue"]
     B2["queue.put() (blocks if full)"]
     B3["queue.poll() (non-blocking)"]
   end
 
   subgraph Memory
-    M1["Batch Size\n(100k)"]
-    M2["Queue Capacity\n(100)"]
-    M3["Worst-Case Memory\n100 × 100k DTOs"]
+    M1["Batch Size"]
+    M2["Queue Capacity"]
+    M3["Worst-Case Memory Consideration"]
   end
 
 ```
 
 - **Executors**: Separate pools for group scheduling and producer/consumer tasks.
 - **Backpressure**: A bounded queue blocks producers when full.
-- **Memory**: The main risk is the queue size; `batchSize` and `queueCapacity` must be carefully sized.
+- **Memory**: The queue size represents the primary consideration; batch size and queue capacity should be configured appropriately.
 - **Termination**: An `AtomicBoolean` flag coordinates the shutdown of the consumer.
 
 ---
@@ -250,54 +250,31 @@ graph TD
 
 ```
 
-- **Circuit Breaker**: Wraps `processMatchTransfer` to prevent cascading failures.
-- **Retries**: Applied to both streaming and export operations.
+- **Circuit Breaker**: Applied to `processMatchTransfer` to prevent cascading failures.
+- **Retries**: Applied to streaming and export operations.
 - **Error Metrics**: Dedicated counters for tracking failures.
 - **Defensive Checks**: Null filtering and proper interruption handling.
 
 ---
 
-## **9) Observability**
+## **9) Design Characteristics (Intended)**
 
-### **Observability Dashboard**
-```mermaid
-graph LR
-    subgraph Gauges
-        G1[group_executor_active_threads]
-        G2[group_executor_queue_size]
-        G3[batch_executor_active_threads]
-        G4[batch_executor_queue_size]
-    end
-
-    subgraph Timers
-        T1[group_process_duration]
-        T2[match_process_duration]
-        T3[export_send_duration]
-    end
-
-    subgraph Counters
-        C1[match_export_batch_count]
-        C2[match_export_records]
-        C3[match_export_success]
-        C4[group_process_failed]
-    end
-```
-
-- **Gauges**: Monitor executor health and queue depth.
-- **Timers**: Track the duration of key operations.
-- **Counters**: Count processed batches, records, successes, and failures.
+- **Concurrency**: Asynchronous per-group processing with dedicated executors.
+- **Backpressure Handling**: Built-in via bounded queue to prevent overload.
+- **Resilience**: Integration of circuit breakers and retry mechanisms.
+- **Observability**: Provision for gauges, timers, and counters to monitor executor health, operation durations, and processing outcomes.
 
 ---
 
-## **10) Configuration (Selected)**
+## **10) Configuration Considerations**
 
-| **Key** | **Default** | **Effect** |
-|---|---|---|
-| `match.transfer.cron-schedule` | N/A | Cron schedule for the job |
-| `match.transfer.batch-size` | 100000 | DB fetch size per streamed batch |
-| `matchTransferGroupExecutor` | External bean | Controls per-group parallelism |
-| `matchTransferExecutor` | External bean | Controls producer/consumer parallelism |
-| `Topic suffix` | `matches-suggestions` | Suffix for the Kafka topic name |
+| **Key** | **Purpose** |
+|---|---|
+| `match.transfer.cron-schedule` | Defines the schedule for the job |
+| `match.transfer.batch-size` | Controls DB fetch size per streamed batch |
+| `matchTransferGroupExecutor` | Manages per-group parallelism |
+| `matchTransferExecutor` | Manages producer/consumer parallelism |
+| `Topic suffix` | Defines suffix for the messaging topic name |
 
 ---
 
@@ -312,7 +289,7 @@ sequenceDiagram
     participant PerfectStreamer
     participant Queue
     participant ExportService
-    participant KafkaProducer
+    participant MessagingProducer
 
     Scheduler->>Processor: processGroup()
     Processor->>PotentialStreamer: streamAllMatches()
@@ -321,7 +298,7 @@ sequenceDiagram
     PerfectStreamer->>Queue: put(batch)
     Processor->>ExportService: exportMatches(streamSupplier)
     ExportService-->>Processor: ExportedFile
-    Processor->>KafkaProducer: sendMessage(payload)
+    Processor->>MessagingProducer: sendMessage(payload)
 ```
 
 ---
@@ -340,11 +317,11 @@ sequenceDiagram
 
 | **Risk** | **Recommendation** |
 |---|---|
-| **Memory Pressure** | Reduce `batchSize` and `queueCapacity`; consider push-based export |
+| **Memory Pressure** | Adjust batch size and queue capacity; consider push-based export |
 | **Ordering/Duplication** | Add merging/deduplication logic if required by clients |
-| **Backpressure Visibility** | Add metrics for the internal `MatchTransfer` queue fill percentage |
+| **Backpressure Visibility** | Include metrics for internal queue fill percentage |
 | **Failure Semantics** | Ensure producer failures are surfaced and logged clearly |
-| **Producer/Consumer Coupling** | Ensure export throughput matches streaming rate to avoid stalls |
+| **Producer/Consumer Coupling** | Balance export throughput with streaming rate to avoid stalls |
 
 ---
 
@@ -362,8 +339,6 @@ graph TD
     D --> G[Add Deduplication/Partitioning]
 ```
 
-- **New Export Formats**: Extend `ExportService` and the `MatchSuggestionsExchange` schema.
+- **New Export Formats**: Extend `ExportService` and the message schema.
 - **Additional Match Sources**: Add new streaming services to feed the same queue.
 - **Enhanced Processing**: Add deduplication or partitioning logic within the `MatchTransferProcessor`.
-
----

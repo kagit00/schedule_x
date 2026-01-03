@@ -1,7 +1,10 @@
 # Potential Matches Creation System - High-Level Design Document
 
 
+
 ---
+
+This document describes the architectural design of a batch-oriented potential-match computation pipeline developed as part of an independent backend systems project. The focus is on system structure, algorithmic flow, and correctness rather than production deployment, tuning, or capacity planning.
 
 ## Table of Contents
 
@@ -10,8 +13,6 @@
 3. [Functional Architecture](#4-functional-architecture)
 4. [Technology Stack](#6-technology-stack)
 5. [Data Architecture](#7-data-architecture)
-6. [Scalability & Performance](#11-scalability--performance)
-
 
 ---
 
@@ -19,14 +20,11 @@
 
 ### 1.1 System Overview
 
-The **Potential Matches Creation System** is an enterprise-grade graph processing platform designed to compute and persist compatibility relationships between entities at scale. The system processes millions of nodes daily, generating match recommendations using sophisticated algorithms including LSH (Locality-Sensitive Hashing), metadata-based weighting, and flat comparison strategies.
+The **Potential Matches Creation System** is a batch-oriented graph processing design for computing and persisting compatibility relationships between entities using strategies such as Locality-Sensitive Hashing (LSH), metadata weighting, and flat comparison.
 
-
-
+---
 
 ## 3. System Architecture
-
-
 
 ### 3.1 Logical Architecture
 
@@ -34,8 +32,7 @@ The **Potential Matches Creation System** is an enterprise-grade graph processin
 graph TB
     subgraph "Presentation Layer"
         A1[Scheduled Triggers<br/>@Scheduled Cron]
-        A2[Manual API<br/>Future: REST Endpoints]
-        A3[Monitoring Endpoints<br/>Actuator]
+        A2[Manual API<br/>(Conceptual)]
     end
     
     subgraph "Application Services Layer"
@@ -54,19 +51,17 @@ graph TB
         D1[Data Access<br/>Repositories & DAOs]
         D2[Storage Abstraction<br/>LMDB + PostgreSQL]
         D3[Concurrency Control<br/>Semaphores & Thread Pools]
-        D4[Observability<br/>Metrics, Logs, Traces]
+        D4[Instrumentation]
     end
     
     subgraph "External Systems"
         E1[(PostgreSQL<br/>Master Database)]
         E2[(LMDB<br/>Edge Cache)]
-        E3[Prometheus<br/>Metrics Store]
-        E4[Configuration Server]
+        E3[Configuration]
     end
     
     A1 --> B1
     A2 --> B2
-    A3 --> D4
     
     B1 --> C1
     B2 --> C2
@@ -78,8 +73,7 @@ graph TB
     
     D1 --> E1
     D2 --> E2
-    D4 --> E3
-    B1 --> E4
+    B1 --> E3
     
     style A1 fill:#4CAF50
     style B1 fill:#2196F3
@@ -88,6 +82,7 @@ graph TB
     style E1 fill:#607D8B
 ```
 
+---
 
 ## 4. Functional Architecture
 
@@ -126,8 +121,6 @@ graph TB
     subgraph "Operational"
         F17[Error Recovery]
         F18[Cursor Resumption]
-        F19[Metrics Collection]
-        F20[Graceful Shutdown]
     end
     
     F1 --> F5
@@ -145,7 +138,6 @@ graph TB
     
     F3 --> F17
     F7 --> F18
-    F19 -.-> F1
     
     style F1 fill:#C8E6C9
     style F9 fill:#BBDEFB
@@ -165,11 +157,11 @@ flowchart LR
     E -->|Timeout| F[Skip & Log]
     E -->|Success| G[Load Cursor<br/>Position]
     
-    G --> H[Fetch Node Batch<br/>1000 IDs]
+    G --> H[Fetch Node Batch]
     H --> I{Nodes Found?}
     
     I -->|No| J[Empty Streak++]
-    J --> K{Streak >= 3?}
+    J --> K{Streak Exceeded?}
     K -->|Yes| L[End Group]
     K -->|No| H
     
@@ -219,7 +211,7 @@ flowchart TD
     F -->|No| G[Create ConfigurableMetadataWeightFunction]
     F -->|Yes| H[Retrieve from Registry]
     
-    G --> I{Node Count<br/>> 1000?}
+    G --> I{Node Count<br/>Threshold?}
     H --> I
     
     I -->|Yes| J[Use LSH Strategy<br/>Sub-linear complexity]
@@ -229,9 +221,9 @@ flowchart TD
     J --> M[Index Nodes<br/>Build LSH buckets]
     K --> N[Index Nodes<br/>Metadata encoding]
     
-    L --> O[Process Batch<br/>O n^2 comparison]
-    M --> P[Process Batch<br/>O n log n via LSH]
-    N --> Q[Process Batch<br/>O n^2 weighted]
+    L --> O[Process Batch<br/>Pairwise comparison]
+    M --> P[Process Batch<br/>Via LSH]
+    N --> Q[Process Batch<br/>Weighted]
     
     O --> R[Generate Matches]
     P --> R
@@ -245,7 +237,6 @@ flowchart TD
 
 ---
 
-
 ## 6. Technology Stack
 
 ### 6.1 Technology Landscape
@@ -253,93 +244,43 @@ flowchart TD
 ```mermaid
 graph TB
     subgraph "Application Tier"
-        A1[Java 17 LTS]
-        A2[Spring Boot 3.2.x]
-        A3[Spring Framework 6.x]
-        A4[Spring Batch Patterns]
+        A1[Java]
+        A2[Spring Boot]
+        A3[Spring Framework]
     end
     
     subgraph "Data Tier"
-        B1[PostgreSQL 15]
-        B2[LMDB 0.9.x]
-        B3[HikariCP 5.x]
-        B4[Flyway Migration]
+        B1[PostgreSQL]
+        B2[LMDB]
+        B3[Connection Pooling]
     end
     
     subgraph "Resilience Tier"
         C1[Resilience4j]
-        C2[Spring Retry]
-        C3[Semaphore Control]
-        C4[Exponential Backoff]
+        C2[Retry Support]
+        C3[Concurrency Control]
     end
     
-    subgraph "Observability Tier"
-        D1[Micrometer]
-        D2[Prometheus]
-        D3[Grafana]
-        D4[Logback + ELK]
+    subgraph "Instrumentation (Design Intent)"
+        D1[Metrics Framework]
+        D2[Structured Logging]
     end
-    
-    subgraph "Build & Deploy"
-        E1[Maven 3.9]
-        E2[Docker]
-        E3[Kubernetes Future]
-        E4[GitHub Actions]
-    end
-    
-    A1 --> B1
-    A2 --> C1
-    A3 --> D1
-    B1 --> E1
     
     style A1 fill:#4CAF50
     style B1 fill:#2196F3
     style C1 fill:#FF9800
     style D1 fill:#9C27B0
-    style E1 fill:#F44336
 ```
 
 ### 6.2 Technology Selection Rationale
 
-| Technology | Purpose | Alternatives Considered | Decision Rationale |
-|------------|---------|------------------------|-------------------|
-| **Java 17** | Programming Language | Kotlin, Scala | LTS support, team expertise, virtual threads roadmap |
-| **Spring Boot** | Application Framework | Quarkus, Micronaut | Ecosystem maturity, enterprise support, productivity |
-| **PostgreSQL** | Primary Database | MySQL, Oracle | JSONB support, COPY protocol, open source |
-| **LMDB** | Edge Cache | RocksDB, Redis | Memory-mapped I/O, zero-copy, embedded |
-| **Resilience4j** | Fault Tolerance | Hystrix (deprecated), Sentinel | Lightweight, functional, Spring integration |
-| **Micrometer** | Metrics | Dropwizard Metrics | Vendor-neutral, Spring Boot native |
-| **Prometheus** | Metrics Store | InfluxDB, Datadog | Pull model, PromQL, open source |
-| **Grafana** | Visualization | Kibana, Chronograf | Flexibility, plugin ecosystem, community |
-
-### 6.3 Dependency Management
-
-```yaml
-Key Dependencies:
-  Spring Boot: 3.2.x
-    - spring-boot-starter-web
-    - spring-boot-starter-data-jpa
-    - spring-boot-starter-actuator
-  
-  Database:
-    - postgresql: 42.7.x
-    - HikariCP: 5.1.x (transitive)
-    - lmdbjava: 0.9.29
-  
-  Resilience:
-    - resilience4j-spring-boot3: 2.1.x
-    - spring-retry: 2.0.x
-  
-  Utilities:
-    - lombok: 1.18.x
-    - guava: 32.x
-    - caffeine: 3.1.x
-  
-  Testing:
-    - junit-jupiter: 5.10.x
-    - mockito-core: 5.x
-    - testcontainers: 1.19.x
-```
+| Technology | Purpose | Justification |
+|------------|---------|---------------|
+| **Java** | Programming Language | Long-term support and ecosystem |
+| **Spring Boot** | Application Framework | Enterprise features and productivity |
+| **PostgreSQL** | Primary Database | ACID compliance and extensions |
+| **LMDB** | Edge Cache | Memory-mapped I/O and read performance |
+| **Resilience4j** | Fault Tolerance | Lightweight and comprehensive patterns |
 
 ---
 
@@ -432,7 +373,7 @@ erDiagram
 ```mermaid
 flowchart TB
     subgraph "Data Sources"
-        A1[External Systems] -->|REST API| A2[Node Ingestion Service]
+        A1[External Systems] -->|Input| A2[Node Ingestion Service]
     end
     
     subgraph "Operational Store - PostgreSQL"
@@ -459,7 +400,7 @@ flowchart TB
     
     subgraph "Consumption Layer"
         F1[Recommendation Service]
-        F2[Analytics Dashboards]
+        F2[Analytics Platforms]
         F3[Reporting System]
     end
     
@@ -486,109 +427,13 @@ flowchart TB
     style E1 fill:#C8E6C9
 ```
 
-
-## 11. Scalability & Performance
-
-### 11.1 Scalability Dimensions
-
-```mermaid
-graph TB
-    subgraph "Vertical Scaling"
-        V1[Increase Instance Size<br/>8 CPU → 16 CPU]
-        V2[Increase Memory<br/>16GB → 32GB]
-        V3[Faster Storage<br/>SSD → NVMe]
-    end
-    
-    subgraph "Horizontal Scaling"
-        H1[Domain Partitioning<br/>Route by domainId]
-        H2[Multiple Instances<br/>Active-Active]
-        H3[Database Read Replicas<br/>5 replicas]
-    end
-    
-    subgraph "Architectural Scaling"
-        A1[Distributed Processing<br/>Kafka Workers]
-        A2[Sharded Database<br/>By domain/group]
-        A3[Distributed Cache<br/>Redis Cluster]
-    end
-    
-    V1 -.->|Current approach| H1
-    H1 -.->|Future state| A1
-    
-    style V1 fill:#E3F2FD
-    style H1 fill:#FFF9C4
-    style A1 fill:#C8E6C9
-```
-
-### 11.2 Performance Optimization Strategies
-
-```mermaid
-graph LR
-    subgraph "Input Optimization"
-        I1[Cursor Pagination<br/>No OFFSET penalty]
-        I2[Batch Fetching<br/>1000 nodes/batch]
-        I3[Connection Pooling<br/>20 connections]
-    end
-    
-    subgraph "Processing Optimization"
-        P1[LSH Indexing<br/>O n log n vs O n^2]
-        P2[Parallel Workers<br/>8 concurrent threads]
-        P3[Memory Queues<br/>Avoid disk I/O]
-    end
-    
-    subgraph "Output Optimization"
-        O1[Binary COPY Protocol<br/>10x faster INSERT]
-        O2[Batch Writes<br/>50K records/batch]
-        O3[LMDB Single Writer<br/>No contention]
-    end
-    
-    I1 --> P1
-    I2 --> P2
-    I3 --> P3
-    P1 --> O1
-    P2 --> O2
-    P3 --> O3
-    
-    style I1 fill:#C8E6C9
-    style P1 fill:#BBDEFB
-    style O1 fill:#FFF9C4
-```
-
-### 11.3 Scaling Roadmap
-
-```mermaid
-gantt
-    title Scalability Roadmap
-    dateFormat YYYY-MM-DD
-    
-    section Phase 1: Optimization
-    Cursor Pagination          :done, p1-1, 2024-01-01, 30d
-    LSH Implementation         :done, p1-2, 2024-02-01, 60d
-    Binary COPY Protocol       :done, p1-3, 2024-03-01, 20d
-    
-    section Phase 2: Vertical Scaling
-    Increase Instance Size     :active, p2-1, 2024-06-01, 15d
-    Add Read Replicas          :p2-2, 2024-07-01, 30d
-    Optimize Thread Pools      :p2-3, 2024-08-01, 20d
-    
-    section Phase 3: Horizontal Scaling
-    Domain Partitioning        :p3-1, 2024-09-01, 60d
-    Active-Active Setup        :p3-2, 2024-11-01, 45d
-    Load Balancing             :p3-3, 2025-01-01, 30d
-    
-    section Phase 4: Distributed Architecture
-    Kafka Integration          :p4-1, 2025-03-01, 90d
-    Worker Pool                :p4-2, 2025-06-01, 60d
-    Auto-Scaling               :p4-3, 2025-08-01, 45d
-```
-
 ---
-
 
 ## Appendix A: Glossary
 
 | Term | Definition |
 |------|------------|
-| **Node** | An entity (user, product, resource) participating in matching |
+| **Node** | An entity participating in matching |
 | **Edge** | A weighted connection representing compatibility between nodes |
 | **Potential Match** | A computed relationship with compatibility score |
 | **Cursor** | Position marker for incremental processing |
@@ -596,26 +441,21 @@ gantt
 | **LSH** | Locality-Sensitive Hashing - algorithm for similarity search |
 | **LMDB** | Lightning Memory-Mapped Database - embedded key-value store |
 | **Semaphore** | Concurrency control mechanism limiting parallel execution |
-| **Advisory Lock** | PostgreSQL application-level locking |
+| **Advisory Lock** | Database application-level locking |
 | **COPY Protocol** | PostgreSQL bulk data loading mechanism |
 
 ---
 
 ## Appendix B: References
 
-**Internal Documentation**:
-- Perfect Match Creation System - Low-Level Design (LLD)
+**Design Documentation**:
+- Potential Matches Creation System - Low-Level Design (LLD)
 - Database Schema Documentation
-- API Documentation (Swagger)
-- Operational Runbooks
+- API Documentation
 
 **External References**:
 - [Spring Boot Documentation](https://spring.io/projects/spring-boot)
 - [PostgreSQL COPY Documentation](https://www.postgresql.org/docs/current/sql-copy.html)
 - [LMDB Documentation](https://lmdb.readthedocs.io/)
-- [LSH Algorithm Papers](https://en.wikipedia.org/wiki/Locality-sensitive_hashing)
+- [Locality-Sensitive Hashing](https://en.wikipedia.org/wiki/Locality-sensitive_hashing)
 - [Resilience4j Guide](https://resilience4j.readme.io/)
-
----
-
-

@@ -3,6 +3,8 @@
 
 ---
 
+This document describes the architectural design of a node import pipeline developed as part of an independent backend systems project. The focus is on system structure, data flow, and correctness rather than production deployment or operational tuning.
+
 ## Table of Contents
 
 1. [Executive Summary](#1-executive-summary)
@@ -11,15 +13,15 @@
 4. [Technology Stack](#6-technology-stack)
 5. [Data Architecture](#7-data-architecture)
 
-
 ---
 
 ## 1. Executive Summary
 
 ### 1.1 System Overview
 
-The **Node Import System** is an event-driven, cloud-native data ingestion platform designed to process high-volume entity imports into the matching engine ecosystem. It consumes import requests from Kafka topics, processes CSV files from object storage or reference lists, and bulk-loads entities into PostgreSQL with comprehensive error handling, status tracking, and observability.
+The **Node Import System** is an event-driven data ingestion system designed to process entity imports into the matching engine ecosystem. It consumes import requests from messaging topics, processes CSV files from object storage or reference lists, and bulk-loads entities into PostgreSQL with comprehensive error handling, status tracking, and instrumentation.
 
+---
 
 ## 3. System Architecture
 
@@ -48,16 +50,16 @@ graph TB
     
     subgraph "Infrastructure Layer"
         D1[Storage Processor<br/>PostgreSQL COPY]
-        D2[File Resolver<br/>MinIO/Filesystem]
-        D3[Metrics Collector<br/>Prometheus Client]
+        D2[File Resolver<br/>Object Storage/Filesystem]
+        D3[Metrics Collector<br/>Instrumentation]
         D4[Transaction Manager<br/>ACID Control]
     end
     
     subgraph "External Systems"
         E1[(PostgreSQL<br/>Primary Data Store)]
-        E2[(MinIO<br/>File Storage)]
-        E3[Kafka<br/>Event Bus]
-        E4[Prometheus<br/>Metrics]
+        E2[(Object Storage<br/>File Storage)]
+        E3[Messaging System<br/>Event Bus]
+        E4[Instrumentation<br/>Metrics]
     end
     
     A1 --> B1
@@ -93,14 +95,14 @@ graph TB
 ```mermaid
 graph TB
     subgraph "Event Processing"
-        F1[Kafka Message Consumption]
+        F1[Message Consumption]
         F2[Payload Validation & Parsing]
         F3[DLQ Routing]
         F4[Status Publishing]
     end
     
     subgraph "File Handling"
-        F5[MinIO File Download]
+        F5[File Download]
         F6[GZIP Decompression]
         F7[Streaming CSV Parsing]
         F8[Batch Accumulation]
@@ -163,18 +165,18 @@ graph TB
 flowchart LR
     A[Event Trigger] --> B{Message Type?}
     
-    B -->|File-Based Import| C[Download from MinIO]
+    B -->|File-Based Import| C[Download File]
     B -->|Reference-Based Import| D[Create Nodes from IDs]
     
     C --> E[Stream GZIP CSV]
-    E --> F[Parse 1000-row Batches]
+    E --> F[Parse Configurable Batches]
     
-    D --> G[Partition into 1000-node Batches]
+    D --> G[Partition into Configurable Batches]
     
     F --> H[Convert to Node Entities]
     G --> H
     
-    H --> I[Parallel Batch Processing<br/>8 concurrent threads]
+    H --> I[Parallel Batch Processing<br/>Bounded Concurrency]
     
     I --> J[PostgreSQL COPY to temp_nodes]
     J --> K[UPSERT via INSERT ON CONFLICT]
@@ -188,7 +190,7 @@ flowchart LR
     O -->|100%| P[Status: COMPLETED]
     O -->|<100%| Q[Status: FAILED]
     
-    P --> R[Publish to Kafka<br/>Job Status Topic]
+    P --> R[Publish to Messaging System<br/>Job Status Topic]
     Q --> R
     
     style A fill:#4CAF50
@@ -200,26 +202,24 @@ flowchart LR
 
 ### 4.3 Feature Matrix
 
-| Feature | Priority | Status | Implementation |
-|---------|----------|--------|----------------|
-| **File-Based Import (CSV)** | P0 | Complete | GZIP streaming + PostgreSQL COPY |
-| **Reference-Based Import** | P0 | Complete | List of IDs → Node creation |
-| **MinIO Integration** | P0 |  Complete | S3 API for file download |
-| **Local Filesystem Support** | P1 |  Complete | Direct file access |
-| **DLQ Error Handling** | P0 |  Complete | Auto-routing + manual replay |
-| **Job Status Tracking** | P0 |  Complete | State machine + Kafka publishing |
-| **Metadata Normalization** | P1 |  Complete | Header standardization |
-| **Batch Timeout Management** | P1 |  Complete | Dynamic timeout calculation |
-| **Parallel Processing** | P0 |  Complete | 8 concurrent batch workers |
-| **Transaction Safety** | P0 |  Complete | ACID via TransactionTemplate |
-| **Retry Mechanism** | P1 |  Complete | RetryTemplate with backoff |
-| **REST API for Manual Trigger** | P2 |  Planned | HTTP endpoint for on-demand imports |
-| **Real-time Progress Updates** | P2 |  Planned | WebSocket or SSE for live status |
-| **Schema Validation** | P3 |  Future | JSON Schema for payload validation |
+| Feature | Priority | Design Coverage | Implementation Notes |
+|---------|----------|-----------------|----------------------|
+| **File-Based Import (CSV)** | P0 | Supported | GZIP streaming + PostgreSQL COPY |
+| **Reference-Based Import** | P0 | Supported | List of IDs → Node creation |
+| **Object Storage Integration** | P0 | Supported | S3-compatible API for file download |
+| **Local Filesystem Support** | P1 | Supported | Direct file access |
+| **DLQ Error Handling** | P0 | Supported | Auto-routing + manual replay |
+| **Job Status Tracking** | P0 | Supported | State machine + messaging publishing |
+| **Metadata Normalization** | P1 | Supported | Header standardization |
+| **Batch Timeout Management** | P1 | Supported | Dynamic timeout calculation |
+| **Parallel Processing** | P0 | Supported | Configurable concurrent batch workers |
+| **Transaction Safety** | P0 | Supported | ACID via TransactionTemplate |
+| **Retry Mechanism** | P1 | Supported | Retry with backoff |
+| **REST API for Manual Trigger** | P2 | Planned | HTTP endpoint for on-demand imports |
+| **Real-time Progress Updates** | P2 | Planned | WebSocket or SSE for live status |
+| **Schema Validation** | P3 | Planned | JSON Schema for payload validation |
 
 ---
-
-
 
 ## 6. Technology Stack
 
@@ -228,35 +228,33 @@ flowchart LR
 ```mermaid
 graph TB
     subgraph "Application Tier"
-        A1[Java 17 LTS]
-        A2[Spring Boot 3.2.x]
-        A3[Spring Kafka 3.x]
+        A1[Java]
+        A2[Spring Boot]
+        A3[Spring Kafka]
         A4[Spring Data JPA]
     end
     
     subgraph "Event Tier"
-        B1[Apache Kafka 3.x]
-        B2[Kafka Connect Future]
-        B3[Schema Registry Future]
+        B1[Apache Kafka]
+        B2[Kafka Connect (Conceptual)]
+        B3[Schema Registry (Conceptual)]
     end
     
     subgraph "Storage Tier"
-        C1[PostgreSQL 15]
-        C2[MinIO S3-compatible]
-        C3[HikariCP Connection Pool]
+        C1[PostgreSQL]
+        C2[S3-Compatible Object Storage]
+        C3[Connection Pooling]
     end
     
-    subgraph "Observability Tier"
-        D1[Micrometer]
-        D2[Prometheus]
-        D3[Grafana]
-        D4[Logback + ELK]
+    subgraph "Instrumentation (Design Intent)"
+        D1[Metrics Framework]
+        D2[Structured Logging]
     end
     
-    subgraph "Infrastructure"
+    subgraph "Deployment Targets (Conceptual)"
         E1[Docker Containers]
-        E2[Kubernetes Future]
-        E3[AWS/GCP Cloud]
+        E2[Container Orchestration (Conceptual)]
+        E3[Cloud Platforms (Conceptual)]
     end
     
     A1 --> B1
@@ -275,46 +273,44 @@ graph TB
 
 | Technology | Purpose | Alternatives Considered | Decision Rationale |
 |------------|---------|------------------------|-------------------|
-| **Java 17** | Programming Language | Kotlin, Go | LTS support, team expertise, ecosystem maturity |
-| **Spring Boot** | Application Framework | Quarkus, Micronaut | Enterprise adoption, Spring Kafka integration, productivity |
-| **Kafka** | Event Streaming | RabbitMQ, AWS SQS | High throughput, durability, ecosystem (Connect, Streams) |
-| **PostgreSQL** | Primary Database | MySQL, MongoDB | JSONB for metadata, COPY protocol, ACID compliance |
-| **MinIO** | Object Storage | AWS S3, Azure Blob | S3-compatible, on-prem deployment, cost-effective |
-| **Spring Kafka** | Kafka Client | Native Kafka Client | Spring integration, error handling, retry support |
-| **Micrometer** | Metrics | Dropwizard | Vendor-neutral, Spring Boot native, Prometheus integration |
-| **HikariCP** | Connection Pooling | Apache DBCP, C3P0 | Fastest pool, low overhead, production-proven |
+| **Java** | Programming Language | Kotlin, Go | Long-term support, ecosystem maturity |
+| **Spring Boot** | Application Framework | Quarkus, Micronaut | Enterprise integration, productivity |
+| **Kafka** | Event Streaming | RabbitMQ, Message Queues | High throughput, durability |
+| **PostgreSQL** | Primary Database | MySQL, MongoDB | JSONB support, COPY protocol, ACID compliance |
+| **S3-Compatible Storage** | Object Storage | Direct Filesystem | Standardized API, flexibility |
+| **Spring Kafka** | Kafka Client | Native Client | Integration, error handling support |
+| **Metrics Framework** | Instrumentation | Alternative Libraries | Vendor-neutral design |
+| **Connection Pooling** | Database Efficiency | Alternative Pools | Performance and reliability |
 
 ### 6.3 Dependency Management
 
 ```yaml
 Key Dependencies:
-  Spring Boot: 3.2.x
+  Spring Boot:
     - spring-boot-starter-web
     - spring-boot-starter-data-jpa
     - spring-boot-starter-actuator
   
   Kafka:
-    - spring-kafka: 3.x
-    - kafka-clients: 3.6.x
+    - spring-kafka
   
   Database:
-    - postgresql: 42.7.x
-    - HikariCP: 5.1.x
+    - postgresql
+    - Connection Pooling
   
   File Processing:
-    - minio: 8.5.x
-    - commons-csv: 1.10.x
+    - S3 Client
+    - CSV Library
   
   Utilities:
-    - lombok: 1.18.x
-    - jackson-databind: 2.15.x
-    - guava: 32.x
+    - lombok
+    - jackson-databind
+    - guava
   
   Testing:
-    - junit-jupiter: 5.10.x
-    - mockito-core: 5.x
-    - testcontainers: 1.19.x
-    - embedded-kafka: 3.x
+    - junit-jupiter
+    - mockito-core
+    - testcontainers
 ```
 
 ---
@@ -394,18 +390,18 @@ erDiagram
 ```mermaid
 flowchart TB
     subgraph "Data Sources"
-        A1[External CRM] -->|Export| A2[MinIO Bucket]
-        A3[Partner API] -->|JSON| A4[Kafka Topic]
+        A1[External Systems] -->|Export| A2[Object Storage]
+        A3[Partner Systems] -->|Payload| A4[Messaging Topic]
     end
     
     subgraph "Ingestion Layer"
-        A2 -->|S3 API| B1[File Download]
-        A4 -->|Kafka Consumer| B2[Message Processing]
+        A2 -->|API| B1[File Download]
+        A4 -->|Consumer| B2[Message Processing]
     end
     
     subgraph "Processing Layer"
         B1 --> C1[CSV Streaming Parser]
-        B2 --> C2[JSON Payload Parser]
+        B2 --> C2[Payload Parser]
         C1 --> C3[Node Entity Factory]
         C2 --> C3
     end
@@ -425,7 +421,7 @@ flowchart TB
     
     subgraph "Event Publishing"
         E4 --> F1[Build Status Message]
-        F1 --> F2[Kafka Producer]
+        F1 --> F2[Producer]
         F2 --> F3[Job Status Topic]
     end
     
@@ -440,7 +436,6 @@ flowchart TB
     style E2 fill:#C8E6C9
     style F3 fill:#FFCCBC
 ```
-
 
 ### 7.3 Data Quality & Governance
 
@@ -457,12 +452,12 @@ graph TB
         G1["Access Control<br/>Row-level security per domain"]
         G2["Data Lineage<br/>Import job tracking"]
         G3["Audit Trail<br/>Job status events"]
-        G4["Retention Policy<br/>90 day active jobs"]
+        G4["Retention Policy<br/>Active job history"]
     end
 
     subgraph "Compliance"
         C1["GDPR<br/>Right to erasure"]
-        C2["Data Privacy<br/>PII encryption"]
+        C2["Data Privacy<br/>PII handling"]
         C3["Multi-Tenancy<br/>Domain isolation"]
     end
 
@@ -478,15 +473,9 @@ graph TB
     style Q1 fill:#C8E6C9
     style G1 fill:#BBDEFB
     style C1 fill:#FFF9C4
-
 ```
 
 ---
-
-
-
-
-
 
 ## Appendix A: Glossary
 
@@ -494,10 +483,9 @@ graph TB
 |------|------------|
 | **Node** | An entity (user, product, resource) in the matching system |
 | **Import Job** | A tracked instance of a bulk node import operation |
-| **DLQ** | Dead Letter Queue - Kafka topic for failed messages |
+| **DLQ** | Dead Letter Queue - topic for failed messages |
 | **COPY Protocol** | PostgreSQL bulk loading mechanism (binary format) |
 | **UPSERT** | INSERT with ON CONFLICT DO UPDATE (idempotent insert) |
-| **Kafka Lag** | Number of messages not yet consumed by consumer group |
 | **MinIO** | S3-compatible object storage system |
 | **WAL** | Write-Ahead Log (PostgreSQL transaction log) |
 
@@ -505,17 +493,12 @@ graph TB
 
 ## Appendix B: References
 
-**Internal Documentation**:
+**Design Documentation**:
 - Node Import System - Low-Level Design (LLD)
-- Kafka Topic Configuration Guide
+- Messaging Topic Configuration Guide
 - PostgreSQL COPY Protocol Best Practices
-- Operational Runbooks
 
 **External References**:
 - [Spring Kafka Documentation](https://spring.io/projects/spring-kafka)
 - [PostgreSQL COPY Documentation](https://www.postgresql.org/docs/current/sql-copy.html)
-- [MinIO S3 API](https://min.io/docs/minio/linux/developers/java/API.html)
-- [Kafka Consumer Tuning](https://kafka.apache.org/documentation/#consumerconfigs)
-
----
-
+- [S3 API Documentation](https://docs.aws.amazon.com/AmazonS3/latest/API/Welcome.html)

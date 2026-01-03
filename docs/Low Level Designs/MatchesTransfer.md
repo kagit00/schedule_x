@@ -1,7 +1,10 @@
 # Match Transfer System - Low-Level Design Document
 
 
+
 ---
+
+This document describes the low-level design and reference implementation of a batch-oriented match export pipeline, focusing on correctness, data flow, and concurrency patterns rather than production deployment or operational tuning.
 
 ## Table of Contents
 
@@ -9,8 +12,6 @@
 2. [Architecture Design](#2-architecture-design)
 3. [Component Design](#3-component-design)
 4. [Data Flow Architecture](#4-data-flow-architecture)
-5. [Concurrency & Threading Model](#5-concurrency--threading-model)
-
 
 ---
 
@@ -18,7 +19,7 @@
 
 ### 1.1 Purpose
 
-The **Match Transfer System** is a scheduled batch export platform that streams match results (potential and perfect matches) from PostgreSQL, exports them to Parquet files, and publishes file references to Kafka topics. It supports multi-tenant processing with concurrent group execution, memory-efficient streaming, and comprehensive error handling.
+The **Match Transfer System** is a scheduled batch export component that streams match results (potential and perfect matches) from PostgreSQL, exports them to Parquet files, and publishes file references to messaging topics. It supports group-isolated batch processing with fault handling.
 
 ### 1.2 Key Capabilities
 
@@ -44,12 +45,12 @@ graph TB
     E --> E1[Parquet Format]
     E --> E2[Compression]
     E --> E3[Schema Management]
-    E --> E4[Semaphore Control]
+    E --> E4[Concurrency Control]
 
-    P --> P1[Kafka Topics]
+    P --> P1[Messaging Topics]
     P --> P2[File References]
-    P --> P3[DLQ Support]
-    P --> P4[Async Callbacks]
+    P --> P3[Error Handling]
+    P --> P4[Async Operations]
 
     R --> R1[Circuit Breaker]
     R --> R2[Retry Mechanisms]
@@ -58,53 +59,11 @@ graph TB
 
 ```
 
-### 1.3 System Metrics
-
-| Metric | Target | Current Capacity |
-|--------|--------|------------------|
-| **Throughput** | 100K matches/sec | 50K matches/sec |
-| **Export Time** | <5 min for 10M matches | ~3 min |
-| **Memory Footprint** | <2GB per group | ~1.5GB |
-| **Concurrent Groups** | 50 simultaneous | 20 tested |
-| **File Compression Ratio** | 10:1 (Parquet SNAPPY) | 8:1 |
-| **Kafka Publishing Rate** | 100 msg/sec | 80 msg/sec |
-
 ---
 
 ## 2. Architecture Design
 
-### 2.1 System Context Diagram
-
-```mermaid
-C4Context
-    title System Context - Match Transfer System
-    
-    Person(scheduler, "Cron Scheduler", "Triggers periodic exports")
-    Person(ops, "Operations Team", "Monitors export jobs")
-    
-    System_Boundary(transfer_boundary, "Match Transfer System") {
-        System(transfersys, "Match Transfer Engine", "Exports matches to Parquet files")
-    }
-    
-    SystemDb_Ext(postgres, "PostgreSQL", "Potential & Perfect matches storage")
-    System_Ext(kafka, "Kafka Cluster", "File reference events")
-    System_Ext(filesystem, "File System / MinIO", "Parquet file storage")
-    System_Ext(monitoring, "Prometheus + Grafana", "Observability")
-    System_Ext(downstream, "Downstream Consumers", "Process exported files")
-    
-    Rel(scheduler, transfersys, "Triggers daily", "Cron")
-    Rel(transfersys, postgres, "Streams matches", "JDBC ResultSet")
-    Rel(transfersys, filesystem, "Writes Parquet files", "File I/O")
-    Rel(transfersys, kafka, "Publishes file refs", "Kafka Producer")
-    Rel(transfersys, monitoring, "Exports metrics", "HTTP")
-    Rel(kafka, downstream, "Notifies", "Kafka Consumer")
-    Rel(downstream, filesystem, "Downloads files", "File I/O")
-    Rel(ops, monitoring, "Views dashboards", "HTTPS")
-    
-    UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")
-```
-
-### 2.2 Logical Architecture
+### 2.1 Logical Architecture
 
 ```mermaid
 graph TB
@@ -129,20 +88,19 @@ graph TB
         D1[ExportService<br/>Parquet Writer]
         D2[Schema Manager]
         D3[Field Extractors]
-        D4[Semaphore Control]
+        D4[Concurrency Control]
     end
     
     subgraph "Publishing Layer"
-        E1[ScheduleXProducer<br/>Kafka Publisher]
-        E2[DLQ Handler]
-        E3[Async Callbacks]
+        E1[ScheduleXProducer<br/>Messaging Publisher]
+        E2[Error Handler]
+        E3[Async Operations]
     end
     
     subgraph "Infrastructure"
         F1[(PostgreSQL<br/>Match Tables)]
         F2[(File System<br/>Parquet Files)]
-        F3[Kafka<br/>Topics]
-        F4[Metrics<br/>Prometheus]
+        F3[Messaging System<br/>Topics]
     end
     
     A1 --> B1
@@ -168,7 +126,6 @@ graph TB
     C2 --> F1
     D1 --> F2
     E1 --> F3
-    B2 --> F4
     
     style A1 fill:#4CAF50
     style B2 fill:#2196F3
@@ -178,7 +135,7 @@ graph TB
     style F1 fill:#607D8B
 ```
 
-### 2.3 Component Architecture
+### 2.2 Component Architecture
 
 ```mermaid
 C4Container
@@ -190,12 +147,12 @@ C4Container
         Container(potentialstream, "Potential Stream Service", "Java Component", "Streams potential matches")
         Container(perfectstream, "Perfect Stream Service", "Java Component", "Streams perfect matches")
         Container(exporter, "Export Service", "Java Service", "Writes Parquet files")
-        Container(producer, "Kafka Producer", "Spring Kafka", "Publishes file references")
+        Container(producer, "Messaging Producer", "Messaging Client", "Publishes file references")
     }
     
     ContainerDb(postgres, "PostgreSQL", "Relational DB", "potential_matches, perfect_matches")
     ContainerDb(filesystem, "File System", "Storage", "Parquet files")
-    Container(kafka, "Kafka", "Message Broker", "Export topics")
+    Container(messaging, "Messaging System", "Message Broker", "Export topics")
     
     Rel(scheduler, processor, "Triggers", "Async")
     Rel(processor, potentialstream, "Streams", "Consumer callback")
@@ -204,8 +161,8 @@ C4Container
     Rel(perfectstream, postgres, "SELECT streaming", "JDBC")
     Rel(processor, exporter, "Supplies stream", "Supplier<Stream>")
     Rel(exporter, filesystem, "Writes", "Parquet API")
-    Rel(processor, producer, "Publishes", "Kafka API")
-    Rel(producer, kafka, "Send", "Kafka Protocol")
+    Rel(processor, producer, "Publishes", "Messaging API")
+    Rel(producer, messaging, "Send", "Protocol")
     
     UpdateLayoutConfig($c4ShapeInRow="3")
 ```
@@ -223,9 +180,7 @@ classDiagram
         -MatchingGroupRepository matchingGroupRepository
         -DomainService domainService
         -Executor matchTransferGroupExecutor
-        -MeterRegistry meterRegistry
         +scheduledMatchesTransferJob() void
-        -monitorExecutorMetrics() void
     }
     
     class MatchTransferService {
@@ -239,16 +194,8 @@ classDiagram
         +boolean active
     }
     
-    class ThreadPoolTaskExecutor {
-        <<Spring Framework>>
-        +getActiveCount() int
-        +getQueueSize() int
-        +getThreadPoolExecutor() ThreadPoolExecutor
-    }
-    
     MatchesTransferScheduler --> MatchTransferService
     MatchesTransferScheduler --> Domain : processes
-    MatchesTransferScheduler ..> ThreadPoolTaskExecutor : monitors
 ```
 
 **Scheduler Flow**:
@@ -258,7 +205,6 @@ sequenceDiagram
     autonumber
     participant Cron as Spring Scheduler
     participant Sched as MatchesTransferScheduler
-    participant Metrics as MeterRegistry
     participant Executor as Group Executor
     participant Service as MatchTransferService
     
@@ -268,9 +214,6 @@ sequenceDiagram
     loop For each domain
         Sched->>Sched: Get Group IDs
         
-        Sched->>Metrics: Monitor executor state
-        Note over Sched,Metrics: Active threads, queue size
-        
         loop For each group
             Sched->>Executor: Submit async task
             
@@ -279,10 +222,8 @@ sequenceDiagram
                 
                 alt Processing succeeds
                     Service-->>Executor: Success
-                    Executor->>Metrics: Record success duration
                 else Processing fails
                     Service-->>Executor: Exception
-                    Executor->>Metrics: Increment failure counter
                 end
             end
         end
@@ -299,7 +240,6 @@ classDiagram
         -exportService
         -scheduleXProducer
         -matchTransferExecutor
-        -batchSize : int
         +processMatchTransfer(id, domain)
         -exportAndSend(id, domain, supplier)
         -exportAndSendSync(id, domain, supplier)
@@ -334,7 +274,7 @@ classDiagram
 
 ```mermaid
 flowchart TB
-    A[Start processMatchTransfer] --> B[Create BlockingQueue<br/>Capacity: 100]
+    A[Start processMatchTransfer] --> B[Create BlockingQueue]
     
     B --> C[Setup Atomic Counters<br/>recordCount, done]
     
@@ -344,8 +284,8 @@ flowchart TB
     D --> F[Launch Potential Stream<br/>CompletableFuture.runAsync]
     E --> G[Launch Perfect Stream<br/>CompletableFuture.runAsync]
     
-    F --> H[Stream from PostgreSQL<br/>Batch 100K records]
-    G --> I[Stream from PostgreSQL<br/>Batch 100K records]
+    F --> H[Stream from PostgreSQL<br/>Configurable batches]
+    G --> I[Stream from PostgreSQL<br/>Configurable batches]
     
     H --> J[Convert to MatchTransfer]
     I --> J
@@ -358,7 +298,7 @@ flowchart TB
     
     B --> N[Create matchStreamSupplier<br/>Stream.generate]
     
-    N --> O[queue.poll 300ms timeout]
+    N --> O[queue.poll with timeout]
     O --> P{done && empty?}
     P -->|No| Q[Yield batch]
     P -->|Yes| R[End stream]
@@ -369,7 +309,7 @@ flowchart TB
     R --> S
     
     S --> T[Write Parquet File]
-    T --> U[Publish to Kafka]
+    T --> U[Publish to Messaging System]
     
     style B fill:#4CAF50
     style K fill:#FF9800
@@ -394,7 +334,7 @@ flowchart TB
     subgraph "2. Concurrent Group Processing"
         B1[For each group<br/>Submit to Executor]
         B2[Circuit Breaker Check]
-        B3[Create BlockingQueue<br/>Capacity 100]
+        B3[Create BlockingQueue]
     end
     
     subgraph "3. Parallel Streaming"
@@ -404,8 +344,8 @@ flowchart TB
         C1 --> C3[SELECT * FROM potential_matches<br/>WHERE group_id=? AND domain_id=?]
         C2 --> C4[SELECT * FROM perfect_matches<br/>WHERE group_id=? AND domain_id=?]
         
-        C3 --> C5[ResultSet.next<br/>Batch 100K]
-        C4 --> C6[ResultSet.next<br/>Batch 100K]
+        C3 --> C5[ResultSet.next<br/>Configurable batches]
+        C4 --> C6[ResultSet.next<br/>Configurable batches]
         
         C5 --> C7[Convert to Entity]
         C6 --> C7
@@ -425,18 +365,18 @@ flowchart TB
         E1[ParquetWriter.write]
         E2[Schema Validation]
         E3[Field Extraction]
-        E4[Compression SNAPPY]
-        E5[File: /basedir/domainId/groupId/file.parquet]
+        E4[Compression]
+        E5[File path based on identifiers]
     end
     
-    subgraph "6. Kafka Publishing"
-        F1[Build MatchSuggestionsExchange]
-        F2[Topic: domain-matches-suggestions]
-        F3[Key: domainId-groupId]
-        F4[KafkaTemplate.send]
+    subgraph "6. Messaging Publishing"
+        F1[Build Message Payload]
+        F2[Topic based on identifiers]
+        F3[Key based on identifiers]
+        F4[Send Message]
         F5{Send Success?}
-        F5 -->|No| F6[Send to DLQ]
-        F5 -->|Yes| F7[Record Metrics]
+        F5 -->|No| F6[Error Handling]
+        F5 -->|Yes| F7[Completion]
     end
     
     A1 --> A2
@@ -483,24 +423,24 @@ sequenceDiagram
     participant Queue as BlockingQueue
     participant DB as PostgreSQL
     participant Export as ExportService
-    participant Kafka as ScheduleXProducer
+    participant Messaging as ScheduleXProducer
     
     Sched->>Proc: processMatchTransfer(groupId, domain)
     
-    Proc->>Proc: Create BlockingQueue (capacity 100)
+    Proc->>Proc: Create BlockingQueue
     Proc->>Proc: Setup atomic counters (recordCount, done)
     
     par Parallel Streaming
-        Proc->>PotentialSvc: streamAllMatches(groupId, domainId, consumer, 100K)
+        Proc->>PotentialSvc: streamAllMatches(groupId, domainId, consumer)
         PotentialSvc->>DB: SELECT * FROM potential_matches
         DB-->>PotentialSvc: ResultSet stream
         
         loop While ResultSet.next()
             PotentialSvc->>PotentialSvc: Create PotentialMatchEntity
             PotentialSvc->>PotentialSvc: Transform to MatchTransfer
-            PotentialSvc->>PotentialSvc: Accumulate to batch (100K)
+            PotentialSvc->>PotentialSvc: Accumulate to batch
             
-            alt Batch full
+            alt Batch ready
                 PotentialSvc->>Queue: put(batch) - blocks if full
                 Queue-->>PotentialSvc: Accepted
             end
@@ -508,16 +448,16 @@ sequenceDiagram
         
         PotentialSvc->>Queue: put(final batch)
     and
-        Proc->>PerfectSvc: streamAllMatches(groupId, domainId, consumer, 100K)
+        Proc->>PerfectSvc: streamAllMatches(groupId, domainId, consumer)
         PerfectSvc->>DB: SELECT * FROM perfect_matches
         DB-->>PerfectSvc: ResultSet stream
         
         loop While ResultSet.next()
             PerfectSvc->>PerfectSvc: Create PerfectMatchEntity
             PerfectSvc->>PerfectSvc: Transform to MatchTransfer
-            PerfectSvc->>PerfectSvc: Accumulate to batch (100K)
+            PerfectSvc->>PerfectSvc: Accumulate to batch
             
-            alt Batch full
+            alt Batch ready
                 PerfectSvc->>Queue: put(batch) - blocks if full
                 Queue-->>PerfectSvc: Accepted
             end
@@ -532,7 +472,7 @@ sequenceDiagram
     Proc->>Export: exportMatches(streamSupplier, groupId, domainId)
     
     loop Stream not exhausted
-        Export->>Queue: poll(300ms)
+        Export->>Queue: poll with timeout
         alt Batch available
             Queue-->>Export: List<MatchTransfer>
             Export->>Export: Convert to Parquet records
@@ -546,70 +486,11 @@ sequenceDiagram
     Export->>Export: Close Parquet file
     Export-->>Proc: ExportedFile
     
-    Proc->>Kafka: sendMessage(topic, key, payload)
-    Kafka->>Kafka: KafkaTemplate.send
+    Proc->>Messaging: sendMessage(topic, key, payload)
     
     alt Send success
-        Kafka-->>Proc: Success callback
+        Messaging-->>Proc: Success callback
     else Send failure
-        Kafka->>Kafka: sendToDlq(key, payload)
+        Messaging->>Messaging: Error handling
     end
-```
-
----
-
-## 5. Concurrency & Threading Model
-
-### 5.1 Thread Pool Architecture
-
-```mermaid
-graph TB
-    subgraph "Scheduler Thread"
-        ST[Spring @Scheduled Thread<br/>Single threaded]
-    end
-    
-    subgraph "Group Executor Pool"
-        GE[matchTransferGroupExecutor<br/>ThreadPoolTaskExecutor]
-        GE1[group-exec-1]
-        GE2[group-exec-2]
-        GEN[group-exec-N]
-        GE --> GE1
-        GE --> GE2
-        GE --> GEN
-    end
-    
-    subgraph "Batch Executor Pool"
-        BE[matchTransferExecutor<br/>ThreadPoolTaskExecutor]
-        BE1[batch-exec-1<br/>Potential Stream]
-        BE2[batch-exec-2<br/>Perfect Stream]
-        BE3[batch-exec-3<br/>Export]
-        BEN[batch-exec-N]
-        BE --> BE1
-        BE --> BE2
-        BE --> BE3
-        BE --> BEN
-    end
-    
-    subgraph "Kafka Callback Pool"
-        KE[kafkaCallbackExecutor<br/>FixedThreadPool]
-        KE1[kafka-cb-1]
-        KE2[kafka-cb-2]
-        KEN[kafka-cb-N]
-        KE --> KE1
-        KE --> KE2
-        KE --> KEN
-    end
-    
-    ST -->|Submit group tasks| GE
-    GE1 -->|Submit streaming| BE
-    GE2 -->|Submit streaming| BE
-    BE1 -->|DB streaming| DB[(PostgreSQL)]
-    BE2 -->|DB streaming| DB
-    BE3 -->|Write file| FS[(File System)]
-    BE3 -->|Send Kafka| KE
-    
-    style ST fill:#4CAF50
-    style GE fill:#2196F3
-    style BE fill:#FF9800
-    style KE fill:#9C27B
 ```
