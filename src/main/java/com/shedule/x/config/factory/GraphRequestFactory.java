@@ -11,6 +11,7 @@ import com.shedule.x.service.GraphRecords;
 import com.shedule.x.service.GroupConfigService;
 import com.shedule.x.utils.basic.DefaultValuesPopulator;
 import com.shedule.x.utils.media.csv.ValueSanitizer;
+import io.minio.MinioClient;
 import lombok.experimental.UtilityClass;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.multipart.MultipartFile;
@@ -158,8 +159,8 @@ public final class GraphRequestFactory {
         return new FileSystemMultipartFile(payload.getFilePath(), payload.getFileName(), payload.getContentType());
     }
 
-    public static RemoteMultipartFile fromRemotePayload(NodeExchange payload) {
-        return new RemoteMultipartFile(payload.getFilePath(), payload.getFileName(), payload.getContentType());
+    public static RemoteMultipartFile fromRemotePayload(NodeExchange payload, MinioClient minioClient) {
+        return new RemoteMultipartFile(payload.getFilePath(), payload.getFileName(), payload.getContentType(), minioClient);
     }
 
     public static PotentialMatchEntity convertToPotentialMatch(GraphRecords.PotentialMatch match) {
@@ -208,10 +209,10 @@ public final class GraphRequestFactory {
                 .build();
     }
 
-    public static MultipartFile resolvePayload(NodeExchange payload) {
+    public static MultipartFile resolvePayload(NodeExchange payload, MinioClient minioClient) {
         String path = payload.getFilePath();
         if (path == null) throw new IllegalArgumentException("File path cannot be null in payload");
-        if (path.startsWith("http://") || path.startsWith("https://")) return fromRemotePayload(payload);
+        if (path.startsWith("http://") || path.startsWith("https://")) return fromRemotePayload(payload, minioClient);
         return fromPayload(payload);
     }
 

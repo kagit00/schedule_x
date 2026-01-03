@@ -19,15 +19,12 @@ public class RemoteMultipartFile implements MultipartFile {
     private final String contentType;
     private final MinioClient minioClient;
 
-    public RemoteMultipartFile(String objectPath, String originalFileName, String contentType) {
+    public RemoteMultipartFile(String objectPath, String originalFileName, String contentType, MinioClient minioClient) {
         Objects.requireNonNull(objectPath, "Object path cannot be null");
         Objects.requireNonNull(originalFileName, "Original file name cannot be null");
         Objects.requireNonNull(contentType, "Content type cannot be null");
 
-        this.minioClient = MinioClient.builder()
-                .endpoint(System.getenv("MINIO_ENDPOINT"))
-                .credentials(System.getenv("MINIO_ACCESS_KEY"), System.getenv("MINIO_SECRET_KEY"))
-                .build();
+        this.minioClient = minioClient;;
 
         // Parse URL or relative path
         ParsedPath parsed = parsePath(objectPath);

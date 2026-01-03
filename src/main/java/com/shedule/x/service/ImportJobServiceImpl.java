@@ -5,6 +5,7 @@ import com.shedule.x.config.factory.GraphRequestFactory;
 import com.shedule.x.processors.NodesImportStatusUpdater;
 import com.shedule.x.utils.validation.FileValidationUtility;
 import com.shedule.x.validation.NodeImportValidator;
+import io.minio.MinioClient;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -20,6 +21,7 @@ import java.util.concurrent.CompletableFuture;
 public class ImportJobServiceImpl implements ImportJobService {
     private final NodesImportService nodesImportService;
     private final NodesImportStatusUpdater statusUpdater;
+    private final MinioClient minioClient;
 
     @Value("${import.batch-size:1000}")
     private int batchSize;
@@ -29,7 +31,7 @@ public class ImportJobServiceImpl implements ImportJobService {
         UUID jobId = statusUpdater.initiateNodesImport(payload);
 
         if (NodeImportValidator.isValidPayloadForCostBasedNodes(payload)) {
-            MultipartFile file = GraphRequestFactory.resolvePayload(payload);
+            MultipartFile file = GraphRequestFactory.resolvePayload(payload, minioClient);
             FileValidationUtility.validateInput(file, payload.getGroupId());
             log.info("Starting node import for groupId={}, file size={}", payload.getGroupId(), file.getSize());
             return nodesImportService.processNodesImport(jobId, file, payload);

@@ -4,34 +4,39 @@ services:
   postgres:
     image: postgres:16
     container_name: postgres
-    mem_limit: 6g
-    cpus: 4.0
+    deploy:
+      resources:
+        limits:
+          cpus: '3.5'
+          memory: 2g
+    # -----------------------------------------------------------
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: schedulex
     ports:
       - "5433:5432"
+    shm_size: 256mb
     command:
       - postgres
       - -c
-      - shared_buffers=1GB
+      - shared_buffers=384MB
       - -c
-      - work_mem=32MB
+      - effective_cache_size=1152MB
       - -c
-      - maintenance_work_mem=512MB
+      - work_mem=8MB
       - -c
-      - temp_buffers=64MB
+      - maintenance_work_mem=128MB
       - -c
-      - wal_buffers=64MB
+      - random_page_cost=1.1
       - -c
-      - checkpoint_completion_target=0.9
+      - effective_io_concurrency=200
       - -c
-      - max_wal_size=16GB
+      - wal_buffers=16MB
       - -c
-      - min_wal_size=2GB
+      - max_connections=50
       - -c
-      - max_connections=300
+      - synchronous_commit=off #should be avoided in prod
     volumes:
       - /home/kaustav/schedulex/schedule_x/pgdata:/var/lib/postgresql/data
     networks:
@@ -88,7 +93,10 @@ services:
   schedulex:
     build: .
     container_name: schedulex
-    mem_limit: 2g
+    deploy:
+      resources:
+        limits:
+          memory: 2g
     volumes:
       - /home/kaustav/schedulex/graph-store:/app/graph-store
       - ./logs:/logs
@@ -97,7 +105,7 @@ services:
       - redis
       - minio
     environment:
-      JAVA_OPTS: "-Xmx1200m -Xms512m --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED"
+      JAVA_OPTS: "-Xmx1020m -Xms512m --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED"
 
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/schedulex
       SPRING_DATASOURCE_USERNAME: postgres
