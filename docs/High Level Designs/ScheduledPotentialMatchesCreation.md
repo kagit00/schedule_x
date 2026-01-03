@@ -8,11 +8,9 @@
 1. [Executive Summary](#1-executive-summary)
 2. [System Architecture](#3-system-architecture)
 3. [Functional Architecture](#4-functional-architecture)
-4. [Non-Functional Requirements](#5-non-functional-requirements)
-5. [Technology Stack](#6-technology-stack)
-6. [Data Architecture](#7-data-architecture)
-7. [Integration Architecture](#8-integration-architecture)
-8. [Scalability & Performance](#11-scalability--performance)
+4. [Technology Stack](#6-technology-stack)
+5. [Data Architecture](#7-data-architecture)
+6. [Scalability & Performance](#11-scalability--performance)
 
 
 ---
@@ -28,44 +26,9 @@ The **Potential Matches Creation System** is an enterprise-grade graph processin
 
 ## 3. System Architecture
 
-### 3.1 Architectural Style
 
-**Primary Style:** Event-Driven Batch Processing  
-**Secondary Patterns:** Microkernel, Pipes-and-Filters
 
-```mermaid
-C4Context
-    title System Context Diagram - Potential Matches Creation System
-    
-    Person(bizuser, "Business Applications", "Consumes match results via API/DB")
-    Person(analyst, "Data Analysts", "Query match statistics")
-    Person(ops, "Operations Team", "Monitor system health")
-    
-    System_Boundary(pms_boundary, "Potential Matches System") {
-        System(pms, "Match Creation Engine", "Computes entity compatibility at scale")
-    }
-    
-    System_Ext(nodeingest, "Node Ingestion Service", "Adds entities to system")
-    System_Ext(scheduler, "Spring Scheduler", "Triggers daily processing")
-    SystemDb_Ext(postgres, "PostgreSQL Cluster", "Master data & results store")
-    SystemDb_Ext(lmdb, "LMDB Storage", "High-performance edge cache")
-    System_Ext(monitoring, "Observability Stack", "Prometheus + Grafana + ELK")
-    System_Ext(config, "Configuration Service", "Centralized config management")
-    
-    Rel(scheduler, pms, "Triggers", "Cron")
-    Rel(nodeingest, postgres, "Writes nodes", "JDBC")
-    Rel(pms, postgres, "Reads nodes, Writes matches", "JDBC")
-    Rel(pms, lmdb, "Reads/Writes edges", "Memory-mapped")
-    Rel(pms, monitoring, "Exports metrics & logs", "HTTP")
-    Rel(pms, config, "Fetches config", "HTTP")
-    Rel(bizuser, postgres, "Queries matches", "SQL")
-    Rel(analyst, postgres, "Analytics queries", "SQL")
-    Rel(ops, monitoring, "Views dashboards", "HTTPS")
-    
-    UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="2")
-```
-
-### 3.2 Logical Architecture
+### 3.1 Logical Architecture
 
 ```mermaid
 graph TB
@@ -125,39 +88,6 @@ graph TB
     style E1 fill:#607D8B
 ```
 
-### 3.3 Component Architecture
-
-```mermaid
-C4Container
-    title Container Diagram - Match Creation System
-    
-    Container_Boundary(app, "Application Container") {
-        Container(scheduler, "Scheduler", "Spring @Scheduled", "Triggers batch jobs")
-        Container(orchestrator, "Orchestration Service", "Java", "Manages workflow & concurrency")
-        Container(processor, "Processing Service", "Java", "Node fetching & batching")
-        Container(graphengine, "Graph Engine", "Java", "LSH, Metadata, Flat strategies")
-        Container(queuemgr, "Queue Manager", "Java", "Memory + Disk buffering")
-        Container(persistence, "Persistence Layer", "Java", "Dual storage writes")
-    }
-    
-    ContainerDb(postgres, "PostgreSQL", "Relational DB", "Nodes & Matches")
-    ContainerDb(lmdb, "LMDB", "KV Store", "Edge Cache")
-    Container(monitoring, "Monitoring", "Prometheus/Grafana", "Metrics & Dashboards")
-    
-    Rel(scheduler, orchestrator, "Triggers", "In-process")
-    Rel(orchestrator, processor, "Coordinates", "Async")
-    Rel(processor, postgres, "Reads nodes", "JDBC")
-    Rel(processor, graphengine, "Submits batches", "Async")
-    Rel(graphengine, queuemgr, "Enqueues matches", "In-process")
-    Rel(queuemgr, persistence, "Flushes batches", "Async")
-    Rel(persistence, postgres, "Writes matches", "COPY Protocol")
-    Rel(persistence, lmdb, "Writes edges", "Memory-mapped")
-    Rel(orchestrator, monitoring, "Exports metrics", "HTTP")
-    
-    UpdateLayoutConfig($c4ShapeInRow="3")
-```
-
----
 
 ## 4. Functional Architecture
 
@@ -315,135 +245,6 @@ flowchart TD
 
 ---
 
-## 5. Non-Functional Requirements
-
-### 5.1 Performance Requirements
-
-```mermaid
-graph LR
-    subgraph "Throughput"
-        T1[Nodes: 1K/sec]
-        T2[Edges: 100K/sec]
-        T3[Matches Saved: 50K/sec]
-    end
-    
-    subgraph "Latency"
-        L1[Node Fetch: <2s per 1K]
-        L2[Graph Build: <30s per 2K nodes]
-        L3[DB Save: <5s per 50K matches]
-    end
-    
-    subgraph "Scalability"
-        S1[Nodes: 50M total]
-        S2[Groups: 500 concurrent]
-        S3[Domains: 20 concurrent]
-    end
-    
-    subgraph "Efficiency"
-        E1[Memory: <16GB heap]
-        E2[CPU: <80% avg]
-        E3[Storage: <10TB total]
-    end
-    
-    style T1 fill:#C8E6C9
-    style L1 fill:#BBDEFB
-    style S1 fill:#FFF9C4
-    style E1 fill:#FFCCBC
-```
-
-**Performance SLAs**:
-
-| Metric | Target | Measurement | Tolerance |
-|--------|--------|-------------|-----------|
-| **Job Completion Time** | <15 min per group | End-to-end timer | ±20% |
-| **Node Processing Rate** | ≥1000 nodes/sec | Counter/duration | ±15% |
-| **Edge Computation Rate** | ≥100K edges/sec | Counter/duration | ±20% |
-| **Database Write Rate** | ≥50K inserts/sec | PostgreSQL COPY | ±25% |
-| **LMDB Read Latency** | <1ms p95 | Histogram | <5ms p99 |
-| **Memory Utilization** | <80% heap | JVM metrics | <90% max |
-| **CPU Utilization** | <70% avg | System metrics | <85% max |
-
-### 5.2 Reliability Requirements
-
-**Availability Target:** 99.5% monthly uptime (excluding planned maintenance)
-
-**Failure Tolerance:**
-
-```mermaid
-graph TB
-    A[Failure Scenario] --> B{Type}
-    
-    B -->|Transient| C[Automatic Retry<br/>Exponential Backoff]
-    B -->|Permanent| D[Skip & Log<br/>Continue with Next]
-    B -->|Systemic| E[Circuit Breaker<br/>Fast Fail]
-    
-    C --> F{Retry Count}
-    F -->|<3| C
-    F -->|≥3| G[Mark Failed<br/>Alert Operations]
-    
-    D --> H[Record Error Metrics]
-    E --> I[Fallback Mode]
-    
-    G --> J[Daily Error Report]
-    H --> J
-    I --> J
-    
-    style C fill:#C8E6C9
-    style D fill:#FFF9C4
-    style E fill:#FFCCBC
-    style G fill:#FFCDD2
-```
-
-**Data Integrity:**
-- ACID transactions for all database writes
-- Cursor-based resumability (no data loss on failure)
-- Idempotent processing (safe to rerun)
-- Advisory locks prevent concurrent updates
-
-### 5.3 Scalability Requirements
-
-```mermaid
-graph LR
-    subgraph "Current Scale"
-        C1[2.5K nodes/group<br/>50 groups<br/>2 domains]
-    end
-    
-    subgraph "12-Month Target"
-        T1[10K nodes/group<br/>200 groups<br/>5 domains]
-    end
-    
-    subgraph "24-Month Target"
-        T2[50K nodes/group<br/>500 groups<br/>20 domains]
-    end
-    
-    C1 -->|4x growth| T1
-    T1 -->|5x growth| T2
-    
-    style C1 fill:#E3F2FD
-    style T1 fill:#FFF9C4
-    style T2 fill:#C8E6C9
-```
-
-**Scalability Strategies**:
-
-| Dimension | Current Approach | Future Enhancement |
-|-----------|------------------|-------------------|
-| **Vertical** | 16GB RAM, 8 CPUs | 32GB RAM, 16 CPUs |
-| **Horizontal** | Active-Passive | Domain-based Partitioning |
-| **Storage** | Single PostgreSQL | Read replicas + Sharding |
-| **Compute** | Thread pools | Distributed workers (Kafka) |
-| **Caching** | LMDB local | Distributed cache (Redis) |
-
-### 5.4 Maintainability Requirements
-
-- **Code Coverage:** ≥80% unit tests, ≥60% integration tests
-- **Documentation:** Inline JavaDoc, README per module
-- **Logging:** Structured JSON logs, correlation IDs
-- **Observability:** Prometheus metrics, Grafana dashboards
-- **Deployment:** Blue-green deployments, rollback capability
-- **Configuration:** Externalized via Spring Cloud Config
-
----
 
 ## 6. Technology Stack
 

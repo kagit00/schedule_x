@@ -8,10 +8,8 @@
 1. [Executive Summary](#1-executive-summary)
 2. [System Architecture](#3-system-architecture)
 3. [Functional Architecture](#4-functional-architecture)
-4. [Non-Functional Requirements](#5-non-functional-requirements)
-5. [Technology Stack](#6-technology-stack)
-6. [Data Architecture](#7-data-architecture)
-7. [Integration Architecture](#8-integration-architecture)
+4. [Technology Stack](#6-technology-stack)
+5. [Data Architecture](#7-data-architecture)
 
 
 ---
@@ -25,44 +23,7 @@ The **Node Import System** is an event-driven, cloud-native data ingestion platf
 
 ## 3. System Architecture
 
-### 3.1 Architectural Style
-
-**Primary Style:** Event-Driven Modular Monolith
-**Secondary Patterns:** Pipes-and-Filters, Saga Pattern (for job lifecycle)
-
-```mermaid
-C4Context
-    title System Context Diagram - Node Import System
-    
-    Person(producer, "External Systems", "CRM, User Management, Partner APIs")
-    Person(analyst, "Data Analysts", "Query imported data for insights")
-    Person(ops, "Operations Team", "Monitor imports & troubleshoot")
-    
-    System_Boundary(import_boundary, "Node Import System") {
-        System(importsys, "Node Import Engine", "Processes entity imports via Kafka events")
-    }
-    
-    System_Ext(kafka, "Kafka Cluster", "Message broker for events")
-    System_Ext(minio, "MinIO/S3", "Object storage for CSV files")
-    SystemDb_Ext(postgres, "PostgreSQL Cluster", "Nodes, metadata, job status")
-    System_Ext(monitoring, "Observability Stack", "Prometheus + Grafana + ELK")
-    System_Ext(matching, "Matching Engine", "Consumes imported nodes")
-    
-    Rel(producer, kafka, "Publishes import requests", "Kafka")
-    Rel(producer, minio, "Uploads CSV files", "S3 API")
-    Rel(kafka, importsys, "Delivers messages", "Consumer Group")
-    Rel(importsys, minio, "Downloads files", "S3 API")
-    Rel(importsys, postgres, "Bulk inserts", "JDBC + COPY")
-    Rel(importsys, kafka, "Publishes job status", "Producer")
-    Rel(importsys, monitoring, "Exports metrics/logs", "HTTP")
-    Rel(postgres, matching, "Reads nodes", "SQL")
-    Rel(postgres, analyst, "Analytics queries", "SQL")
-    Rel(ops, monitoring, "Views dashboards", "HTTPS")
-    
-    UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")
-```
-
-### 3.2 Logical Architecture
+### 3.1 Logical Architecture
 
 ```mermaid
 graph TB
@@ -121,44 +82,6 @@ graph TB
     style C1 fill:#FF9800
     style D1 fill:#9C27B0
     style E1 fill:#607D8B
-```
-
-### 3.3 Component Architecture
-
-```mermaid
-C4Container
-    title Container Diagram - Node Import System
-
-    Container_Boundary(app, "Import Application") {
-        Container(consumer, "Kafka Consumer", "Spring Kafka", "Listens to import topics")
-        Container(processor, "Payload Processor", "Java Service", "Parses and validates JSON")
-        Container(jobsvc, "Import Job Service", "Java Service", "Orchestrates import lifecycle")
-        Container(filesvc, "File Import Service", "Java Service", "Processes CSV files")
-        Container(batchsvc, "Batch Import Service", "Java Service", "Processes reference lists")
-        Container(storage, "Storage Processor", "Java Component", "PostgreSQL bulk operations")
-        Container(status, "Status Updater", "Java Component", "Manages job state")
-        Container(metrics, "Metrics Exporter", "Java Component", "Exposes Prometheus metrics")
-    }
-
-    ContainerDb(postgres, "PostgreSQL", "Relational DB", "Nodes, metadata, jobs")
-    ContainerDb(minio, "MinIO", "Object Storage", "CSV files compressed")
-    Container(kafka, "Kafka", "Message Broker", "Import events and status")
-    Container(monitoring, "Monitoring", "Prometheus and Grafana", "Metrics and alerts")
-
-    Rel(kafka, consumer, "Delivers messages", "Consumer API")
-    Rel(consumer, processor, "Routes payloads", "Sync")
-    Rel(processor, jobsvc, "Initiates import", "Async")
-    Rel(jobsvc, filesvc, "File based import", "Async")
-    Rel(jobsvc, batchsvc, "Reference list import", "Async")
-    Rel(filesvc, minio, "Downloads file", "S3 API")
-    Rel(filesvc, storage, "Batches nodes", "Async")
-    Rel(batchsvc, storage, "Batches nodes", "Async")
-    Rel(storage, postgres, "COPY and upsert", "JDBC")
-    Rel(jobsvc, status, "Update job state", "Sync")
-    Rel(status, postgres, "Persist job", "JDBC")
-    Rel(status, kafka, "Publish status", "Producer API")
-    Rel(metrics, monitoring, "Scraped metrics", "HTTP")
-
 ```
 
 ---
@@ -296,141 +219,7 @@ flowchart LR
 
 ---
 
-## 5. Non-Functional Requirements
 
-### 5.1 Performance Requirements
-
-```mermaid
-graph LR
-    subgraph "Throughput Targets"
-        T1[Kafka Consumption:<br/>500 msg/sec]
-        T2[CSV Parsing:<br/>50K rows/sec]
-        T3[DB Write:<br/>50K inserts/sec]
-    end
-    
-    subgraph "Latency Targets"
-        L1[Message Processing:<br/><100ms]
-        L2[Batch Processing:<br/><2s per 1K nodes]
-        L3[Job Completion:<br/><5 min for 100K]
-    end
-    
-    subgraph "Scalability Targets"
-        S1[Concurrent Jobs:<br/>10 simultaneous]
-        S2[File Size:<br/>Up to 5GB]
-        S3[Daily Volume:<br/>5M nodes]
-    end
-    
-    subgraph "Efficiency Targets"
-        E1[Memory:<br/><4GB heap]
-        E2[CPU:<br/><70% avg]
-        E3[Network:<br/><100 Mbps]
-    end
-    
-    style T1 fill:#C8E6C9
-    style L1 fill:#BBDEFB
-    style S1 fill:#FFF9C4
-    style E1 fill:#FFCCBC
-```
-
-**Performance SLAs**:
-
-| Metric | Target | Measurement | Tolerance |
-|--------|--------|-------------|-----------|
-| **Import Throughput** | 10K nodes/sec | Timer metrics | ±20% |
-| **Job Completion Time** | <5 min for 100K nodes | End-to-end duration | ±30% |
-| **Kafka Lag** | <10 seconds | Consumer lag metric | <60 sec max |
-| **Success Rate** | >99% | Job status tracking | >95% min |
-| **Database Write Rate** | 50K inserts/sec | COPY protocol metrics | ±25% |
-| **Memory Footprint** | <4GB heap | JVM metrics | <6GB max |
-| **CPU Utilization** | <70% avg | System metrics | <85% max |
-
-### 5.2 Reliability Requirements
-
-**Availability Target:** 99.9% monthly uptime (excluding planned maintenance)
-
-**Failure Tolerance:**
-
-```mermaid
-graph TB
-    A[Failure Scenario] --> B{Category}
-    
-    B -->|Transient| C[Kafka Consumer Error]
-    B -->|Data| D[CSV Parse Error]
-    B -->|Infrastructure| E[Database Unavailable]
-    
-    C --> F[Retry 3x with backoff<br/>Exponential delay]
-    F --> G{Retry Success?}
-    G -->|Yes| H[Continue Processing]
-    G -->|No| I[Send to DLQ]
-    
-    D --> J[Skip row, Log error<br/>Add to failed list]
-    J --> K[Mark job as FAILED<br/>Publish partial success]
-    
-    E --> L[Retry 3x with backoff]
-    L --> M{DB Restored?}
-    M -->|Yes| N[Resume Processing]
-    M -->|No| O[Mark job FAILED<br/>Alert operations]
-    
-    I --> P[Manual Review & Replay]
-    K --> Q[Analyze & Reprocess]
-    O --> R[Incident Response]
-    
-    style C fill:#FFF9C4
-    style D fill:#FFF9C4
-    style E fill:#FFCDD2
-    style H fill:#C8E6C9
-```
-
-**Data Integrity:**
-- ACID transactions for all database writes
-- Idempotent operations (UPSERT via ON CONFLICT)
-- DLQ for failed messages (no data loss)
-- Job status tracking for audit trail
-
-### 5.3 Scalability Requirements
-
-```mermaid
-graph LR
-    subgraph "Current Scale"
-        C1[500K nodes/day<br/>2 Kafka partitions<br/>8 consumer threads]
-    end
-    
-    subgraph "12-Month Target"
-        T1[5M nodes/day<br/>8 Kafka partitions<br/>32 consumer threads]
-    end
-    
-    subgraph "24-Month Target"
-        T2[50M nodes/day<br/>32 Kafka partitions<br/>Multi-instance deployment]
-    end
-    
-    C1 -->|10x growth| T1
-    T1 -->|10x growth| T2
-    
-    style C1 fill:#E3F2FD
-    style T1 fill:#FFF9C4
-    style T2 fill:#C8E6C9
-```
-
-**Scalability Strategies**:
-
-| Dimension | Current Approach | 12-Month Plan | 24-Month Plan |
-|-----------|------------------|---------------|---------------|
-| **Vertical** | 8 cores, 16GB RAM | 16 cores, 32GB RAM | 32 cores, 64GB RAM |
-| **Horizontal** | Single instance | 3 instances (active-active) | Auto-scaling (5-20 instances) |
-| **Kafka** | 2 partitions | 8 partitions | 32 partitions |
-| **Database** | Single primary | Primary + 2 read replicas | Sharded by domain |
-| **Storage** | Single MinIO | MinIO cluster (3 nodes) | S3 multi-region |
-
-### 5.4 Maintainability Requirements
-
-- **Code Coverage:** ≥80% unit tests, ≥70% integration tests
-- **Documentation:** Inline JavaDoc, architectural diagrams, runbooks
-- **Logging:** Structured JSON logs with correlation IDs
-- **Observability:** Prometheus metrics, Grafana dashboards, distributed tracing (planned)
-- **Deployment:** Blue-green deployments, automated rollback
-- **Configuration:** Externalized via Spring Boot properties + Kubernetes ConfigMaps
-
----
 
 ## 6. Technology Stack
 
@@ -652,42 +441,8 @@ flowchart TB
     style F3 fill:#FFCCBC
 ```
 
-### 7.3 Data Volumes & Growth
 
-```mermaid
-graph LR
-    subgraph "Current State"
-        CS1[Nodes: 10M<br/>Metadata: 50M<br/>Jobs: 10K<br/>Storage: 50GB]
-    end
-    
-    subgraph "12 Months"
-        T1[Nodes: 100M<br/>Metadata: 500M<br/>Jobs: 100K<br/>Storage: 500GB]
-    end
-    
-    subgraph "24 Months"
-        T2[Nodes: 1B<br/>Metadata: 5B<br/>Jobs: 1M<br/>Storage: 5TB]
-    end
-    
-    CS1 -->|10x| T1
-    T1 -->|10x| T2
-    
-    style CS1 fill:#E3F2FD
-    style T1 fill:#FFF9C4
-    style T2 fill:#FFCCBC
-```
-
-**Storage Strategy**:
-
-| Data Type | Retention | Archival | Backup |
-|-----------|-----------|----------|--------|
-| **Nodes** | Indefinite | N/A | Daily full + WAL |
-| **Node Metadata** | Indefinite | N/A | Daily full + WAL |
-| **Import Jobs** | 90 days active | 2 years cold storage | Daily incremental |
-| **CSV Files (MinIO)** | 7 days | Delete after import | None |
-| **Kafka Topics** | 7 days | N/A | Not applicable |
-| **Metrics** | 30 days | N/A | Not applicable |
-
-### 7.4 Data Quality & Governance
+### 7.3 Data Quality & Governance
 
 ```mermaid
 graph TB
@@ -728,133 +483,7 @@ graph TB
 
 ---
 
-## 8. Integration Architecture
 
-### 8.1 Integration Landscape
-
-```mermaid
-graph TB
-    subgraph "Upstream Systems"
-        U1[CRM System<br/>Salesforce, HubSpot]
-        U2[User Management<br/>Auth0, Okta]
-        U3[Partner APIs<br/>External Integrations]
-        U4[Data Pipelines<br/>Airflow, Fivetran]
-    end
-    
-    subgraph "Node Import System"
-        NIS[Core Application]
-    end
-    
-    subgraph "Downstream Systems"
-        D1[Matching Engine<br/>Graph Processing]
-        D2[Analytics Platform<br/>Snowflake, BigQuery]
-        D3[Search Service<br/>Elasticsearch]
-        D4[Notification Service<br/>Email, SMS]
-    end
-    
-    subgraph "Infrastructure Services"
-        I1[Kafka Cluster<br/>Event Bus]
-        I2[MinIO/S3<br/>File Storage]
-        I3[PostgreSQL<br/>Data Store]
-        I4[Prometheus<br/>Metrics]
-    end
-    
-    U1 -->|Exports CSV| I2
-    U2 -->|Publishes Events| I1
-    U3 -->|Publishes Events| I1
-    U4 -->|Orchestrates| NIS
-    
-    I1 -->|Consumes| NIS
-    I2 -->|Downloads| NIS
-    
-    NIS -->|Writes| I3
-    NIS -->|Publishes Status| I1
-    NIS -->|Exports Metrics| I4
-    
-    I3 -->|Reads| D1
-    I3 -->|Syncs| D2
-    I1 -->|Consumes Status| D4
-    I3 -->|Indexes| D3
-    
-    style NIS fill:#4CAF50
-    style I1 fill:#2196F3
-    style I3 fill:#FF9800
-```
-
-### 8.2 Integration Patterns
-
-| Integration Point | Pattern | Protocol | Frequency | SLA |
-|-------------------|---------|----------|-----------|-----|
-| **Kafka → Import System** | Event-Driven Consumer | Kafka Protocol | Real-time | <10 sec lag |
-| **MinIO → Import System** | Pull (Download) | S3 API (HTTP) | On-demand | <30 sec download for 1GB |
-| **Import System → PostgreSQL** | Database Integration | JDBC + COPY | Batch (1000 rows) | <2 sec per batch |
-| **Import System → Kafka (Status)** | Event Publishing | Kafka Protocol | On job completion | <1 min |
-| **PostgreSQL → Analytics** | ETL | SQL Query | Hourly | <5 min sync |
-| **Import System → Prometheus** | Metrics Push | HTTP | Every 15 sec | <1 min visibility |
-
-### 8.3 API Contracts
-
-#### 8.3.1 Kafka Message Formats
-
-**NodeExchange (Import Request)**:
-```json
-{
-  "domainId": "uuid",
-  "groupId": "uuid-or-string",
-  "filePath": "http://minio:9000/bucket/file.csv.gz",
-  "fileName": "users_2024-12-12.csv.gz",
-  "contentType": "application/gzip",
-  "referenceIds": ["ref1", "ref2", "..."]  // Optional, for reference-based
-}
-```
-
-**NodesTransferJobExchange (Status Response)**:
-```json
-{
-  "jobId": "uuid",
-  "groupId": "uuid-or-string",
-  "domainId": "uuid",
-  "status": "COMPLETED | FAILED",
-  "processed": 98500,
-  "total": 100000,
-  "successList": ["ref1", "ref2", "..."],  
-  "failedList": ["ref99", "ref100"]
-}
-```
-
-#### 8.3.2 Database Schemas (Version 1.0)
-
-**Nodes Table**:
-```sql
-CREATE TABLE nodes (
-    id UUID PRIMARY KEY,
-    reference_id VARCHAR(255) NOT NULL,
-    group_id UUID NOT NULL,
-    type VARCHAR(50) NOT NULL,
-    domain_id UUID NOT NULL,
-    processed BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP,
-    UNIQUE(group_id, domain_id, reference_id)
-);
-```
-
-**Import Jobs Table**:
-```sql
-CREATE TABLE nodes_import_job (
-    id UUID PRIMARY KEY,
-    group_id UUID NOT NULL,
-    domain_id UUID NOT NULL,
-    status VARCHAR(20) NOT NULL,
-    total_nodes INT DEFAULT 0,
-    processed_nodes INT DEFAULT 0,
-    failure_reason TEXT,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL
-);
-```
-
----
 
 
 

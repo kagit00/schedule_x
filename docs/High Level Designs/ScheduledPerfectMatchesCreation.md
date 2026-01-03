@@ -7,10 +7,9 @@
 1. [Executive Summary](#1-executive-summary)
 2. [System Architecture](#3-system-architecture)
 3. [Functional Requirements](#4-functional-requirements)
-4. [Non-Functional Requirements](#5-non-functional-requirements)
-5. [Technology Stack](#6-technology-stack)
-6. [Component Architecture](#7-component-architecture)
-7. [Data Architecture](#8-data-architecture)
+4. [Technology Stack](#6-technology-stack)
+5. [Component Architecture](#7-component-architecture)
+6. [Data Architecture](#8-data-architecture)
 
 
 ---
@@ -64,35 +63,8 @@ flowchart TB
 
 ## 3. System Architecture
 
-### 3.1 Logical Architecture
 
-```mermaid
-C4Context
-    title System Context Diagram - Perfect Match Creation System
-
-    Person(ops, "Operations Team", "Monitors system health")
-    Person(bizuser, "Business Users", "Consumes match results")
-    
-    System(pms, "Perfect Match System", "Computes optimal entity matches")
-    
-    System_Ext(nodeingestion, "Node Ingestion Service", "Adds new entities")
-    System_Ext(edgecompute, "Edge Computation Service", "Calculates compatibility scores")
-    SystemDb_Ext(lmdb, "LMDB Storage", "High-performance edge cache")
-    SystemDb_Ext(postgres, "PostgreSQL", "Master data store")
-    System_Ext(monitoring, "Monitoring Stack", "Prometheus + Grafana")
-    
-    Rel(nodeingestion, pms, "Triggers processing")
-    Rel(edgecompute, lmdb, "Writes edges")
-    Rel(pms, lmdb, "Reads edges")
-    Rel(pms, postgres, "Writes/Reads matches")
-    Rel(pms, monitoring, "Exports metrics")
-    Rel(ops, monitoring, "Views dashboards")
-    Rel(bizuser, postgres, "Queries results")
-    
-    UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="2")
-```
-
-### 3.2 Architectural Layers
+### 3.1 Architectural Layers
 
 ```mermaid
 graph TB
@@ -150,7 +122,7 @@ graph TB
     style E1 fill:#F44336
 ```
 
-### 3.3 Component Interaction Overview
+### 3.2 Component Interaction Overview
 
 ```mermaid
 sequenceDiagram
@@ -271,120 +243,7 @@ sequenceDiagram
 
 ---
 
-## 5. Non-Functional Requirements
 
-### 5.1 Performance Requirements
-
-```mermaid
-graph LR
-    subgraph "Performance SLAs"
-        A[Throughput<br/>≥ 500K edges/min]
-        B[Latency<br/>≤ 15 min end-to-end]
-        C[Concurrency<br/>2 domains × 1 group]
-        D[Memory<br/>≤ 8GB heap]
-    end
-    
-    subgraph "Optimization Strategies"
-        E[Streaming<br/>No full graph load]
-        F[Batching<br/>25K edge chunks]
-        G[Async I/O<br/>Non-blocking saves]
-        H[Connection Pooling<br/>20 DB connections]
-    end
-    
-    A --> E
-    B --> F
-    C --> G
-    D --> H
-    
-    style A fill:#C8E6C9
-    style B fill:#C8E6C9
-    style C fill:#C8E6C9
-    style D fill:#C8E6C9
-```
-
-**Performance Targets**:
-
-| Metric | Target | Measurement Method |
-|--------|--------|-------------------|
-| Edge Processing Rate | 500K edges/min | Micrometer timer metrics |
-| End-to-End Latency | < 15 minutes | Job start to completion |
-| Database Write Rate | 30K inserts/sec | PostgreSQL COPY throughput |
-| CPU Utilization | < 80% average | JMX monitoring |
-| Memory Usage | < 8GB heap | JVM metrics |
-| Concurrent Groups | 2 domains simultaneously | Semaphore permits |
-
-### 5.2 Reliability Requirements
-
-**Availability**: 99.5% monthly uptime (excluding planned maintenance)
-
-**Failure Tolerance**:
-- Automatic retry up to 3 attempts with exponential backoff
-- Circuit breaker for cascading failure prevention
-- Graceful degradation (skip problematic groups)
-
-**Data Integrity**:
-- ACID transactions for database writes
-- Advisory locks to prevent concurrent updates
-- Idempotent processing (safe reruns)
-
-### 5.3 Scalability Requirements
-
-```mermaid
-graph TB
-    subgraph "Current Scale"
-        A1[2.5K nodes/group]
-        A2[577K edges/group]
-        A3[2 concurrent domains]
-        A4[1 concurrent group/domain]
-    end
-    
-    subgraph "Target Scale - 12 months"
-        B1[10K nodes/group]
-        B2[5M edges/group]
-        B3[5 concurrent domains]
-        B4[2 concurrent groups/domain]
-    end
-    
-    subgraph "Ultimate Scale - 24 months"
-        C1[50K nodes/group]
-        C2[100M edges/group]
-        C3[Distributed processing]
-        C4[Auto-scaling]
-    end
-    
-    A1 -.->|4x growth| B1
-    A2 -.->|8.7x growth| B2
-    A3 -.->|2.5x growth| B3
-    A4 -.->|2x growth| B4
-    
-    B1 -.->|5x growth| C1
-    B2 -.->|20x growth| C2
-    B3 -.->|Architecture change| C3
-    B4 -.->|Dynamic| C4
-    
-    style A1 fill:#E3F2FD
-    style B1 fill:#FFF9C4
-    style C1 fill:#FFCCBC
-```
-
-### 5.4 Security Requirements
-
-**Authentication & Authorization**:
-- Service-to-service authentication via mutual TLS (future)
-- Database access via connection pooling with encrypted credentials
-- Read-only access for monitoring endpoints
-
-**Data Protection**:
-- Data at rest: PostgreSQL transparent data encryption
-- Data in transit: TLS 1.3 for all network communications
-- Sensitive data masking in logs
-
-**Compliance**:
-- GDPR compliance for EU data processing
-- Data retention policies (90-day match history)
-- Audit logging for data access
-
----
 
 ## 6. Technology Stack
 
@@ -821,21 +680,6 @@ graph TB
     style OP fill:#E8F5E9
 
 ```
-
----
-
-## Appendix C: Decision Log
-
-| Decision | Rationale | Alternatives Considered | Date |
-|----------|-----------|------------------------|------|
-| Use LMDB for edge storage | Memory-mapped I/O provides 10x read performance vs PostgreSQL | Redis, RocksDB | 2024-01-15 |
-| Semaphore-based concurrency | Simple, JVM-native, predictable behavior | Distributed locks (Redis), Database locks | 2024-02-01 |
-| PostgreSQL COPY protocol | 10x faster than batch INSERT for bulk writes | JDBC batch inserts, External ETL tool | 2024-02-20 |
-| Spring Boot framework | Enterprise ecosystem, production-proven, team familiarity | Quarkus, Micronaut | 2024-01-05 |
-| Symmetric/Asymmetric strategies | Covers 90% of business use cases | ML-based scoring (future) | 2024-02-10 |
-| Scheduled batch vs real-time | Predictable resource usage, sufficient for SLA | Event-driven real-time (complexity) | 2024-01-20 |
-
-
 
 
 ---
