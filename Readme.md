@@ -758,7 +758,8 @@ This repository includes real execution logs from production-scale runs, illustr
 
 
 -----------------------------
-Name: Kaustav Manna
-Email: kaustavofficial09@gmail.com
-College: KIIT University
-Selected Skill Track: Java & API Development
+Candidate Details:
+  - Name: Kaustav Manna
+  - Email: kaustavofficial09@gmail.com
+  - College: KIIT University
+  - Selected Skill Track: Java & API Development
